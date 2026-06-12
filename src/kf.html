@@ -53,9 +53,29 @@
     color:var(--ink); padding:32px; line-height:2;
     font-size:13px; letter-spacing:.08em;
   }
+  .ctrl{
+    position:fixed; bottom:28px; right:34px;
+    display:flex; gap:10px;
+  }
+  .talk-btn{
+    appearance:none; -webkit-appearance:none;
+    background:transparent;
+    border:1px solid #C8C4BB;
+    color:var(--muted);
+    font-family:inherit;
+    font-size:10px; letter-spacing:.28em;
+    padding:10px 16px 10px 18px;
+    cursor:pointer;
+    transition:color .4s ease, border-color .4s ease;
+    user-select:none;
+  }
+  .talk-btn:hover,
+  .talk-btn.on{border-color:var(--ink); color:var(--ink);}
+
   @media (max-width:640px){
     .caption{top:20px;left:20px;}
     .hint{bottom:20px;left:20px;}
+    .ctrl{bottom:20px;right:20px;}
   }
 </style>
 </head>
@@ -68,6 +88,11 @@
 </div>
 
 <div class="hint" id="hint">HOVER TO SCATTER, WAIT TO REFORM</div>
+
+<div class="ctrl">
+  <button class="talk-btn" id="listenBtn" type="button">LISTEN: OFF</button>
+  <button class="talk-btn" id="talkBtn" type="button">VOICE: OFF</button>
+</div>
 <div class="loading" id="loading">LOADING VOXELS…</div>
 
 <div class="fallback" id="fallback">
@@ -117,6 +142,17 @@ const Z_DEPTH  = 0.40;             /* 最大厚みのZ奥行き */
 const FOCAL    = 3.0;              /* 透視の焦点距離 */
 const BG = [0.945, 0.941, 0.925];  /* #F1F0EC 紙 */
 
+/* ---- 口パク設定：画像上の口の位置 ---- */
+const MOUTH_U  = 0.473;  /* 口中心 横（0=左端, 1=右端） */
+const MOUTH_V  = 0.293;  /* 口中心 縦（0=上端, 1=下端、画像座標） */
+const MOUTH_RU = 0.06;  /* 横方向の影響半径 */
+const MOUTH_RV = 0.028;  /* 縦方向の影響半径 */
+/* homeUV.y = 1-v なので縦を反転して渡す */
+const MOUTH = [MOUTH_U, 1.0 - MOUTH_V, MOUTH_RU, MOUTH_RV];
+
+/* ---- 傾聴設定：体の回転軸（中央の縦軸） ---- */
+const BODY_PIVOT = [0, 0, Z_DEPTH * 0.5];
+
 function compile(type, src){
   const s = gl.createShader(type);
   gl.shaderSource(s, src); gl.compileShader(s);
@@ -152,6 +188,11 @@ uniform float uStep;
 uniform float uDamp;
 uniform vec2  uMouse;       /* world xy (z=0 平面) */
 uniform float uPuff;        /* 0..1 拡散エンベロープ（JSでゆっくり立上げ/減衰） */
+uniform sampler2D uHomeUV;  /* homeUV テクスチャ（口パク判定用） */
+uniform vec4  uMouth;       /* (cx, cy, rx, ry) homeUV 座標系 */
+uniform float uVoice;       /* 0..1 口パク強度 */
+uniform float uListen;      /* 0..1 傾聴（体の傾き）エンベロープ */
+uniform vec3  uBodyPivot;   /* 体の中心軸 world */
 layout(location=0) out vec4 oPos;
 layout(location=1) out vec4 oVel;
 
@@ -188,9 +229,25 @@ void main(){
   float seed = ps.w;
   vec3 vel = texelFetch(uVel, fc, 0).xyz;
   vec3 home = texelFetch(uHome, fc, 0).xyz;
+  vec4 huv = texelFetch(uHomeUV, fc, 0);
+
+  /* --- 傾聴：体全体を回し、右半身と上体を画面手前へ --- */
+  vec3 homeT = home;
+  if(uListen > 0.001){
+    vec3 q = home - uBodyPivot;
+    float a = -0.60 * uListen;                    /* yaw: 右半身が手前へ */
+    float c = cos(a), s = sin(a);
+    q = vec3(c*q.x + s*q.z, q.y, -s*q.x + c*q.z);
+    float b = -0.30 * uListen;                    /* pitch: 上体が手前へ */
+    float cb = cos(b), sb = sin(b);
+    q = vec3(q.x, cb*q.y - sb*q.z, sb*q.y + cb*q.z);
+    q.z -= 0.62 * uListen;                        /* 手前へ寄る＝ズーム */
+    q.y -= 0.09 * uListen;                        /* 顔が画面外に出ないよう少し下げる */
+    homeT = uBodyPivot + q;
+  }
 
   /* --- 弱いスプリング：ゆっくり還る --- */
-  vec3 force = (home - pos) * 2.4;
+  vec3 force = (homeT - pos) * 2.4;
 
   /* --- ふわっと拡散：
      方向性の衝撃ではなく、カーソル近傍に「ゆっくり立ち上がる
@@ -207,7 +264,7 @@ void main(){
   }
 
   /* --- 漂い：ホームから離れている間だけ、ごく遅い渦に乗る --- */
-  float disp = clamp(length(pos - home) * 2.5, 0.0, 1.0);
+  float disp = clamp(length(pos - homeT) * 2.5, 0.0, 1.0);
   if(disp > 0.01){
     vec2 sw = vec2(
       snoise(pos.xy * 1.6 + vec2(uTime * 0.10, seed * 7.0)),
@@ -218,6 +275,18 @@ void main(){
 
   /* --- 静止時のかすかな呼吸（Z方向に揺れて奥行きが息づく） --- */
   force.z += sin(uTime * 0.7 + seed * 6.2831) * 0.004;
+
+  /* --- 口パク：口元エリアの粒子を上下に振動させる --- */
+  if(uVoice > 0.001){
+    vec2 muv = (huv.xy - uMouth.xy) / uMouth.zw;
+    float mDist = length(muv);
+    if(mDist < 1.0){
+      float mWeight = 1.0 - mDist * mDist;
+      /* homeUV.y = 1-v: 大きい→上唇 / 小さい→下唇 */
+      float lipDir = sign(huv.y - uMouth.y);
+      force.y += lipDir * mWeight * uVoice * 0.18;
+    }
+  }
 
   vel = vel * uDamp + force * uDt;
   float sp = length(vel);
@@ -450,6 +519,23 @@ function init(gridImg){
   addEventListener('pointerdown', onMove);
 
   let puff = 0;          /* ゆっくり立ち上がり、ゆっくり消えるエンベロープ */
+  let voiceAmp = 0;      /* 口パク振幅エンベロープ */
+  let talking = false;   /* 口パク ON/OFF */
+  let listening = false; /* 傾聴 ON/OFF */
+  let listenAmp = 0;     /* 傾きエンベロープ */
+
+  const talkBtn = document.getElementById('talkBtn');
+  talkBtn.addEventListener('click', () => {
+    talking = !talking;
+    talkBtn.textContent = talking ? 'VOICE: ON' : 'VOICE: OFF';
+    talkBtn.classList.toggle('on', talking);
+  });
+  const listenBtn = document.getElementById('listenBtn');
+  listenBtn.addEventListener('click', () => {
+    listening = !listening;
+    listenBtn.textContent = listening ? 'LISTEN: ON' : 'LISTEN: OFF';
+    listenBtn.classList.toggle('on', listening);
+  });
 
   /* ---------- loop ---------- */
   document.getElementById('loading').classList.add('done');
@@ -472,6 +558,20 @@ function init(gridImg){
     puff += (target - puff) * rate;
     const puffOut = reduceMotion ? Math.min(puff, 0.35) : puff;
 
+    /* 口パク：話し声のような不規則リズム（5~7Hz）。talking 時のみ */
+    const vFreq = 5.5 + 1.5 * Math.sin(time * 1.1);
+    const voiceTarget = !talking ? 0
+      : Math.max(0, Math.sin(time * vFreq))
+      * (0.5 + 0.5 * Math.sin(time * 2.3 + 0.7))
+      * (0.6 + 0.4 * Math.sin(time * 0.7 + 1.4));
+    voiceAmp += (voiceTarget - voiceAmp) * (1 - Math.pow(0.12, dt));
+
+    /* 傾聴エンベロープ：素早く傾け、ゆっくり戻す */
+    const listenRate = listening
+      ? (1 - Math.pow(0.04, dt))
+      : (1 - Math.pow(0.35, dt));
+    listenAmp += ((listening ? 1 : 0) - listenAmp) * listenRate;
+
     if(puff > 0.1 && !interacted){
       interacted = true;
       setTimeout(() => hint.style.opacity = 0, 2500);
@@ -482,11 +582,12 @@ function init(gridImg){
     M.sx += (M.x - M.sx) * k;
     M.sy += (M.y - M.sy) * k;
 
-    /* カメラスウェイ：自律＋ポインタ視差 */
+    /* カメラスウェイ：自律＋ポインタ視差（傾聴中は視差オフ） */
+    const parallax = M.has ? 1 - listenAmp : 0;
     const swayYaw = (reduceMotion ? 0 : 0.085 * Math.sin(time * 0.33))
-                  + (M.has ? M.sx * fit * 0.05 : 0);
+                  + M.sx * fit * 0.15 * parallax;
     const swayPitch = (reduceMotion ? 0 : 0.05 * Math.sin(time * 0.41 + 1.7))
-                  + (M.has ? -M.sy * fit * 0.04 : 0);
+                  + -M.sy * fit * 0.08 * parallax;
 
     /* --- simulate (MRT) --- */
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
@@ -512,6 +613,13 @@ function init(gridImg){
     gl.uniform1f(simU.uDamp, Math.pow(0.93, step));
     gl.uniform2f(simU.uMouse, M.sx, M.sy);
     gl.uniform1f(simU.uPuff, M.has ? puffOut : 0);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, homeUVTex);
+    gl.uniform1i(simU.uHomeUV, 3);
+    gl.uniform4fv(simU.uMouth, MOUTH);
+    gl.uniform1f(simU.uVoice, voiceAmp);
+    gl.uniform1f(simU.uListen, listenAmp);
+    gl.uniform3fv(simU.uBodyPivot, BODY_PIVOT);
     gl.bindVertexArray(quadVAO);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
