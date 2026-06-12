@@ -667,11 +667,57 @@ void main(){ o = uColor; }`;
           let voiceAmp = 0; /* 口パク振幅エンベロープ */
           let talking = false; /* 口パク ON/OFF */
 
+          /* マイク：VOICE ON でブラウザのマイクを起動し、音量で口を動かす */
+          let micStream = null;
+          let audioCtx = null;
+          let analyser = null;
+          let micBuf = null;
+
+          async function startMic() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const src = audioCtx.createMediaStreamSource(stream);
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 512;
+            analyser.smoothingTimeConstant = 0;
+            src.connect(analyser);
+            micBuf = new Float32Array(analyser.fftSize);
+            micStream = stream;
+          }
+          function stopMic() {
+            if (micStream) {
+              micStream.getTracks().forEach((t) => t.stop());
+              micStream = null;
+            }
+            if (audioCtx) {
+              audioCtx.close();
+              audioCtx = null;
+            }
+            analyser = null;
+          }
+
           const talkBtn = document.getElementById("talkBtn");
-          talkBtn.addEventListener("click", () => {
-            talking = !talking;
-            talkBtn.textContent = talking ? "VOICE: ON" : "VOICE: OFF";
-            talkBtn.classList.toggle("on", talking);
+          talkBtn.addEventListener("click", async () => {
+            if (!talking) {
+              talkBtn.textContent = "VOICE: …";
+              try {
+                await startMic();
+              } catch (e) {
+                console.error("mic unavailable:", e);
+                talkBtn.textContent = "VOICE: NO MIC";
+                return;
+              }
+              talking = true;
+              talkBtn.textContent = "VOICE: ON";
+              talkBtn.classList.add("on");
+            } else {
+              stopMic();
+              talking = false;
+              talkBtn.textContent = "VOICE: OFF";
+              talkBtn.classList.remove("on");
+            }
           });
 
           let listening = false; /* 傾聴 ON/OFF */
@@ -705,14 +751,23 @@ void main(){ o = uColor; }`;
             puff += (target - puff) * rate;
             const puffOut = reduceMotion ? Math.min(puff, 0.35) : puff;
 
-            /* 口パク：話し声のような不規則リズム（5~7Hz）。talking 時のみ */
-            const vFreq = 5.5 + 1.5 * Math.sin(time * 1.1);
-            const voiceTarget = !talking
-              ? 0
-              : Math.max(0, Math.sin(time * vFreq)) *
-                (0.5 + 0.5 * Math.sin(time * 2.3 + 0.7)) *
-                (0.6 + 0.4 * Math.sin(time * 0.7 + 1.4));
-            voiceAmp += (voiceTarget - voiceAmp) * (1 - Math.pow(0.12, dt));
+            /* 口パク：マイク入力の音量（RMS）に追従。自動では動かない */
+            let voiceTarget = 0;
+            if (talking && analyser) {
+              analyser.getFloatTimeDomainData(micBuf);
+              let sum = 0;
+              for (let i = 0; i < micBuf.length; i++)
+                sum += micBuf[i] * micBuf[i];
+              const rms = Math.sqrt(sum / micBuf.length);
+              /* ノイズフロアを引いてゲインを掛ける */
+              voiceTarget = Math.min(1, Math.max(0, (rms - 0.015) * 9));
+            }
+            /* attack ~0.15s / release ~0.25s：声にきびきび追従 */
+            const vRate =
+              voiceTarget > voiceAmp
+                ? 1 - Math.pow(0.001, dt)
+                : 1 - Math.pow(0.012, dt);
+            voiceAmp += (voiceTarget - voiceAmp) * vRate;
 
             /* 傾聴エンベロープ：素早く傾け、ゆっくり戻す */
             const listenRate = listening
