@@ -121,10 +121,6 @@
     <video id="video" playsinline muted></video>
     <canvas id="src"></canvas>
 
-    <div class="caption" aria-hidden="true">
-      <div class="en">LIVE PORTRAIT IN FLUX</div>
-      <div class="jp">その場に、ほどけて還る。</div>
-    </div>
     <div class="hint" id="hint">MOVE TO INTERACT</div>
 
     <div class="panel" id="panel">
@@ -367,16 +363,25 @@ void main(){ o = uColor; }`;
           const vision = await FilesetResolver.forVisionTasks(
             "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm",
           );
-          segmenter = await ImageSegmenter.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath:
-                "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
-              delegate: "GPU",
-            },
+          const modelAssetPath =
+            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+          const segmenterOptions = (delegate) => ({
+            baseOptions: { modelAssetPath, delegate },
             runningMode: "VIDEO",
             outputCategoryMask: false,
             outputConfidenceMasks: true,
           });
+          try {
+            segmenter = await ImageSegmenter.createFromOptions(
+              vision,
+              segmenterOptions("GPU"),
+            );
+          } catch {
+            segmenter = await ImageSegmenter.createFromOptions(
+              vision,
+              segmenterOptions("CPU"),
+            );
+          }
 
           const stream = await navigator.mediaDevices.getUserMedia({
             video: { width: 640, height: 480, facingMode: "user" },
