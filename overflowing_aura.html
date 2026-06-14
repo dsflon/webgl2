@@ -300,7 +300,7 @@ void main() {
   cam.rgb = floor(cam.rgb * 5.0 + 0.5) / 5.0;
 
   /* White-blowout — same technique as fsManga: bright areas → white, deep shadows stay */
-  float dest = (cam.r + cam.g + cam.b) * 0.45 * 4.0;
+  float dest = (cam.r + cam.g + cam.b) * 0.30 * 4.0;
   cam.rgb = clamp(cam.rgb * dest, 0.0, 1.0);
 
   /* Stamp cel-shade lines */
@@ -393,8 +393,8 @@ void main() {
   vec3  col   = p.rgb;
   vec3  dye   = texture(u_dye, v_uv).rgb;
 
-  /* Inner body: normal colour injection */
-  dye = mix(dye, col, mask * 0.50);
+  /* Inner body: colour injection — boosted for denser aura body */
+  dye = mix(dye, col, mask * 0.65);
 
   /* Silhouette gradient magnitude — peaks at body edge */
   vec2  tx = u_personTexel;
@@ -430,8 +430,8 @@ out vec4 o;
 void main() {
   vec3  dye  = texture(u_dye, v_uv).rgb;
   float mag  = length(dye);
-  vec3  col  = clamp(dye * 2.8, 0.0, 1.0);
-  float alpha = smoothstep(0.010, 0.09, mag);
+  vec3  col  = clamp(dye * 1.5, 0.0, 1.0);
+  float alpha = smoothstep(0.008, 0.07, mag);
 
   /* Aura particle grid — strong vel shift makes particles streak with flow */
   vec2 vel = texture(u_vel, v_uv).xy;
@@ -441,7 +441,7 @@ void main() {
   float dot = smoothstep(3.2, 0.4, length(gp));
 
   /* Between particles: nearly transparent — pure additive glow at centres */
-  alpha *= mix(0.28, 1.0, dot);
+  alpha *= mix(0.40, 1.0, dot);
   o = vec4(col, alpha);
 }`;
 
@@ -904,7 +904,7 @@ void main() {
           bindFBOTex(1, dye.read);
           gl.uniform1i(progAdvect.u.u_src, 1);
           gl.uniform1f(progAdvect.u.u_dt, dt);
-          gl.uniform1f(progAdvect.u.u_dissipation, 0.978);
+          gl.uniform1f(progAdvect.u.u_dissipation, 0.983);
           drawQuad();
           dye.swap();
 
