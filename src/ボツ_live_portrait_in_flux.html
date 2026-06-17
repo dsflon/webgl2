@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LIVE PORTRAIT IN FLUX</title>
+<style>
+  :root{
+    --fg:#E8E9EC;
+    --muted:#7E8290;
+    --bg:#0C0D10;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);}
+  body{
+    font-family:"Helvetica Neue", Helvetica, Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  canvas#gl{display:block;width:100%;height:100%;cursor:crosshair;}
+  video, canvas#src{ display:none; }
+
+  .caption{
+    position:fixed; top:30px; left:34px;
+    user-select:none; pointer-events:none;
+  }
+  .caption .en{ font-size:12px; font-weight:700; letter-spacing:.38em; color:var(--fg); }
+  .caption .jp{ margin-top:6px; font-size:10px; letter-spacing:.30em; color:var(--muted); }
+
+  .hint{
+    position:fixed; bottom:28px; left:34px;
+    font-size:10px; letter-spacing:.28em; color:#4A4E58;
+    user-select:none; pointer-events:none; transition:opacity 1.2s ease;
+  }
+
+  .panel{
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:var(--bg); z-index:10; transition:opacity .6s ease;
+  }
+  .panel.hide{ opacity:0; pointer-events:none; }
+  .panel .box{ text-align:center; color:var(--fg); }
+  .panel .box p{ color:var(--muted); font-size:11px; letter-spacing:.22em; margin-bottom:22px; line-height:2; }
+  .panel button{
+    font:inherit; font-size:12px; letter-spacing:.2em; color:var(--bg);
+    background:var(--fg); border:0; padding:14px 30px; border-radius:999px; cursor:pointer;
+  }
+  .err{ color:#C98; font-size:11px; letter-spacing:.1em; margin-top:18px; min-height:1em; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<video id="video" playsinline muted></video>
+<canvas id="src"></canvas>
+
+<div class="caption" aria-hidden="true">
+  <div class="en">LIVE PORTRAIT IN FLUX</div>
+  <div class="jp">動けば、ほどける。</div>
+</div>
+<div class="hint" id="hint">MOVE — YOUR EDGES WILL SPILL</div>
+
+<div class="panel" id="panel">
+  <div class="box">
+    <p>カメラ映像をリアルタイムでドット粒子に変換します<br>映像はこの端末内だけで処理され、どこにも送信されません</p>
+    <button id="startBtn">カメラを起動</button>
+    <div class="err" id="err"></div>
+  </div>
+</div>
+
+<script type="module">
+import { ImageSegmenter, FilesetResolver }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+
+const TEX = 256;                 // 256^2 = 65,536 particles
+const NUM = TEX * TEX;
+const GRID_W = 150;              // ドット格子の横セル数（縦は映像比から算出）
+const BG = [0.047, 0.051, 0.063];
+
+const glc = document.getElementById('gl');
+const gl = glc.getContext('webgl2', { antialias:false, alpha:false, preserveDrawingBuffer:true });
+const errEl = document.getElementById('err');
+function fatal(msg){ errEl.textContent = msg; }
+if(!gl){ fatal('WebGL2 非対応のブラウザです'); }
+if(gl && !gl.getExtension('EXT_color_buffer_float')){ fatal('float テクスチャ非対応です'); }
+
+const video = document.getElementById('video');
+const srcCanvas = document.getElementById('src');
+const srcCtx = srcCanvas.getContext('2d', { willReadFrequently:true });
+
+let segmenter = null;
+let GRID_H = 112;                 // 後で映像比から再設定
+
+/* ---------- shader helpers ---------- */
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(s)); throw new Error('shader'); }
+  return s;
+}
+function program(vs, fs, tf){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  if(tf) gl.transformFeedbackVaryings(p, tf, gl.SEPARATE_ATTRIBS);
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(p)); throw new Error('link'); }
+  return p;
+}
+
+const QUAD_VS = `#version 300 es
+layout(location=0) in vec2 a;
+void main(){ gl_Position = vec4(a, 0.0, 1.0); }`;
+
+/* ---- simulation ----
+   各粒子はグリッド上の担当セル(home)を持つ。毎フレーム、人物テクスチャの
+   そのセルを参照：
+   - 人物セルなら home に吸着（薄レリーフのZ）
+   - 背景セルなら "解放" 状態になり、重力＋風で落下、画面外でセルへリサイクル復帰
+   状態 st: xyz=pos, w=mode( <0.5 吸着 / >=0.5 落下中 )
+*/
+const SIM_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uState;   /* xyz=pos, w=mode */
+uniform sampler2D uVel;     /* xyz=vel, w=life */
+uniform sampler2D uHome;    /* xy=home cellpos(world), z=seed, w=unused */
+uniform sampler2D uPerson;  /* RGB=映像色, A=マスク(人=1) */
+uniform float uTime;
+uniform float uDt;
+uniform float uStep;
+uniform vec2  uHalf;        /* world 半サイズ x,y */
+uniform vec2  uMouse;
+uniform float uMouseOn;
+uniform float uCellW;
+layout(location=0) out vec4 oState;
+layout(location=1) out vec4 oVel;
+
+vec3 mod289(vec3 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec2 mod289(vec2 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec3 permute(vec3 x){ return mod289(((x*34.0)+1.0)*x); }
+float snoise(vec2 v){
+  const vec4 C = vec4(0.211324865405187,0.366025403784439,-0.577350269189626,0.024390243902439);
+  vec2 i=floor(v+dot(v,C.yy)); vec2 x0=v-i+dot(i,C.xx);
+  vec2 i1=(x0.x>x0.y)?vec2(1.0,0.0):vec2(0.0,1.0);
+  vec4 x12=x0.xyxy+C.xxzz; x12.xy-=i1; i=mod289(i);
+  vec3 p=permute(permute(i.y+vec3(0.0,i1.y,1.0))+i.x+vec3(0.0,i1.x,1.0));
+  vec3 m=max(0.5-vec3(dot(x0,x0),dot(x12.xy,x12.xy),dot(x12.zw,x12.zw)),0.0);
+  m=m*m; m=m*m;
+  vec3 x=2.0*fract(p*C.www)-1.0; vec3 h=abs(x)-0.5; vec3 ox=floor(x+0.5); vec3 a0=x-ox;
+  m*=1.79284291400159-0.85373472095314*(a0*a0+h*h);
+  vec3 g; g.x=a0.x*x0.x+h.x*x0.y; g.yz=a0.yz*x12.xz+h.yz*x12.yw;
+  return 130.0*dot(m,g);
+}
+float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+
+void main(){
+  ivec2 fc = ivec2(gl_FragCoord.xy);
+  vec4 st = texelFetch(uState, fc, 0);
+  vec4 vl = texelFetch(uVel, fc, 0);
+  vec4 hm = texelFetch(uHome, fc, 0);
+  vec3 pos = st.xyz;
+  float mode = st.w;
+  vec3 vel = vl.xyz;
+  float life = vl.w;
+  vec2 home = hm.xy;
+  float seed = hm.z;
+
+  /* home セルの uv（中心）→ 人物マスク参照 */
+  vec2 uv = vec2(home.x / (2.0*uHalf.x) + 0.5, home.y / (2.0*uHalf.y) + 0.5);
+  float mask = texture(uPerson, vec2(uv.x, 1.0 - uv.y)).a;
+  bool person = mask > 0.5;
+
+  vec3 force = vec3(0.0);
+
+  if(mode < 0.5){
+    /* ===== 吸着モード ===== */
+    if(person){
+      /* home（薄レリーフのZはマスク強度で軽く） */
+      vec3 target = vec3(home, (mask - 0.5) * uCellW * 1.2);
+      force += (target - pos) * 26.0;
+      /* マウス/動きで触れた所はふわっと押す（解放のトリガにもなる） */
+      if(uMouseOn > 0.5){
+        vec3 dm = pos - vec3(uMouse, 0.0);
+        float fall = exp(-dot(dm,dm) * 9.0);
+        force += dm * inversesqrt(dot(dm,dm)+1e-4) * fall * 6.0;
+      }
+      vel = vel * pow(0.78, uStep) + force * uDt;
+    } else {
+      /* 人物が外れた → 解放（こぼれる） */
+      mode = 1.0;
+      life = 1.0;
+      /* 初速：少し横に散って落ちる */
+      vel = vec3((hash(home+seed)-0.5)*0.5, 0.05 + hash(home.yx+seed)*0.2, (hash(home+seed*3.0)-0.5)*0.3);
+    }
+  }
+
+  if(mode >= 0.5){
+    /* ===== 落下モード ===== */
+    force.y -= 0.9;                                   /* 重力 */
+    vec2 w = vec2(snoise(pos.xy*1.2 + uTime*0.3), snoise(pos.yx*1.2 - uTime*0.25));
+    force.xy += w * 0.5;                              /* 風 */
+    vel += force * uDt;
+    life -= uDt * 0.5;
+
+    /* 画面下に抜けた or 寿命切れ → リサイクル：
+       いま人物がいるなら home セルへ復帰、いなければ待機（上方で待つ） */
+    if(pos.y < -uHalf.y*1.15 || life <= 0.0){
+      if(person){
+        pos = vec3(home, 0.0);
+        vel = vec3(0.0);
+        mode = 0.0;
+        life = 1.0;
+        oState = vec4(pos, mode);
+        oVel = vec4(vel, life);
+        return;
+      } else {
+        /* 人物がいない：画面上の外側で停止待機（描画は隠れる） */
+        pos = vec3(home.x, uHalf.y*1.3, 0.0);
+        vel = vec3(0.0);
+        life = 0.001;             /* 待機フラグ的に小さく保持、modeは落下のまま */
+      }
+    }
+  }
+
+  float sp = length(vel);
+  float cap = (mode < 0.5 ? 0.05 : 0.08) * uStep;
+  vel *= min(sp, cap) / max(sp, 1e-5);
+  pos += vel;
+
+  oState = vec4(pos, mode);
+  oVel = vec4(vel, life);
+}`;
+
+const PTS_VS = `#version 300 es
+precision highp float;
+uniform sampler2D uState;
+uniform sampler2D uHome;
+uniform sampler2D uPerson;
+uniform float uAspect;
+uniform float uFit;
+uniform float uPxPerWorld;
+uniform float uCellW;
+uniform float uFocal;
+out vec4 vColor;
+out float vSkip;
+
+void main(){
+  int id = gl_VertexID;
+  ivec2 fc = ivec2(id % ${TEX}, id / ${TEX});
+  vec4 st = texelFetch(uState, fc, 0);
+  vec4 hm = texelFetch(uHome, fc, 0);
+  vec3 pos = st.xyz;
+  float mode = st.w;
+  vec2 home = hm.xy;
+
+  vec2 uv = vec2(home.x/(2.0*${'${HALFX}'}) + 0.5, home.y/(2.0*${'${HALFY}'}) + 0.5); // placeholder
+  vec4 ptex = texture(uPerson, vec2(uv.x, 1.0 - uv.y));
+  float mask = ptex.a;
+
+  /* 吸着中で人物でない（＝待機）粒子は描かない */
+  vSkip = (mode < 0.5 && mask <= 0.5) ? 1.0 : 0.0;
+
+  /* 色：最後に拾った映像色を保持（吸着時に更新、落下中はそのまま近似） */
+  vec3 col = ptex.rgb;
+
+  /* 透視投影（薄レリーフ） */
+  float w = uFocal + pos.z;
+  float s = uFocal / w;
+  vec2 clip = vec2(pos.x * s * uFit / uAspect, pos.y * s * uFit);
+  gl_Position = vec4(clip, 0.0, 1.0);
+
+  /* 落下中は少し暗く＆寿命でフェード */
+  float shade = mode < 0.5 ? 1.0 : 0.78;
+  vColor = vec4(col * shade, 1.0);
+
+  gl_PointSize = max(uCellW * uPxPerWorld * s * uFit * 1.05, 1.0);
+}`;
+
+const PTS_FS = `#version 300 es
+precision highp float;
+in vec4 vColor;
+in float vSkip;
+out vec4 o;
+void main(){
+  if(vSkip > 0.5) discard;
+  vec2 d = abs(gl_PointCoord - 0.5);
+  float m = 1.0 - smoothstep(0.42, 0.5, max(d.x, d.y));
+  if(m < 0.05) discard;
+  o = vec4(vColor.rgb, m);
+}`;
+
+const FADE_FS = `#version 300 es
+precision highp float;
+uniform vec4 uColor;
+out vec4 o;
+void main(){ o = uColor; }`;
+
+let started = false;
+document.getElementById('startBtn').addEventListener('click', start);
+
+async function start(){
+  if(started) return; started = true;
+  try{
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm");
+    segmenter = await ImageSegmenter.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO",
+      outputCategoryMask: false,
+      outputConfidenceMasks: true
+    });
+
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width:640, height:480, facingMode:"user" }, audio:false });
+    video.srcObject = stream;
+    await video.play();
+
+    document.getElementById('panel').classList.add('hide');
+    setTimeout(() => document.getElementById('hint').style.opacity = 0, 4000);
+    boot();
+  }catch(e){
+    console.error(e);
+    fatal('起動に失敗しました：' + (e && e.message ? e.message : e));
+    started = false;
+  }
+}
+
+function boot(){
+  /* 映像比からグリッド高さを確定 */
+  const vAspect = video.videoWidth / video.videoHeight || (640/480);
+  GRID_H = Math.round(GRID_W / vAspect);
+  srcCanvas.width = GRID_W; srcCanvas.height = GRID_H;
+
+  const HALFY = 0.9;
+  const HALFX = HALFY * vAspect;
+  const cellW = (2 * HALFX) / GRID_W;
+  const FOCAL = 3.0;
+
+  /* PTS_VS のプレースホルダを実値に置換してコンパイル */
+  const ptsVsSrc = PTS_VS
+    .replace("${HALFX}", HALFX.toFixed(5))
+    .replace("${HALFY}", HALFY.toFixed(5));
+
+  const simProg  = program(QUAD_VS, SIM_FS);
+  const ptsProg  = program(ptsVsSrc, PTS_FS);
+  const fadeProg = program(QUAD_VS, FADE_FS);
+  const U = p => { const u={}; const n=gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);
+    for(let i=0;i<n;i++){ const info=gl.getActiveUniform(p,i); u[info.name]=gl.getUniformLocation(p,info.name);} return u; };
+  const simU=U(simProg), ptsU=U(ptsProg), fadeU=U(fadeProg);
+
+  /* ---- ホーム格子（各セルに1粒子。余りは複製） ---- */
+  const home = new Float32Array(NUM*4);
+  let n=0;
+  for(let gy=0; gy<GRID_H && n<NUM; gy++){
+    for(let gx=0; gx<GRID_W && n<NUM; gx++){
+      const u=(gx+0.5)/GRID_W, v=(gy+0.5)/GRID_H;
+      home[n*4+0]=(u-0.5)*2*HALFX;
+      home[n*4+1]=(v-0.5)*2*HALFY;
+      home[n*4+2]=Math.random();
+      home[n*4+3]=0;
+      n++;
+    }
+  }
+  for(; n<NUM; n++){ const s=(Math.random()*(GRID_W*GRID_H))|0; home[n*4]=home[s*4]; home[n*4+1]=home[s*4+1]; home[n*4+2]=Math.random(); }
+
+  function makeTex(data){
+    const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,TEX,TEX,0,gl.RGBA,gl.FLOAT,data);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  const homeTex = makeTex(home);
+
+  const st0 = new Float32Array(NUM*4);
+  for(let i=0;i<NUM;i++){ st0[i*4]=home[i*4]; st0[i*4+1]=home[i*4+1]; st0[i*4+2]=0; st0[i*4+3]=0; }
+  let stateA=makeTex(st0), stateB=makeTex(null);
+  let velA=makeTex(new Float32Array(NUM*4)), velB=makeTex(null);
+  const fbo=gl.createFramebuffer();
+
+  /* 人物テクスチャ（GRID解像度。RGB=映像, A=マスク） */
+  const personTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, personTex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,GRID_W,GRID_H,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+
+  const quadVAO=gl.createVertexArray(); gl.bindVertexArray(quadVAO);
+  const qb=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,qb);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+  gl.bindVertexArray(null);
+  const emptyVAO=gl.createVertexArray();
+
+  /* マスク時間平滑化用バッファ */
+  const personPix = new Uint8Array(GRID_W*GRID_H*4);
+  const maskSmooth = new Float32Array(GRID_W*GRID_H);
+
+  let W=0,H=0,aspect=1,fit=1,pxPerWorld=1;
+  function resize(){
+    const w=Math.floor(innerWidth*Math.min(devicePixelRatio||1,2));
+    const h=Math.floor(innerHeight*Math.min(devicePixelRatio||1,2));
+    W=w;H=h;glc.width=W;glc.height=H;aspect=W/H;
+    fit=Math.min(1.0/1.05, aspect/(HALFX*1.25));
+    pxPerWorld=H/2;
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,W,H);
+    gl.clearColor(BG[0],BG[1],BG[2],1.0); gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  addEventListener('resize',resize); resize();
+
+  /* マウス（補助インタラクション） */
+  const M={x:0,y:0,on:0,idle:null};
+  addEventListener('pointermove',e=>{
+    const cx=(e.clientX/innerWidth)*2-1, cy=-((e.clientY/innerHeight)*2-1);
+    M.x=cx*aspect/fit; M.y=cy/fit; M.on=1;
+    clearTimeout(M.idle); M.idle=setTimeout(()=>M.on=0,200);
+  });
+
+  let t0=performance.now(), lastNow=t0, lastVideoT=-1;
+
+  function updatePerson(now){
+    if(video.readyState < 2) return;
+    /* セグメンテーション（VIDEOモード） */
+    let mask=null;
+    try{
+      const res = segmenter.segmentForVideo(video, now);
+      if(res && res.confidenceMasks && res.confidenceMasks[0]){
+        mask = res.confidenceMasks[0].getAsFloat32Array();  // video解像度
+        res.close && res.close();
+      }
+    }catch(e){ /* 一部フレームで失敗しても継続 */ }
+
+    /* 映像をGRID解像度に縮小して色取得（鏡像反転） */
+    srcCtx.save();
+    srcCtx.scale(-1,1); srcCtx.drawImage(video, -GRID_W, 0, GRID_W, GRID_H);
+    srcCtx.restore();
+    const img = srcCtx.getImageData(0,0,GRID_W,GRID_H).data;
+
+    /* マスクをGRIDへダウンサンプル（最近傍）＋時間平滑化＋鏡像 */
+    const mw = video.videoWidth, mh = video.videoHeight;
+    for(let gy=0; gy<GRID_H; gy++){
+      for(let gx=0; gx<GRID_W; gx++){
+        let mv = 0.0;
+        if(mask){
+          const sx = Math.min(mw-1, ((GRID_W-1-gx)+0.5)/GRID_W*mw |0);  // 横反転
+          const sy = Math.min(mh-1, (gy+0.5)/GRID_H*mh |0);
+          mv = mask[sy*mw+sx];
+        }
+        const gi = gy*GRID_W+gx;
+        maskSmooth[gi] += (mv - maskSmooth[gi]) * 0.35;   // テンポラル平滑化
+        const di=gi*4, si=gi*4;
+        personPix[di]   = img[si];
+        personPix[di+1] = img[si+1];
+        personPix[di+2] = img[si+2];
+        personPix[di+3] = maskSmooth[gi] > 0.45 ? 255 : Math.floor(maskSmooth[gi]*255);
+      }
+    }
+    gl.bindTexture(gl.TEXTURE_2D, personTex);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,GRID_W,GRID_H,gl.RGBA,gl.UNSIGNED_BYTE,personPix);
+  }
+
+  function frame(now){
+    const time=(now-t0)/1000;
+    const rawDt=Math.min((now-lastNow)/1000,0.1); lastNow=now;
+    const dt=Math.max(rawDt,1/240); const step=dt*60;
+
+    if(video.currentTime !== lastVideoT){ updatePerson(now); lastVideoT=video.currentTime; }
+
+    /* simulate */
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,stateB,0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT1,gl.TEXTURE_2D,velB,0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0,gl.COLOR_ATTACHMENT1]);
+    gl.viewport(0,0,TEX,TEX); gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(simProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,stateA); gl.uniform1i(simU.uState,0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,velA); gl.uniform1i(simU.uVel,1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,homeTex); gl.uniform1i(simU.uHome,2);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D,personTex); gl.uniform1i(simU.uPerson,3);
+    gl.uniform1f(simU.uTime,time); gl.uniform1f(simU.uDt,dt); gl.uniform1f(simU.uStep,step);
+    gl.uniform2f(simU.uHalf,HALFX,HALFY);
+    gl.uniform2f(simU.uMouse,M.x,M.y); gl.uniform1f(simU.uMouseOn,M.on);
+    gl.uniform1f(simU.uCellW,cellW);
+    gl.bindVertexArray(quadVAO); gl.drawArrays(gl.TRIANGLES,0,3);
+
+    let ts=stateA; stateA=stateB; stateB=ts;
+    let tv=velA; velA=velB; velB=tv;
+
+    /* fade */
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,W,H);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(fadeProg); gl.uniform4f(fadeU.uColor,BG[0],BG[1],BG[2],0.40);
+    gl.bindVertexArray(quadVAO); gl.drawArrays(gl.TRIANGLES,0,3);
+
+    /* points */
+    gl.useProgram(ptsProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,stateA); gl.uniform1i(ptsU.uState,0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,homeTex); gl.uniform1i(ptsU.uHome,1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,personTex); gl.uniform1i(ptsU.uPerson,2);
+    gl.uniform1f(ptsU.uAspect,aspect); gl.uniform1f(ptsU.uFit,fit);
+    gl.uniform1f(ptsU.uPxPerWorld,pxPerWorld); gl.uniform1f(ptsU.uCellW,cellW);
+    gl.uniform1f(ptsU.uFocal,FOCAL);
+    gl.bindVertexArray(emptyVAO); gl.drawArrays(gl.POINTS,0,NUM);
+    gl.bindVertexArray(null);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

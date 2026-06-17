@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>THE SSS INC. — Art Prototype: LIVE PORTRAIT v0.1</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --ink: #3a3733;
+        --bg: #f1f0ec;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        background: var(--bg);
+        overflow: hidden;
+      }
+      body {
+        font-family: "Outfit", sans-serif;
+        color: var(--ink);
+        -webkit-font-smoothing: antialiased;
+      }
+      .stage {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        height: 100svh;
+      }
+      canvas#gl {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      /* 起動オーバーレイ（カメラ許可はユーザー操作が必須） */
+      .gate {
+        position: absolute;
+        inset: 0;
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #f1f0ec;
+        transition: opacity 0.8s ease;
+      }
+      .gate.hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .gate h1 {
+        font-weight: 300;
+        font-size: clamp(22px, 3vw, 34px);
+        letter-spacing: 0.08em;
+        margin-bottom: 18px;
+        color: #2c2a26;
+      }
+      .gate p {
+        font-weight: 300;
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        color: #6b6860;
+        margin-bottom: 40px;
+        line-height: 1.9;
+        text-align: center;
+        max-width: 440px;
+      }
+      .gate button {
+        font-family: inherit;
+        font-weight: 500;
+        font-size: 13px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #f1f0ec;
+        background: #2c2a26;
+        border: 0;
+        border-radius: 999px;
+        padding: 16px 38px;
+        cursor: pointer;
+        transition:
+          transform 0.25s ease,
+          box-shadow 0.25s ease;
+      }
+      .gate button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 40px rgba(136, 22, 122, 0.22);
+      }
+      .gate .status {
+        margin-top: 26px;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        color: #9a9690;
+        min-height: 1.2em;
+      }
+
+      .sig {
+        position: absolute;
+        left: 48px;
+        bottom: 44px;
+        z-index: 2;
+        pointer-events: none;
+      }
+      .sig .name {
+        font-weight: 500;
+        font-size: 15px;
+        letter-spacing: 0.42em;
+        color: #2c2a26;
+      }
+      .sig .tagline {
+        margin-top: 10px;
+        font-weight: 300;
+        font-size: 10px;
+        letter-spacing: 0.34em;
+        color: #6b6860;
+        text-transform: uppercase;
+      }
+      .meta {
+        position: absolute;
+        right: 28px;
+        bottom: 24px;
+        z-index: 2;
+        font-weight: 300;
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        color: #9a9690;
+        text-align: right;
+        line-height: 1.9;
+        text-transform: uppercase;
+        pointer-events: none;
+      }
+      /* デバッグ: 生映像のPinP（?debug=1 で表示） */
+      #video {
+        position: absolute;
+        right: 18px;
+        top: 18px;
+        width: 160px;
+        height: 120px;
+        object-fit: cover;
+        border-radius: 6px;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 3;
+        transform: scaleX(-1);
+        mix-blend-mode: multiply;
+      }
+      body.debug #video {
+        opacity: 0.4;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stage" id="stage">
+      <canvas id="gl"></canvas>
+      <video id="video" playsinline muted></video>
+
+      <div class="gate" id="gate">
+        <h1>LIVE PORTRAIT</h1>
+        <p>
+          あなたの姿が、無数の粒子になります。<br />カメラへのアクセスを許可してください。<br /><span
+            style="opacity: 0.6"
+            >映像は端末内だけで処理され、どこにも送信されません。</span
+          >
+        </p>
+        <button id="startBtn">カメラを起動</button>
+        <div class="status" id="status"></div>
+      </div>
+
+      <div class="sig">
+        <div class="name">THE SSS INC.</div>
+        <div class="tagline">Good People, Good Business</div>
+      </div>
+      <div class="meta">
+        Art Prototype — Live Portrait v0.1<br />
+        powered by on-device segmentation
+      </div>
+    </div>
+
+    <script type="module">
+      /* =========================================================================
+   THE SSS INC.  アート表現試作「LIVE PORTRAIT」 v0.1
+   Webカメラ映像から人物シルエットを on-device で抽出し（MediaPipe）、
+   LIVING MARK と同じ粒度の発光パーティクルへリアルタイム変換する。
+   - 人物全体のシルエットを認識
+   - 粒子色は映像の実際の色（加算合成で発光）
+   - 人がいないと粒子は散って漂い、現れると姿に集まる
+   映像は端末内で完結（外部送信なし）。WebGL2 / MediaPipe Tasks Vision。
+   ========================================================================= */
+
+      const CONFIG = {
+        grid: { cols: 80, rows: 60 }, // 粗いグリッド = 大粒ドット絵
+        particle: {
+          alpha: 1.0,
+          spring: 20, // ターゲットへの追従
+          damping: 0.88,
+          scatterJitter: 0.04, // 不在時の漂いの強さ（小さく）
+        },
+        mask: {
+          threshold: 0.45, // 人物確信度のしきい値
+          feather: 0.12, // しきい値のやわらかさ
+        },
+        display: { saturation: 1.2, brightness: 0.88 },
+        segFps: 30, // セグメンテーション更新頻度の上限
+        dprCap: 2,
+      };
+
+      const canvas = document.getElementById("gl");
+      const video = document.getElementById("video");
+      const gate = document.getElementById("gate");
+      const statusEl = document.getElementById("status");
+      const startBtn = document.getElementById("startBtn");
+      if (new URLSearchParams(location.search).has("debug"))
+        document.body.classList.add("debug");
+
+      const gl = canvas.getContext("webgl2", {
+        antialias: false,
+        alpha: false,
+      });
+      if (!gl) {
+        statusEl.textContent = "お使いの環境は WebGL2 に対応していません。";
+      }
+
+      /* ---------------- WebGL: 粒子描画 ---------------- */
+      let prog, U, vao, vboPos, vboStatic;
+      const G = CONFIG.grid;
+      const N = G.cols * G.rows;
+
+      // CPU側の粒子状態
+      const homeU = new Float32Array(N),
+        homeV = new Float32Array(N); // 格子上の正規化座標(0..1)
+      const posX = new Float32Array(N),
+        posY = new Float32Array(N);
+      const velX = new Float32Array(N),
+        velY = new Float32Array(N);
+      const driftX = new Float32Array(N),
+        driftY = new Float32Array(N); // 散開時の漂い先
+      const phase = new Float32Array(N);
+      const posData = new Float32Array(N * 2); // x,y (clip)
+      const colData = new Float32Array(N * 4); // r,g,b,a
+      const staticData = new Float32Array(N); // rand
+      const zData = new Float32Array(N);     // 奥行きレイヤー 0=前面 1=奥
+
+      function initGL() {
+        function sh(type, src) {
+          const s = gl.createShader(type);
+          gl.shaderSource(s, src);
+          gl.compileShader(s);
+          if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+            throw new Error(gl.getShaderInfoLog(s));
+          return s;
+        }
+        prog = gl.createProgram();
+        gl.attachShader(
+          prog,
+          sh(
+            gl.VERTEX_SHADER,
+            `#version 300 es
+    precision highp float;
+    in vec2 a_pos;
+    in vec4 a_col;
+    in float a_rand;
+    in float a_z;       // 奥行きレイヤー 0=前面 1=奥
+    uniform float u_dpr;
+    uniform float u_sizePx;
+    uniform float u_time;
+    out vec4 v_col;
+    void main(){
+      float tw = 0.95 + 0.05 * sin(u_time * 1.5 + a_rand * 6.2832);
+      // 前面=明るい, 奥=暗い（voxel-portrait と同じ奥行きシェーディング）
+      float shade = mix(1.0, 0.36, a_z);
+      // 奥の粒子をわずかに小さく（透視感）
+      float focal = 3.5;
+      float persp = focal / (focal + a_z * 0.45);
+      v_col = vec4(a_col.rgb * shade, a_col.a * tw);
+      gl_PointSize = u_sizePx * persp * u_dpr;
+      gl_Position = vec4(a_pos * persp, 0.0, 1.0);
+    }`,
+          ),
+        );
+        gl.attachShader(
+          prog,
+          sh(
+            gl.FRAGMENT_SHADER,
+            `#version 300 es
+    precision highp float;
+    in vec4 v_col; out vec4 o;
+    void main(){
+      vec2 d = abs(gl_PointCoord - 0.5);
+      float m = 1.0 - smoothstep(0.44, 0.50, max(d.x, d.y));
+      if(m < 0.04) discard;
+      o = vec4(v_col.rgb, v_col.a * m);
+    }`,
+          ),
+        );
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+          throw new Error(gl.getProgramInfoLog(prog));
+        gl.useProgram(prog);
+        U = {
+          dpr: gl.getUniformLocation(prog, "u_dpr"),
+          sizePx: gl.getUniformLocation(prog, "u_sizePx"),
+          time: gl.getUniformLocation(prog, "u_time"),
+        };
+
+        vao = gl.createVertexArray();
+        gl.bindVertexArray(vao);
+        vboPos = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
+        gl.bufferData(gl.ARRAY_BUFFER, posData.byteLength, gl.DYNAMIC_DRAW);
+        let l = gl.getAttribLocation(prog, "a_pos");
+        gl.enableVertexAttribArray(l);
+        gl.vertexAttribPointer(l, 2, gl.FLOAT, false, 0, 0);
+
+        const vboCol = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vboCol);
+        gl.bufferData(gl.ARRAY_BUFFER, colData.byteLength, gl.DYNAMIC_DRAW);
+        l = gl.getAttribLocation(prog, "a_col");
+        gl.enableVertexAttribArray(l);
+        gl.vertexAttribPointer(l, 4, gl.FLOAT, false, 0, 0);
+        window._vboCol = vboCol;
+
+        vboStatic = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vboStatic);
+        gl.bufferData(gl.ARRAY_BUFFER, staticData, gl.STATIC_DRAW);
+        l = gl.getAttribLocation(prog, "a_rand");
+        gl.enableVertexAttribArray(l);
+        gl.vertexAttribPointer(l, 1, gl.FLOAT, false, 0, 0);
+
+        // 奥行きレイヤー（static）
+        const vboZ = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vboZ);
+        gl.bufferData(gl.ARRAY_BUFFER, zData, gl.STATIC_DRAW);
+        l = gl.getAttribLocation(prog, "a_z");
+        gl.enableVertexAttribArray(l);
+        gl.vertexAttribPointer(l, 1, gl.FLOAT, false, 0, 0);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.clearColor(0xf1 / 255, 0xf0 / 255, 0xec / 255, 1);
+      }
+
+      let rng = 12345;
+      function rand() {
+        rng = (rng * 1664525 + 1013904223) >>> 0;
+        return rng / 4294967296;
+      }
+
+      function initParticles() {
+        for (let j = 0; j < G.rows; j++) {
+          for (let i = 0; i < G.cols; i++) {
+            const k = j * G.cols + i;
+            homeU[k] = (i + 0.5) / G.cols;
+            homeV[k] = (j + 0.5) / G.rows;
+            const cx = homeU[k] * 2 - 1;
+            const cy = 1 - homeV[k] * 2;
+            posX[k] = cx;
+            posY[k] = cy;
+            velX[k] = 0;
+            velY[k] = 0;
+            driftX[k] = (rand() * 2 - 1) * 0.2;
+            driftY[k] = (rand() * 2 - 1) * 0.2;
+            phase[k] = rand() * Math.PI * 2;
+            staticData[k] = rand();
+            zData[k] = rand(); // 奥行きレイヤー（0=前面, 1=奥）
+          }
+        }
+      }
+
+      /* ---------------- カメラ + セグメンテーション ---------------- */
+      let segmenter = null;
+      let camW = 0,
+        camH = 0;
+      let sampleCanvas, sampleCtx; // 映像をグリッド解像度にダウンサンプル
+      let maskData = null; // Float32Array or Uint8 (人物確信度)
+      let maskW = 0,
+        maskH = 0;
+      let lastSeg = 0;
+      let humanPresent = false;
+      let presenceLerp = 0; // 0=不在 1=在
+
+      async function startCamera() {
+        startBtn.disabled = true;
+        statusEl.textContent = "カメラを起動しています…";
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              facingMode: "user",
+            },
+            audio: false,
+          });
+        } catch (e) {
+          statusEl.textContent =
+            "カメラへのアクセスが拒否されました。ブラウザの設定をご確認ください。";
+          startBtn.disabled = false;
+          return;
+        }
+        video.srcObject = stream;
+        await video.play();
+        camW = video.videoWidth;
+        camH = video.videoHeight;
+
+        statusEl.textContent = "セグメンテーションモデルを読み込み中…";
+        try {
+          const vision =
+            await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+          const { FilesetResolver, ImageSegmenter } = vision;
+          const files = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
+          );
+          segmenter = await ImageSegmenter.createFromOptions(files, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+              delegate: "GPU",
+            },
+            runningMode: "VIDEO",
+            outputCategoryMask: false,
+            outputConfidenceMasks: true,
+          });
+        } catch (e) {
+          statusEl.textContent =
+            "モデルの読み込みに失敗しました。ネットワークをご確認ください。";
+          console.error(e);
+          return;
+        }
+
+        // グリッド解像度のサンプリング用キャンバス
+        sampleCanvas = document.createElement("canvas");
+        sampleCanvas.width = G.cols;
+        sampleCanvas.height = G.rows;
+        sampleCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+
+        gate.classList.add("hide");
+        startLoop();
+      }
+
+      function runSegmentation(tMs) {
+        if (!segmenter || video.readyState < 2) return;
+        segmenter.segmentForVideo(video, tMs, (result) => {
+          const masks = result.confidenceMasks;
+          if (!masks || !masks.length) return;
+          const m = masks[0];
+          const arr = m.getAsFloat32Array ? m.getAsFloat32Array() : null;
+          if (arr) {
+            maskData = arr;
+            maskW = m.width;
+            maskH = m.height;
+          }
+          // result.close は自動。confidence mask は内部で解放される
+        });
+      }
+
+      /* 映像をグリッドにダウンサンプルして実色を取得（ミラー反転） */
+      function sampleVideoColors() {
+        // 映像を左右反転して描く（自撮りミラー）
+        sampleCtx.save();
+        sampleCtx.scale(-1, 1);
+        sampleCtx.drawImage(video, -G.cols, 0, G.cols, G.rows);
+        sampleCtx.restore();
+        return sampleCtx.getImageData(0, 0, G.cols, G.rows).data;
+      }
+
+      /* マスク値を取得（グリッド座標→マスク座標, ミラー考慮） */
+      function maskAt(u, v) {
+        if (!maskData) return 0;
+        // u は既にミラー済みグリッド前提なので、マスクも反転参照
+        const mx = Math.min(
+          maskW - 1,
+          Math.max(0, Math.floor((1 - u) * maskW)),
+        );
+        const my = Math.min(maskH - 1, Math.max(0, Math.floor(v * maskH)));
+        return maskData[my * maskW + mx];
+      }
+
+      /* ---------------- ループ ---------------- */
+      const P = CONFIG.particle;
+      let last = null,
+        running = false;
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, CONFIG.dprCap);
+        const w = Math.floor(canvas.clientWidth * dpr);
+        const h = Math.floor(canvas.clientHeight * dpr);
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+          gl.viewport(0, 0, w, h);
+        }
+      }
+      window.addEventListener("resize", resize);
+
+      function frame(ms) {
+        if (!running) return;
+        if (last === null) last = ms;
+        let dt = (ms - last) / 1000;
+        last = ms;
+        if (dt > 0.05) dt = 1 / 60;
+        const time = ms / 1000;
+
+        // セグメンテーション（フレームレート上限つき）
+        if (ms - lastSeg > 1000 / CONFIG.segFps) {
+          runSegmentation(ms);
+          lastSeg = ms;
+        }
+
+        const colors = sampleVideoColors();
+
+        // アスペクト補正: 映像をcoverで画面に合わせる
+        const canvasAspect = canvas.width / canvas.height;
+        const videoAspect = camW && camH ? camW / camH : 4 / 3;
+        let sx = 1,
+          sy = 1;
+        if (videoAspect > canvasAspect) sx = canvasAspect / videoAspect; // 横長→横を詰める…のは逆
+        // cover: 画面いっぱい。粒子のhomeは clip空間でアスペクト合わせ
+        const fitScaleX =
+          videoAspect > canvasAspect ? videoAspect / canvasAspect : 1;
+        const fitScaleY =
+          videoAspect > canvasAspect ? 1 : canvasAspect / videoAspect;
+
+        // 人物在/不在の判定（マスクの平均）
+        let present = 0;
+        if (maskData) {
+          // 粗くサンプルして平均確信度
+          let acc = 0,
+            cnt = 0;
+          for (let s = 0; s < maskData.length; s += 619) {
+            acc += maskData[s];
+            cnt++;
+          }
+          present = acc / cnt > 0.06 ? 1 : 0;
+        }
+        // presenceLerp はアルファ演出のみに使用（位置には影響させない）
+        presenceLerp += (present - presenceLerp) * 0.12;
+
+        const damp = Math.pow(P.damping, dt * 60);
+        const th = CONFIG.mask.threshold,
+          fe = CONFIG.mask.feather;
+
+        for (let k = 0; k < N; k++) {
+          const u = homeU[k],
+            v = homeV[k];
+          const conf = maskAt(u, v);
+          const inHuman = (conf - th + fe) / (2 * fe);
+          const w = Math.max(0, Math.min(1, inHuman)); // 0..1 人物らしさ
+
+          const homeCX = (u * 2 - 1) * fitScaleX;
+          const homeCY = (1 - v * 2) * fitScaleY;
+          const driftCX = homeCX + driftX[k];
+          const driftCY = homeCY + driftY[k];
+
+          // 位置追従はローカルマスクのみで決定（presenceLerpを掛けない）
+          // → 人が動いても他のセルの粒子が連鎖散乱しない
+          const bind = w;
+          const tx = driftCX + (homeCX - driftCX) * bind;
+          const ty = driftCY + (homeCY - driftCY) * bind;
+
+          let vx = velX[k],
+            vy = velY[k];
+          vx += (tx - posX[k]) * P.spring * dt;
+          vy += (ty - posY[k]) * P.spring * dt;
+
+          // 漂い（散開時のみ、ごく小さく）
+          const j = P.scatterJitter * (1 - bind);
+          vx += Math.sin(time * 0.7 + phase[k] + posY[k] * 2.0) * j * dt;
+          vy += Math.cos(time * 0.6 + phase[k] * 1.3 + posX[k] * 1.7) * j * dt;
+
+          vx *= damp;
+          vy *= damp;
+
+          // 速度キャップ: 大きく離れた粒子の行き過ぎを防ぐ
+          const spd = Math.sqrt(vx * vx + vy * vy);
+          const maxSpd = 0.06;
+          if (spd > maxSpd) { vx = (vx / spd) * maxSpd; vy = (vy / spd) * maxSpd; }
+
+          posX[k] += vx * dt * 60 * 0.0166;
+          posY[k] += vy * dt * 60 * 0.0166;
+          velX[k] = vx;
+          velY[k] = vy;
+
+          posData[k * 2] = posX[k];
+          posData[k * 2 + 1] = posY[k];
+
+          // 色: 映像の実色
+          const ci = k * 4;
+          let r = colors[ci] / 255,
+            g = colors[ci + 1] / 255,
+            b = colors[ci + 2] / 255;
+          const lu = 0.299 * r + 0.587 * g + 0.114 * b;
+          const sat = CONFIG.display.saturation;
+          r = lu + (r - lu) * sat;
+          g = lu + (g - lu) * sat;
+          b = lu + (b - lu) * sat;
+          const br = CONFIG.display.brightness;
+          // 人物エリア外は完全非表示。silhouette 境界は滑らかにフェード
+          const bindFade = Math.min(1.0, Math.max(0.0, (bind - 0.1) / 0.35));
+          const a = P.alpha * bindFade * (0.35 + 0.65 * presenceLerp);
+          colData[ci] = Math.max(0, r) * br;
+          colData[ci + 1] = Math.max(0, g) * br;
+          colData[ci + 2] = Math.max(0, b) * br;
+          colData[ci + 3] = a;
+        }
+
+        // 描画
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(prog);
+        gl.bindVertexArray(vao);
+        gl.uniform1f(
+          U.dpr,
+          Math.min(window.devicePixelRatio || 1, CONFIG.dprCap),
+        );
+        gl.uniform1f(U.time, time);
+
+        // セルサイズの半分 = ドット間に均等な余白が生まれるドット絵グリッド
+        const cellPx = (canvas.clientWidth * fitScaleX) / G.cols;
+        gl.uniform1f(U.sizePx, cellPx * 0.50);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, posData);
+        gl.bindBuffer(gl.ARRAY_BUFFER, window._vboCol);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, colData);
+        gl.drawArrays(gl.POINTS, 0, N);
+
+        requestAnimationFrame(frame);
+      }
+
+      function startLoop() {
+        resize();
+        running = true;
+        last = null;
+        requestAnimationFrame(frame);
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        running = !document.hidden;
+        if (running && segmenter) {
+          last = null;
+          requestAnimationFrame(frame);
+        }
+      });
+
+      /* ---------------- boot ---------------- */
+      if (gl) {
+        initParticles(); // 先に配列を埋めてから GPU へアップロードする
+        initGL();
+        resize();
+        startBtn.addEventListener("click", startCamera);
+      }
+    </script>
+  </body>
+</html>
