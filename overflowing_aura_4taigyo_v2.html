@@ -1,0 +1,1525 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LIVE PORTRAIT IN FLUX — FLUID</title>
+    <style>
+      :root {
+        --fg: #e8e9ec;
+        --muted: #7e8290;
+        --bg: #0c0d10;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+      }
+      body {
+        font-family:
+          "Helvetica Neue", Helvetica, Arial, "Hiragino Kaku Gothic ProN",
+          "Hiragino Sans", Meiryo, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      canvas#gl {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+      }
+      video,
+      canvas#src {
+        display: none;
+      }
+
+      .hint {
+        position: fixed;
+        bottom: 28px;
+        left: 34px;
+        font-size: 10px;
+        letter-spacing: 0.28em;
+        color: #4a4e58;
+        user-select: none;
+        pointer-events: none;
+        transition: opacity 1.2s ease;
+      }
+
+      .panel {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+        z-index: 10;
+        transition: opacity 0.6s ease;
+      }
+      .panel.hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .panel .box {
+        text-align: center;
+        color: var(--fg);
+      }
+      .panel .box p {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.22em;
+        margin-bottom: 22px;
+        line-height: 2;
+      }
+      .panel button {
+        font: inherit;
+        font-size: 12px;
+        letter-spacing: 0.2em;
+        color: var(--bg);
+        background: var(--fg);
+        border: 0;
+        padding: 14px 30px;
+        border-radius: 999px;
+        cursor: pointer;
+      }
+      .err {
+        color: #c98;
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        margin-top: 18px;
+        min-height: 1em;
+      }
+
+      .nen-state {
+        position: fixed;
+        bottom: 28px;
+        right: 34px;
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        user-select: none;
+        pointer-events: none;
+        color: #ffffff;
+        mix-blend-mode: difference;
+        opacity: 0;
+        transition: opacity 0.5s ease;
+      }
+      .nen-state.visible {
+        opacity: 1;
+      }
+      .nen-flash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        z-index: 100;
+        color: #ffffff;
+        mix-blend-mode: difference;
+        font-size: 60vh;
+        font-weight: 600;
+        letter-spacing: 0;
+        opacity: 0;
+      }
+      .nen-flash.show {
+        animation: nen-flash-anim 2s forwards;
+      }
+      @keyframes nen-flash-anim {
+        0% {
+          opacity: 0;
+          transform: scale(0.85);
+        }
+        8% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        70% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        100% {
+          opacity: 0;
+          transform: scale(1.06);
+        }
+      }
+      .voice-dot {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #2a2c32;
+        transition:
+          background 0.2s ease,
+          box-shadow 0.2s ease;
+      }
+      .voice-dot.active {
+        background: #5599ff;
+        box-shadow: 0 0 8px #5599ff;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <video id="video" playsinline muted></video>
+    <canvas id="src"></canvas>
+
+    <div class="hint" id="hint">
+      MOVE TO INTERACT ／ 念：テン・ゼツ・レン・ハツ
+    </div>
+    <div class="nen-state" id="nenState"></div>
+    <div class="nen-flash" id="nenFlash"></div>
+    <div class="voice-dot" id="voiceDot"></div>
+
+    <div class="panel" id="panel">
+      <div class="box">
+        <p>
+          カメラ映像をリアルタイムで流体として表現します<br />映像はこの端末内だけで処理され、どこにも送信されません
+        </p>
+        <button id="startBtn">カメラを起動</button>
+        <div class="err" id="err"></div>
+      </div>
+    </div>
+
+    <script type="module">
+      import {
+        ImageSegmenter,
+        PoseLandmarker,
+        FilesetResolver,
+      } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+
+      /* ---- constants ---- */
+      const SIM = 256; // velocity / pressure grid resolution
+      const DYE_W = 512; // dye texture resolution
+      const DYE_H = 512;
+      const GRID_W = 160; // person-texture grid width
+      let GRID_H = 120; // recalculated from video aspect
+
+      const glc = document.getElementById("gl");
+      const gl = glc.getContext("webgl2", {
+        antialias: false,
+        alpha: false,
+        depth: false,
+        preserveDrawingBuffer: false,
+      });
+      const errEl = document.getElementById("err");
+      function fatal(msg) {
+        errEl.textContent = msg;
+      }
+      if (!gl) fatal("WebGL2 非対応のブラウザです");
+      if (gl && !gl.getExtension("EXT_color_buffer_float"))
+        fatal("float テクスチャ非対応です");
+
+      const video = document.getElementById("video");
+      const srcCanvas = document.getElementById("src");
+      const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
+
+      let segmenter = null;
+      let poseLandmarker = null;
+      let wristUV = null;
+
+      /* ---- Nen state management ---- */
+      const PRESETS = {
+        default: {
+          turbStrength: 0.005,
+          blastStrength: 0.025,
+          riseStrength: 0.0035,
+          bodyInject: 0.1,
+          auraSat: 2.0,
+          auraWhite: 0.04,
+          silhouetteInject: 0.48,
+          velDissipation: 0.985,
+          dyeDissipation: 0.97,
+        },
+        ten: {
+          turbStrength: 0.009,
+          blastStrength: 0.007,
+          riseStrength: 0.002,
+          bodyInject: 0.12,
+          auraSat: 2.0,
+          auraWhite: 0.03,
+          silhouetteInject: 0.65,
+          velDissipation: 0.91,
+          dyeDissipation: 0.976,
+        },
+        zetsu: {
+          turbStrength: 0.0,
+          blastStrength: 0.0,
+          riseStrength: 0.0,
+          bodyInject: 0.0,
+          auraSat: 0.0,
+          auraWhite: 0.0,
+          silhouetteInject: 0.0,
+          velDissipation: 0.92,
+          dyeDissipation: 0.88,
+        },
+        ren: {
+          turbStrength: 0.003,
+          blastStrength: 0.0,
+          riseStrength: 0.0,
+          bodyInject: 0.1,
+          auraSat: 5.5,
+          auraWhite: 0.07,
+          silhouetteInject: 0.93,
+          velDissipation: 0.971,
+          dyeDissipation: 0.99,
+        },
+        hatsu: {
+          turbStrength: 0.009,
+          blastStrength: 0.007,
+          riseStrength: 0.002,
+          bodyInject: 0.12,
+          auraSat: 3.0,
+          auraWhite: 0.03,
+          silhouetteInject: 0.68,
+          velDissipation: 0.93,
+          dyeDissipation: 0.98,
+        },
+      };
+      const NEN_LABELS = { ten: "纏", zetsu: "絶", ren: "錬", hatsu: "発" };
+
+      let currentPreset = "default";
+      const auraState = { ...PRESETS.default };
+      let burstFrames = 0;
+
+      function setPreset(name) {
+        if (currentPreset === name) return;
+        currentPreset = name;
+        if (name === "hatsu") burstFrames = 1;
+        const el = document.getElementById("nenState");
+        const flash = document.getElementById("nenFlash");
+        if (!el) return;
+        if (name === "default") {
+          el.classList.remove("visible");
+        } else {
+          const label = NEN_LABELS[name] ?? name;
+          el.textContent = label;
+          el.classList.add("visible");
+          if (flash) {
+            flash.textContent = label;
+            flash.classList.remove("show");
+            void flash.offsetWidth;
+            flash.classList.add("show");
+          }
+        }
+      }
+
+      function lerpState(dt) {
+        const target = PRESETS[currentPreset];
+        const alpha = 1 - Math.exp(-dt * 8);
+        for (const k of Object.keys(target)) {
+          auraState[k] += (target[k] - auraState[k]) * alpha;
+        }
+      }
+
+      /* ================================================================
+         SHADERS
+         ================================================================ */
+
+      const vsQuad = `#version 300 es
+layout(location=0) in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+      /* Semi-Lagrangian advection (shared for vel and dye) */
+      const fsAdvect = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_vel;
+uniform sampler2D u_src;
+uniform float u_dt;
+uniform float u_dissipation;
+out vec4 o;
+void main() {
+  vec2 vel = texture(u_vel, v_uv).xy;
+  vec2 uv  = clamp(v_uv - vel * u_dt, 0.0, 1.0);
+  o = texture(u_src, uv) * u_dissipation;
+}`;
+
+      const fsDiv = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_vel;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  float l = texture(u_vel, v_uv - vec2(u_texel.x, 0.0)).x;
+  float r = texture(u_vel, v_uv + vec2(u_texel.x, 0.0)).x;
+  float b = texture(u_vel, v_uv - vec2(0.0, u_texel.y)).y;
+  float t = texture(u_vel, v_uv + vec2(0.0, u_texel.y)).y;
+  o = vec4((r - l + t - b) * 0.5, 0.0, 0.0, 1.0);
+}`;
+
+      const fsPres = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_pres;
+uniform sampler2D u_div;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  float l = texture(u_pres, v_uv - vec2(u_texel.x, 0.0)).x;
+  float r = texture(u_pres, v_uv + vec2(u_texel.x, 0.0)).x;
+  float b = texture(u_pres, v_uv - vec2(0.0, u_texel.y)).x;
+  float t = texture(u_pres, v_uv + vec2(0.0, u_texel.y)).x;
+  float div = texture(u_div, v_uv).x;
+  o = vec4((l + r + b + t - div) * 0.25, 0.0, 0.0, 1.0);
+}`;
+
+      const fsGrad = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_vel;
+uniform sampler2D u_pres;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  float l = texture(u_pres, v_uv - vec2(u_texel.x, 0.0)).x;
+  float r = texture(u_pres, v_uv + vec2(u_texel.x, 0.0)).x;
+  float b = texture(u_pres, v_uv - vec2(0.0, u_texel.y)).x;
+  float t = texture(u_pres, v_uv + vec2(0.0, u_texel.y)).x;
+  vec2 vel = texture(u_vel, v_uv).xy;
+  o = vec4(vel - vec2(r - l, t - b) * 0.5, 0.0, 1.0);
+}`;
+
+      const fsBoundary = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_vel;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  vec2 vel = texture(u_vel, v_uv).xy;
+  if (v_uv.x <       u_texel.x) vel.x =  abs(vel.x) * 0.2;
+  if (v_uv.x > 1.0 - u_texel.x) vel.x = -abs(vel.x) * 0.2;
+  if (v_uv.y <       u_texel.y) vel.y =  abs(vel.y) * 0.2;
+  if (v_uv.y > 1.0 - u_texel.y) vel.y = -abs(vel.y) * 0.2;
+  o = vec4(vel, 0.0, 1.0);
+}`;
+
+      /* Gaussian splat — mouse interaction on velocity field */
+      const fsSplat = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_base;
+uniform vec2 u_point;
+uniform vec3 u_color;
+uniform float u_r;
+out vec4 o;
+void main() {
+  vec2 d  = v_uv - u_point;
+  float sp = exp(-dot(d, d) / u_r);
+  o = texture(u_base, v_uv) + vec4(u_color * sp, 0.0);
+}`;
+
+      /* Camera feed with fluid velocity distortion.
+         Person body area receives much less distortion than the background. */
+      const fsBackground = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_video;
+uniform sampler2D u_vel;
+uniform sampler2D u_person;
+uniform float     u_screenAR;
+uniform float     u_camAR;
+out vec4 o;
+
+vec2 coverUV(vec2 uv) {
+  if (u_screenAR >= u_camAR)
+    return vec2(uv.x, (uv.y - 0.5) * (u_camAR / u_screenAR) + 0.5);
+  return vec2((uv.x - 0.5) * (u_screenAR / u_camAR) + 0.5, uv.y);
+}
+
+void main() {
+  vec2 vel    = texture(u_vel, v_uv).xy;
+  vec2 camUV0 = coverUV(v_uv);
+  float mask  = texture(u_person, vec2(camUV0.x, 1.0 - camUV0.y)).a;
+  float distort = mix(0.20, 0.04, mask);
+  vec2 camUV  = camUV0 + vel * distort;
+  vec2 vUV    = vec2(1.0 - clamp(camUV.x, 0.0, 1.0), 1.0 - clamp(camUV.y, 0.0, 1.0));
+  o = vec4(texture(u_video, vUV).rgb, 1.0);
+}`;
+
+      /* Inject gentle multi-directional turbulence within the person area. */
+      const fsInjectVel = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_vel;
+uniform sampler2D u_person;
+uniform float u_time;
+uniform float u_screenAR;
+uniform float u_camAR;
+uniform vec2 u_personTexel;
+uniform float u_turbStrength;
+uniform float u_blastStrength;
+uniform float u_riseStrength;
+out vec4 o;
+
+vec2 coverUV(vec2 uv) {
+  if (u_screenAR >= u_camAR)
+    return vec2(uv.x, (uv.y - 0.5) * (u_camAR / u_screenAR) + 0.5);
+  return vec2((uv.x - 0.5) * (u_screenAR / u_camAR) + 0.5, uv.y);
+}
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p); vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+void main() {
+  vec2  camUV = coverUV(v_uv);
+  vec2  pUV   = vec2(camUV.x, 1.0 - camUV.y);
+  float mask  = texture(u_person, pUV).a;
+  vec2  vel   = texture(u_vel, v_uv).xy;
+
+  float t  = u_time * 0.045;
+  vec2  np = v_uv * 2.2;
+  float nx = vnoise(np + vec2(t,         0.0)) - 0.5;
+  float ny = vnoise(np + vec2(37.2, t + 51.8)) - 0.5;
+  vel += vec2(nx, ny) * u_turbStrength * mask;
+
+  vec2 tx = u_personTexel;
+  float ml = texture(u_person, pUV - vec2(tx.x, 0.0)).a;
+  float mr = texture(u_person, pUV + vec2(tx.x, 0.0)).a;
+  float mb = texture(u_person, pUV - vec2(0.0, tx.y)).a;
+  float mt = texture(u_person, pUV + vec2(0.0, tx.y)).a;
+  vec2 grad = vec2(mr - ml, mt - mb);
+  float gradLen = length(grad);
+
+  /* Outward blast (blastStrength=0 で無効化可能) */
+  vel += -grad * u_blastStrength;
+
+  /* Silhouette tangential swirl — 勾配を90°回転した接線方向に循環力を加える。
+     ゆっくり変化するノイズで渦の向きを場所ごとに変え、体の輪郭に沿った
+     不規則な旋回流を生成する。turbStrengthが大きいほど効果が強い。 */
+  float swirl = vnoise(np * 0.4 + vec2(t * 0.8, 17.3)) * 2.0 - 1.0;
+  vec2 tangent = vec2(-grad.y, grad.x) / max(gradLen, 0.001);
+  vel += tangent * swirl * u_turbStrength * gradLen * 3.5;
+
+  float riseZone = mask + clamp(gradLen * 2.5, 0.0, 1.0);
+  vel += vec2(0.0, u_riseStrength) * riseZone;
+
+  o = vec4(vel, 0.0, 1.0);
+}`;
+
+      /* Blend camera color into dye where person is present. */
+      const fsInjectDye = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_dye;
+uniform sampler2D u_person;
+uniform float u_screenAR;
+uniform float u_camAR;
+uniform vec2 u_personTexel;
+uniform float u_bodyInject;
+uniform float u_auraSat;
+uniform float u_auraWhite;
+uniform float u_silhouetteInject;
+out vec4 o;
+
+vec2 coverUV(vec2 uv) {
+  if (u_screenAR >= u_camAR)
+    return vec2(uv.x, (uv.y - 0.5) * (u_camAR / u_screenAR) + 0.5);
+  return vec2((uv.x - 0.5) * (u_screenAR / u_camAR) + 0.5, uv.y);
+}
+
+void main() {
+  vec2  camUV = coverUV(v_uv);
+  vec2  pUV   = vec2(camUV.x, 1.0 - camUV.y);
+  vec4  p     = texture(u_person, pUV);
+  float mask  = p.a;
+  vec3  col   = p.rgb;
+  vec3  dye   = texture(u_dye, v_uv).rgb;
+
+  dye = mix(dye, col, mask * u_bodyInject);
+
+  vec2  tx = u_personTexel;
+  float ml = texture(u_person, pUV - vec2(tx.x, 0.0)).a;
+  float mr = texture(u_person, pUV + vec2(tx.x, 0.0)).a;
+  float mb = texture(u_person, pUV - vec2(0.0, tx.y)).a;
+  float mt = texture(u_person, pUV + vec2(0.0, tx.y)).a;
+  float gradMag = length(vec2(mr - ml, mt - mb));
+
+  float avg  = dot(col, vec3(1.0 / 3.0));
+  vec3  aura = mix(vec3(avg), col, u_auraSat);
+  aura = mix(aura, vec3(1.2), u_auraWhite);
+
+  float auraMix = clamp(gradMag * 4.0, 0.0, 1.0);
+  dye = mix(dye, aura, auraMix * u_silhouetteInject);
+
+  o = vec4(dye, 1.0);
+}`;
+
+      /* Display: dye as aura energy — smooth glow, no dot grid.
+         Person body area receives reduced alpha to avoid over-brightening. */
+      const fsDisplay = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_dye;
+uniform sampler2D u_person;
+uniform float     u_screenAR;
+uniform float     u_camAR;
+out vec4 o;
+
+vec2 coverUV(vec2 uv) {
+  if (u_screenAR >= u_camAR)
+    return vec2(uv.x, (uv.y - 0.5) * (u_camAR / u_screenAR) + 0.5);
+  return vec2((uv.x - 0.5) * (u_screenAR / u_camAR) + 0.5, uv.y);
+}
+
+void main() {
+  vec3  dye   = texture(u_dye, v_uv).rgb;
+  float mag   = length(dye);
+  vec3  col   = clamp(dye * 1.0, 0.0, 1.0);
+  float alpha = smoothstep(0.008, 0.07, mag);
+  vec2  camUV = coverUV(v_uv);
+  // Multi-tap blur to hide 160x120 grid-scale artifacts at mask boundary
+  vec2  mv = vec2(camUV.x, 1.0 - camUV.y);
+  vec2  ts = vec2(3.0 / 160.0, 3.0 / 120.0);
+  float mask = (
+    texture(u_person, mv + vec2(-ts.x, -ts.y)).a +
+    texture(u_person, mv + vec2( 0.0,  -ts.y)).a +
+    texture(u_person, mv + vec2( ts.x, -ts.y)).a +
+    texture(u_person, mv + vec2(-ts.x,  0.0)).a +
+    texture(u_person, mv                     ).a * 4.0 +
+    texture(u_person, mv + vec2( ts.x,  0.0)).a +
+    texture(u_person, mv + vec2(-ts.x,  ts.y)).a +
+    texture(u_person, mv + vec2( 0.0,   ts.y)).a +
+    texture(u_person, mv + vec2( ts.x,  ts.y)).a
+  ) / 12.0;
+  alpha *= mix(1.0, 0.2, smoothstep(0.2, 0.85, mask));
+  o = vec4(col, alpha);
+}`;
+
+      /* ================================================================
+         GL HELPERS
+         ================================================================ */
+
+      function mkShader(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+          throw new Error(gl.getShaderInfoLog(s));
+        return s;
+      }
+
+      function mkProg(fs) {
+        const p = gl.createProgram();
+        gl.attachShader(p, mkShader(gl.VERTEX_SHADER, vsQuad));
+        gl.attachShader(p, mkShader(gl.FRAGMENT_SHADER, fs));
+        gl.linkProgram(p);
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+          throw new Error(gl.getProgramInfoLog(p));
+        p.u = {};
+        const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+        for (let i = 0; i < n; i++) {
+          const { name } = gl.getActiveUniform(p, i);
+          p.u[name] = gl.getUniformLocation(p, name);
+        }
+        return p;
+      }
+
+      const quadVAO = gl.createVertexArray();
+      gl.bindVertexArray(quadVAO);
+      const qb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, qb);
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+        gl.STATIC_DRAW,
+      );
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+
+      function drawQuad() {
+        gl.bindVertexArray(quadVAO);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.bindVertexArray(null);
+      }
+
+      function mkFBO(w, h) {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA16F,
+          w,
+          h,
+          0,
+          gl.RGBA,
+          gl.HALF_FLOAT,
+          null,
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        const fb = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(
+          gl.FRAMEBUFFER,
+          gl.COLOR_ATTACHMENT0,
+          gl.TEXTURE_2D,
+          tex,
+          0,
+        );
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return { tex, fb, w, h };
+      }
+
+      function mkDouble(w, h) {
+        const fbos = [mkFBO(w, h), mkFBO(w, h)];
+        let idx = 0;
+        return {
+          get read() {
+            return fbos[idx];
+          },
+          get write() {
+            return fbos[1 - idx];
+          },
+          swap() {
+            idx = 1 - idx;
+          },
+        };
+      }
+
+      function useFBO(fbo) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fb);
+        gl.viewport(0, 0, fbo.w, fbo.h);
+      }
+
+      function bindFBOTex(unit, fbo) {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, fbo.tex);
+      }
+
+      /* ================================================================
+         STARTUP
+         ================================================================ */
+
+      function initSpeech() {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) return;
+
+        const dot = document.getElementById("voiceDot");
+        let active = false;
+
+        function createAndStart() {
+          if (active) return;
+          active = true;
+
+          const r = new SR();
+          r.lang = "ja-JP";
+          r.continuous = false;
+          r.interimResults = true;
+          r.maxAlternatives = 3;
+
+          let cooldown = false;
+
+          r.onstart = () => dot?.classList.add("active");
+
+          r.onresult = (e) => {
+            if (cooldown) return;
+            for (let i = e.resultIndex; i < e.results.length; i++) {
+              for (let alt = 0; alt < e.results[i].length; alt++) {
+                const t = e.results[i][alt].transcript;
+                console.log(
+                  `SR[${alt}] final=${e.results[i].isFinal} → "${t}"`,
+                );
+                if (
+                  /テン|テ|てん|て|ten|10|纏|天|点|転|展|典|添|[.,、。・]/i.test(
+                    t,
+                  )
+                ) {
+                  cooldown = true;
+                  setPreset("ten");
+                  return;
+                } else if (/ゼツ|ぜつ|zetsu|絶|舌|ゼ|ぜ|えつ|エツ/i.test(t)) {
+                  cooldown = true;
+                  setPreset("zetsu");
+                  return;
+                } else if (
+                  /レン|レ|れん|れ|ネン|ネ|ねん|ね|ren|nen|錬|練|連|蓮|恋|廉|煉|年/i.test(
+                    t,
+                  )
+                ) {
+                  cooldown = true;
+                  setPreset("ren");
+                  return;
+                } else if (
+                  /ハツ|はつ|カツ|かつ|hatsu|katsu|発|初|八|ハ|は|カ|か|あつ|アツ|8/i.test(
+                    t,
+                  )
+                ) {
+                  cooldown = true;
+                  setPreset("hatsu");
+                  return;
+                }
+              }
+            }
+          };
+
+          r.onspeechend = () => dot?.classList.remove("active");
+
+          r.onend = () => {
+            active = false;
+            dot?.classList.remove("active");
+            setTimeout(createAndStart, 150);
+          };
+
+          r.onerror = (e) => {
+            active = false;
+            dot?.classList.remove("active");
+            if (e.error !== "no-speech") console.warn("SR:", e.error);
+            setTimeout(createAndStart, 300);
+          };
+
+          r.start();
+        }
+
+        createAndStart();
+      }
+
+      let started = false;
+      document.getElementById("startBtn").addEventListener("click", start);
+
+      async function start() {
+        if (started) return;
+        started = true;
+        try {
+          const vision = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm",
+          );
+          const modelAssetPath =
+            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+          const segOpts = (delegate) => ({
+            baseOptions: { modelAssetPath, delegate },
+            runningMode: "VIDEO",
+            outputCategoryMask: false,
+            outputConfidenceMasks: true,
+          });
+          try {
+            segmenter = await ImageSegmenter.createFromOptions(
+              vision,
+              segOpts("GPU"),
+            );
+          } catch {
+            segmenter = await ImageSegmenter.createFromOptions(
+              vision,
+              segOpts("CPU"),
+            );
+          }
+
+          poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+            },
+            runningMode: "VIDEO",
+            numPoses: 1,
+          });
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: "user" },
+            audio: false,
+          });
+          video.srcObject = stream;
+          await video.play();
+
+          document.getElementById("panel").classList.add("hide");
+          setTimeout(
+            () => (document.getElementById("hint").style.opacity = 0),
+            4000,
+          );
+          boot();
+          initSpeech();
+        } catch (e) {
+          console.error(e);
+          fatal("起動に失敗しました：" + (e?.message ?? e));
+          started = false;
+        }
+      }
+
+      function boot() {
+        const vAspect = video.videoWidth / video.videoHeight || 640 / 480;
+        GRID_H = Math.round(GRID_W / vAspect);
+        srcCanvas.width = GRID_W;
+        srcCanvas.height = GRID_H;
+
+        /* Compile all programs */
+        const progAdvect = mkProg(fsAdvect);
+        const progDiv = mkProg(fsDiv);
+        const progPres = mkProg(fsPres);
+        const progGrad = mkProg(fsGrad);
+        const progBoundary = mkProg(fsBoundary);
+        const progSplat = mkProg(fsSplat);
+        const progBackground = mkProg(fsBackground);
+        const progInjectVel = mkProg(fsInjectVel);
+        const progInjectDye = mkProg(fsInjectDye);
+        const progDisplay = mkProg(fsDisplay);
+
+        /* Fluid FBOs */
+        const vel = mkDouble(SIM, SIM);
+        const dye = mkDouble(DYE_W, DYE_H);
+        const pres = mkDouble(SIM, SIM);
+        const divFBO = mkFBO(SIM, SIM);
+
+        /* Person texture — camera color (RGB) + mask (A) */
+        const personTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, personTex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          GRID_W,
+          GRID_H,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          null,
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const personPix = new Uint8Array(GRID_W * GRID_H * 4);
+        const maskSmooth = new Float32Array(GRID_W * GRID_H);
+
+        /* Full-res video texture for background */
+        const videoTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          video.videoWidth,
+          video.videoHeight,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          null,
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        /* Canvas resize */
+        const dpr = Math.min(devicePixelRatio || 1, 2);
+        let W = 0,
+          H = 0;
+        function resize() {
+          W = Math.round(innerWidth * dpr);
+          H = Math.round(innerHeight * dpr);
+          glc.width = W;
+          glc.height = H;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.viewport(0, 0, W, H);
+        }
+        addEventListener("resize", resize);
+        resize();
+
+        /* Mouse / touch → velocity splat */
+        const M = { x: 0.5, y: 0.5, dx: 0, dy: 0 };
+        function onMove(cx, cy, pcx, pcy) {
+          M.x = cx / innerWidth;
+          M.y = 1.0 - cy / innerHeight;
+          M.dx = (cx - pcx) / innerWidth;
+          M.dy = -(cy - pcy) / innerHeight;
+        }
+        let prevMX = null,
+          prevMY = null;
+        glc.addEventListener("mousemove", (e) => {
+          if (prevMX === null) {
+            prevMX = e.clientX;
+            prevMY = e.clientY;
+          }
+          onMove(e.clientX, e.clientY, prevMX, prevMY);
+          prevMX = e.clientX;
+          prevMY = e.clientY;
+        });
+        glc.addEventListener("mouseleave", () => {
+          prevMX = null;
+          prevMY = null;
+        });
+        let prevTX = null,
+          prevTY = null;
+        glc.addEventListener(
+          "touchmove",
+          (e) => {
+            e.preventDefault();
+            const t = e.touches[0];
+            if (prevTX === null) {
+              prevTX = t.clientX;
+              prevTY = t.clientY;
+            }
+            onMove(t.clientX, t.clientY, prevTX, prevTY);
+            prevTX = t.clientX;
+            prevTY = t.clientY;
+          },
+          { passive: false },
+        );
+        glc.addEventListener("touchend", () => {
+          prevTX = null;
+          prevTY = null;
+        });
+
+        let lastVideoT = -1;
+        let renEdgePoints = []; // flat [x,y,...] — body silhouette in screen UV, updated each frame
+
+        /* ---- updatePerson: MediaPipe segmentation + color extraction ---- */
+        function updatePerson(now) {
+          if (video.readyState < 2) return;
+          let mask = null;
+          try {
+            const res = segmenter.segmentForVideo(video, now);
+            if (res?.confidenceMasks?.[0]) {
+              mask = res.confidenceMasks[0].getAsFloat32Array();
+              res.close?.();
+            }
+          } catch {}
+
+          /* Mirror the image (selfie convention) */
+          srcCtx.save();
+          srcCtx.scale(-1, 1);
+          srcCtx.drawImage(video, -GRID_W, 0, GRID_W, GRID_H);
+          srcCtx.restore();
+          const img = srcCtx.getImageData(0, 0, GRID_W, GRID_H).data;
+
+          const mw = video.videoWidth,
+            mh = video.videoHeight;
+          for (let gy = 0; gy < GRID_H; gy++) {
+            for (let gx = 0; gx < GRID_W; gx++) {
+              let mv = 0.0;
+              if (mask) {
+                const sx = Math.min(
+                  mw - 1,
+                  (((GRID_W - 1 - gx + 0.5) / GRID_W) * mw) | 0,
+                );
+                const sy = Math.min(mh - 1, (((gy + 0.5) / GRID_H) * mh) | 0);
+                mv = mask[sy * mw + sx];
+              }
+              const gi = gy * GRID_W + gx;
+              maskSmooth[gi] += (mv - maskSmooth[gi]) * 0.35;
+
+              const di = gi * 4,
+                si = gi * 4;
+              let r = img[si],
+                g = img[si + 1],
+                b = img[si + 2];
+              const avg = (r + g + b) / 3;
+              const SAT = 1.15;
+              r = Math.min(255, Math.max(0, avg + (r - avg) * SAT));
+              g = Math.min(255, Math.max(0, avg + (g - avg) * SAT));
+              b = Math.min(255, Math.max(0, avg + (b - avg) * SAT));
+              personPix[di] = r;
+              personPix[di + 1] = g;
+              personPix[di + 2] = b;
+              personPix[di + 3] =
+                maskSmooth[gi] > 0.45 ? 255 : Math.floor(maskSmooth[gi] * 255);
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, personTex);
+          gl.texSubImage2D(
+            gl.TEXTURE_2D,
+            0,
+            0,
+            0,
+            GRID_W,
+            GRID_H,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            personPix,
+          );
+
+          gl.bindTexture(gl.TEXTURE_2D, videoTex);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            video,
+          );
+
+          /* Collect body silhouette edge points (screen UV) for ren vortex */
+          renEdgePoints.length = 0;
+          const sar = innerWidth / innerHeight;
+          for (let gy = 1; gy < GRID_H - 1; gy++) {
+            for (let gx = 1; gx < GRID_W - 1; gx++) {
+              const gi = gy * GRID_W + gx;
+              if (personPix[gi * 4 + 3] < 30) continue;
+              if (
+                personPix[((gy - 1) * GRID_W + gx) * 4 + 3] < 30 ||
+                personPix[((gy + 1) * GRID_W + gx) * 4 + 3] < 30 ||
+                personPix[(gy * GRID_W + gx - 1) * 4 + 3] < 30 ||
+                personPix[(gy * GRID_W + gx + 1) * 4 + 3] < 30
+              ) {
+                const camX = gx / GRID_W;
+                const camY = 1 - gy / GRID_H;
+                if (sar >= vAspect) {
+                  renEdgePoints.push(
+                    camX,
+                    (camY - 0.5) * (sar / vAspect) + 0.5,
+                  );
+                } else {
+                  renEdgePoints.push(
+                    (camX - 0.5) * (vAspect / sar) + 0.5,
+                    camY,
+                  );
+                }
+              }
+            }
+          }
+
+          /* Right hand tracking for ハツ aura focus — average of wrist/pinky/index/thumb */
+          try {
+            const pr = poseLandmarker.detectForVideo(video, now, {
+              imageSize: { width: video.videoWidth, height: video.videoHeight },
+            });
+            const lm = pr?.landmarks?.[0];
+            const p16 = lm?.[16],
+              p18 = lm?.[18],
+              p20 = lm?.[20],
+              p22 = lm?.[22];
+            const raw =
+              p16 && p18 && p20 && p22
+                ? {
+                    x: (p16.x + p18.x + p20.x + p22.x) / 4,
+                    y: (p16.y + p18.y + p20.y + p22.y) / 4,
+                  }
+                : (p16 ?? null);
+            if (raw) {
+              const cx = 1 - raw.x;
+              const cy = 1 - raw.y;
+              const sar = innerWidth / innerHeight;
+              if (sar >= vAspect) {
+                wristUV = { x: cx, y: (cy - 0.5) * (sar / vAspect) + 0.5 };
+              } else {
+                wristUV = { x: (cx - 0.5) * (vAspect / sar) + 0.5, y: cy };
+              }
+            } else {
+              wristUV = null;
+            }
+          } catch {
+            wristUV = null;
+          }
+        }
+
+        /* ---- Navier-Stokes fluid step ---- */
+        function simStep(dt, totalTime) {
+          const tx = 1 / SIM,
+            ty = 1 / SIM;
+
+          /* 1. Advect velocity */
+          useFBO(vel.write);
+          gl.useProgram(progAdvect);
+          bindFBOTex(0, vel.read);
+          gl.uniform1i(progAdvect.u.u_vel, 0);
+          bindFBOTex(1, vel.read);
+          gl.uniform1i(progAdvect.u.u_src, 1);
+          gl.uniform1f(progAdvect.u.u_dt, dt);
+          gl.uniform1f(progAdvect.u.u_dissipation, auraState.velDissipation);
+          drawQuad();
+          vel.swap();
+
+          /* 2. Inject velocity — person silhouette drives outward aura blast */
+          useFBO(vel.write);
+          gl.useProgram(progInjectVel);
+          bindFBOTex(0, vel.read);
+          gl.uniform1i(progInjectVel.u.u_vel, 0);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, personTex);
+          gl.uniform1i(progInjectVel.u.u_person, 1);
+          gl.uniform1f(progInjectVel.u.u_time, totalTime);
+          gl.uniform1f(progInjectVel.u.u_screenAR, innerWidth / innerHeight);
+          gl.uniform1f(progInjectVel.u.u_camAR, vAspect);
+          gl.uniform2f(
+            progInjectVel.u.u_personTexel,
+            1.0 / GRID_W,
+            1.0 / GRID_H,
+          );
+          gl.uniform1f(progInjectVel.u.u_turbStrength, auraState.turbStrength);
+          gl.uniform1f(
+            progInjectVel.u.u_blastStrength,
+            auraState.blastStrength,
+          );
+          gl.uniform1f(progInjectVel.u.u_riseStrength, auraState.riseStrength);
+          drawQuad();
+          vel.swap();
+
+          /* 3. Mouse splat on velocity */
+          if (Math.abs(M.dx) > 0.0001 || Math.abs(M.dy) > 0.0001) {
+            useFBO(vel.write);
+            gl.useProgram(progSplat);
+            bindFBOTex(0, vel.read);
+            gl.uniform1i(progSplat.u.u_base, 0);
+            gl.uniform2f(progSplat.u.u_point, M.x, M.y);
+            gl.uniform3f(progSplat.u.u_color, M.dx * 5.0, M.dy * 5.0, 0.0);
+            gl.uniform1f(progSplat.u.u_r, 0.0018);
+            drawQuad();
+            vel.swap();
+            M.dx = 0;
+            M.dy = 0;
+          }
+
+          /* Hatsu burst — one-shot radial velocity explosion on 発 activation */
+          if (burstFrames > 0) {
+            burstFrames = 0;
+            const N = 12,
+              bStr = 0.14,
+              bR = 0.004;
+            for (let j = 0; j < N; j++) {
+              const angle = (j / N) * Math.PI * 2;
+              useFBO(vel.write);
+              gl.useProgram(progSplat);
+              bindFBOTex(0, vel.read);
+              gl.uniform1i(progSplat.u.u_base, 0);
+              gl.uniform2f(progSplat.u.u_point, 0.5, 0.45);
+              gl.uniform3f(
+                progSplat.u.u_color,
+                Math.cos(angle) * bStr,
+                Math.sin(angle) * bStr,
+                0.0,
+              );
+              gl.uniform1f(progSplat.u.u_r, bR);
+              drawQuad();
+              vel.swap();
+            }
+          }
+
+          /* Hatsu wrist — wild chaotic dual-vortex */
+          if (currentPreset === "hatsu" && wristUV) {
+            const wx = wristUV.x,
+              wy = wristUV.y;
+            const t = totalTime;
+            for (let j = 0; j < 6; j++) {
+              const angle =
+                (j / 6) * Math.PI * 2 +
+                t * 6.5 +
+                Math.sin(t * (4.0 + j * 1.9)) * 1.6;
+              const r = 0.013 + Math.sin(t * (5.5 + j * 2.3)) * 0.007;
+              useFBO(vel.write);
+              gl.useProgram(progSplat);
+              bindFBOTex(0, vel.read);
+              gl.uniform1i(progSplat.u.u_base, 0);
+              gl.uniform2f(
+                progSplat.u.u_point,
+                wx + Math.cos(angle) * r,
+                wy + Math.sin(angle) * r,
+              );
+              gl.uniform3f(
+                progSplat.u.u_color,
+                -Math.sin(angle) * 0.4,
+                Math.cos(angle) * 0.4,
+                0.0,
+              );
+              gl.uniform1f(progSplat.u.u_r, 0.002);
+              drawQuad();
+              vel.swap();
+            }
+            for (let j = 0; j < 4; j++) {
+              const angle =
+                (j / 4) * Math.PI * 2 -
+                t * 4.2 +
+                Math.sin(t * (3.5 + j * 2.6)) * 1.4;
+              const r = 0.03 + Math.sin(t * (4.5 + j * 1.9)) * 0.01;
+              useFBO(vel.write);
+              gl.useProgram(progSplat);
+              bindFBOTex(0, vel.read);
+              gl.uniform1i(progSplat.u.u_base, 0);
+              gl.uniform2f(
+                progSplat.u.u_point,
+                wx + Math.cos(angle) * r,
+                wy + Math.sin(angle) * r,
+              );
+              gl.uniform3f(
+                progSplat.u.u_color,
+                Math.sin(angle) * 0.26,
+                -Math.cos(angle) * 0.26,
+                0.0,
+              );
+              gl.uniform1f(progSplat.u.u_r, 0.0025);
+              drawQuad();
+              vel.swap();
+            }
+          }
+
+          /* Ren body — dual-vortex rings at N silhouette points (same logic as hatsu wrist) */
+          if (currentPreset === "ren" && renEdgePoints.length >= 2) {
+            const t = totalTime;
+            const totalPts = renEdgePoints.length >> 1;
+            const N_PTS = 8;
+            for (let pi = 0; pi < N_PTS; pi++) {
+              const idx = Math.floor((pi / N_PTS) * totalPts) * 2;
+              const wx = renEdgePoints[idx];
+              const wy = renEdgePoints[idx + 1];
+              const phase = pi * ((Math.PI * 2) / N_PTS);
+              // Inner CCW ring
+              for (let j = 0; j < 6; j++) {
+                const angle =
+                  (j / 6) * Math.PI * 2 +
+                  t * 1.4 +
+                  phase +
+                  Math.sin(t * (1.2 + j * 0.5)) * 0.5;
+                const r = 0.013 + Math.sin(t * (1.8 + j * 0.7)) * 0.005;
+                useFBO(vel.write);
+                gl.useProgram(progSplat);
+                bindFBOTex(0, vel.read);
+                gl.uniform1i(progSplat.u.u_base, 0);
+                gl.uniform2f(
+                  progSplat.u.u_point,
+                  wx + Math.cos(angle) * r,
+                  wy + Math.sin(angle) * r,
+                );
+                gl.uniform3f(
+                  progSplat.u.u_color,
+                  -Math.sin(angle) * 0.17,
+                  Math.cos(angle) * 0.17,
+                  0.0,
+                );
+                gl.uniform1f(progSplat.u.u_r, 0.002);
+                drawQuad();
+                vel.swap();
+              }
+              // Outer CW ring
+              for (let j = 0; j < 4; j++) {
+                const angle =
+                  (j / 4) * Math.PI * 2 -
+                  t * 0.9 +
+                  phase +
+                  Math.sin(t * (1.1 + j * 0.8)) * 0.4;
+                const r = 0.03 + Math.sin(t * (1.4 + j * 0.6)) * 0.007;
+                useFBO(vel.write);
+                gl.useProgram(progSplat);
+                bindFBOTex(0, vel.read);
+                gl.uniform1i(progSplat.u.u_base, 0);
+                gl.uniform2f(
+                  progSplat.u.u_point,
+                  wx + Math.cos(angle) * r,
+                  wy + Math.sin(angle) * r,
+                );
+                gl.uniform3f(
+                  progSplat.u.u_color,
+                  Math.sin(angle) * 0.11,
+                  -Math.cos(angle) * 0.11,
+                  0.0,
+                );
+                gl.uniform1f(progSplat.u.u_r, 0.0025);
+                drawQuad();
+                vel.swap();
+              }
+            }
+          }
+
+          /* 4. Advect dye */
+          useFBO(dye.write);
+          gl.useProgram(progAdvect);
+          bindFBOTex(0, vel.read);
+          gl.uniform1i(progAdvect.u.u_vel, 0);
+          bindFBOTex(1, dye.read);
+          gl.uniform1i(progAdvect.u.u_src, 1);
+          gl.uniform1f(progAdvect.u.u_dt, dt);
+          gl.uniform1f(progAdvect.u.u_dissipation, auraState.dyeDissipation);
+          drawQuad();
+          dye.swap();
+
+          /* 5. Inject dye — person colour + aura glow at silhouette */
+          useFBO(dye.write);
+          gl.useProgram(progInjectDye);
+          bindFBOTex(0, dye.read);
+          gl.uniform1i(progInjectDye.u.u_dye, 0);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, personTex);
+          gl.uniform1i(progInjectDye.u.u_person, 1);
+          gl.uniform1f(progInjectDye.u.u_screenAR, innerWidth / innerHeight);
+          gl.uniform1f(progInjectDye.u.u_camAR, vAspect);
+          gl.uniform2f(
+            progInjectDye.u.u_personTexel,
+            1.0 / GRID_W,
+            1.0 / GRID_H,
+          );
+          gl.uniform1f(progInjectDye.u.u_bodyInject, auraState.bodyInject);
+          gl.uniform1f(progInjectDye.u.u_auraSat, auraState.auraSat);
+          gl.uniform1f(progInjectDye.u.u_auraWhite, auraState.auraWhite);
+          gl.uniform1f(
+            progInjectDye.u.u_silhouetteInject,
+            auraState.silhouetteInject,
+          );
+          drawQuad();
+          dye.swap();
+
+          /* Hatsu wrist — HDR dye splats */
+          if (currentPreset === "hatsu" && wristUV) {
+            const wx = wristUV.x,
+              wy = wristUV.y;
+            const t = totalTime;
+            useFBO(dye.write);
+            gl.useProgram(progSplat);
+            bindFBOTex(0, dye.read);
+            gl.uniform1i(progSplat.u.u_base, 0);
+            gl.uniform2f(progSplat.u.u_point, wx, wy);
+            gl.uniform3f(progSplat.u.u_color, 2.0, 1.2, 0.4);
+            gl.uniform1f(progSplat.u.u_r, 0.003);
+            drawQuad();
+            dye.swap();
+            const wristHues = [
+              [1.0, 0.05, 0.02],
+              [1.0, 0.42, 0.0],
+              [1.0, 0.95, 0.1],
+              [0.55, 0.05, 1.0],
+              [0.0, 0.7, 1.0],
+            ];
+            for (let k = 0; k < 5; k++) {
+              const a =
+                (k / 5) * Math.PI * 2 +
+                t * (8.0 + k * 2.8) +
+                Math.sin(t * (5.5 + k * 2.1)) * 1.8;
+              const dr = 0.01 + Math.sin(t * (6.5 + k * 2.5)) * 0.009;
+              const s = 2.0 + Math.sin(t * (5.5 + k * 2.2)) * 0.8;
+              const cr = wristHues[k];
+              useFBO(dye.write);
+              gl.useProgram(progSplat);
+              bindFBOTex(0, dye.read);
+              gl.uniform1i(progSplat.u.u_base, 0);
+              gl.uniform2f(
+                progSplat.u.u_point,
+                wx + Math.cos(a) * dr,
+                wy + Math.sin(a) * dr,
+              );
+              gl.uniform3f(
+                progSplat.u.u_color,
+                s * cr[0],
+                s * cr[1],
+                s * cr[2],
+              );
+              gl.uniform1f(progSplat.u.u_r, 0.0017);
+              drawQuad();
+              dye.swap();
+            }
+          }
+
+          /* 6. Divergence */
+          useFBO(divFBO);
+          gl.useProgram(progDiv);
+          bindFBOTex(0, vel.read);
+          gl.uniform1i(progDiv.u.u_vel, 0);
+          gl.uniform2f(progDiv.u.u_texel, tx, ty);
+          drawQuad();
+
+          /* 7. Pressure — Jacobi iterations */
+          useFBO(pres.read);
+          gl.clearColor(0, 0, 0, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          for (let i = 0; i < 25; i++) {
+            useFBO(pres.write);
+            gl.useProgram(progPres);
+            bindFBOTex(0, pres.read);
+            gl.uniform1i(progPres.u.u_pres, 0);
+            bindFBOTex(1, divFBO);
+            gl.uniform1i(progPres.u.u_div, 1);
+            gl.uniform2f(progPres.u.u_texel, tx, ty);
+            drawQuad();
+            pres.swap();
+          }
+
+          /* 8. Gradient subtract → divergence-free velocity */
+          useFBO(vel.write);
+          gl.useProgram(progGrad);
+          bindFBOTex(0, vel.read);
+          gl.uniform1i(progGrad.u.u_vel, 0);
+          bindFBOTex(1, pres.read);
+          gl.uniform1i(progGrad.u.u_pres, 1);
+          gl.uniform2f(progGrad.u.u_texel, tx, ty);
+          drawQuad();
+          vel.swap();
+
+          /* 9. Boundary conditions */
+          useFBO(vel.write);
+          gl.useProgram(progBoundary);
+          bindFBOTex(0, vel.read);
+          gl.uniform1i(progBoundary.u.u_vel, 0);
+          gl.uniform2f(progBoundary.u.u_texel, tx, ty);
+          drawQuad();
+          vel.swap();
+        }
+
+        /* ---- Render to screen ---- */
+        function render() {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.viewport(0, 0, W, H);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+
+          /* 1. Background: camera feed with fluid velocity distortion */
+          gl.disable(gl.BLEND);
+          gl.useProgram(progBackground);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, videoTex);
+          gl.uniform1i(progBackground.u.u_video, 0);
+          bindFBOTex(1, vel.read);
+          gl.uniform1i(progBackground.u.u_vel, 1);
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, personTex);
+          gl.uniform1i(progBackground.u.u_person, 2);
+          gl.uniform1f(progBackground.u.u_screenAR, innerWidth / innerHeight);
+          gl.uniform1f(progBackground.u.u_camAR, vAspect);
+          drawQuad();
+
+          /* 2. Aura fluid — additive blend → smooth glow */
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+          gl.useProgram(progDisplay);
+          bindFBOTex(0, dye.read);
+          gl.uniform1i(progDisplay.u.u_dye, 0);
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, personTex);
+          gl.uniform1i(progDisplay.u.u_person, 2);
+          gl.uniform1f(progDisplay.u.u_screenAR, innerWidth / innerHeight);
+          gl.uniform1f(progDisplay.u.u_camAR, vAspect);
+          drawQuad();
+
+          gl.disable(gl.BLEND);
+        }
+
+        /* ---- Main loop ---- */
+        let last = performance.now();
+        let totalTime = 0;
+
+        function frame(now) {
+          const dt = Math.min((now - last) / 1000, 0.05);
+          last = now;
+          totalTime += dt;
+
+          if (video.currentTime !== lastVideoT) {
+            updatePerson(now);
+            lastVideoT = video.currentTime;
+          }
+
+          lerpState(dt);
+          simStep(dt, totalTime);
+          render();
+          requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      }
+    </script>
+  </body>
+</html>
