@@ -221,41 +221,66 @@
       const srcCanvas = document.getElementById("src");
       const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
 
-      let segmenter      = null;
+      let segmenter = null;
       let poseLandmarker = null;
-      let wristUV        = null;
+      let wristUV = null;
 
       /* ---- Nen state management ---- */
       const PRESETS = {
         default: {
-          turbStrength: 0.005, blastStrength: 0.025, riseStrength: 0.0035,
-          bodyInject: 0.10,    auraSat: 2.0,          auraWhite: 0.04,
+          turbStrength: 0.005,
+          blastStrength: 0.025,
+          riseStrength: 0.0035,
+          bodyInject: 0.1,
+          auraSat: 2.0,
+          auraWhite: 0.04,
           silhouetteInject: 0.48,
-          velDissipation: 0.985, dyeDissipation: 0.970,
+          velDissipation: 0.985,
+          dyeDissipation: 0.97,
         },
         ten: {
-          turbStrength: 0.009, blastStrength: 0.007, riseStrength: 0.002,
-          bodyInject: 0.12,    auraSat: 2.0,          auraWhite: 0.03,
+          turbStrength: 0.009,
+          blastStrength: 0.007,
+          riseStrength: 0.002,
+          bodyInject: 0.12,
+          auraSat: 2.0,
+          auraWhite: 0.03,
           silhouetteInject: 0.65,
-          velDissipation: 0.91, dyeDissipation: 0.976,
+          velDissipation: 0.91,
+          dyeDissipation: 0.976,
         },
         zetsu: {
-          turbStrength: 0.0,   blastStrength: 0.0,   riseStrength: 0.0,
-          bodyInject: 0.0,     auraSat: 0.0,          auraWhite: 0.0,
+          turbStrength: 0.0,
+          blastStrength: 0.0,
+          riseStrength: 0.0,
+          bodyInject: 0.0,
+          auraSat: 0.0,
+          auraWhite: 0.0,
           silhouetteInject: 0.0,
-          velDissipation: 0.92, dyeDissipation: 0.88,
+          velDissipation: 0.92,
+          dyeDissipation: 0.88,
         },
         ren: {
-          turbStrength: 0.003, blastStrength: 0.0, riseStrength: 0.0,
-          bodyInject: 0.10,    auraSat: 5.5,        auraWhite: 0.07,
+          turbStrength: 0.003,
+          blastStrength: 0.0,
+          riseStrength: 0.0,
+          bodyInject: 0.1,
+          auraSat: 5.5,
+          auraWhite: 0.07,
           silhouetteInject: 0.93,
-          velDissipation: 0.971, dyeDissipation: 0.990,
+          velDissipation: 0.971,
+          dyeDissipation: 0.99,
         },
         hatsu: {
-          turbStrength: 0.009, blastStrength: 0.007, riseStrength: 0.002,
-          bodyInject: 0.12,    auraSat: 3.0,          auraWhite: 0.03,
+          turbStrength: 0.009,
+          blastStrength: 0.007,
+          riseStrength: 0.002,
+          bodyInject: 0.12,
+          auraSat: 3.0,
+          auraWhite: 0.03,
           silhouetteInject: 0.68,
-          velDissipation: 0.93, dyeDissipation: 0.980,
+          velDissipation: 0.93,
+          dyeDissipation: 0.98,
         },
       };
       const NEN_LABELS = { ten: "纏", zetsu: "絶", ren: "錬", hatsu: "発" };
@@ -714,8 +739,14 @@ void main() {
             for (let i = e.resultIndex; i < e.results.length; i++) {
               for (let alt = 0; alt < e.results[i].length; alt++) {
                 const t = e.results[i][alt].transcript;
-                console.log(`SR[${alt}] final=${e.results[i].isFinal} → "${t}"`);
-                if (/テン|テ|てん|て|ten|10|纏|天|点|転|展|典|添|[.,、。・]/i.test(t)) {
+                console.log(
+                  `SR[${alt}] final=${e.results[i].isFinal} → "${t}"`,
+                );
+                if (
+                  /テン|テ|てん|て|ten|10|纏|天|点|転|展|典|添|[.,、。・]/i.test(
+                    t,
+                  )
+                ) {
                   cooldown = true;
                   setPreset("ten");
                   return;
@@ -723,11 +754,19 @@ void main() {
                   cooldown = true;
                   setPreset("zetsu");
                   return;
-                } else if (/レン|レ|れん|れ|ネン|ネ|ねん|ね|ren|nen|錬|練|連|蓮|恋|廉|煉|年/i.test(t)) {
+                } else if (
+                  /レン|レ|れん|れ|ネン|ネ|ねん|ね|ren|nen|錬|練|連|蓮|恋|廉|煉|年/i.test(
+                    t,
+                  )
+                ) {
                   cooldown = true;
                   setPreset("ren");
                   return;
-                } else if (/ハツ|はつ|カツ|かつ|hatsu|katsu|発|初|八|ハ|は|カ|か|あつ|アツ|8/i.test(t)) {
+                } else if (
+                  /ハツ|はつ|カツ|かつ|hatsu|katsu|発|初|八|ハ|は|カ|か|あつ|アツ|8/i.test(
+                    t,
+                  )
+                ) {
                   cooldown = true;
                   setPreset("hatsu");
                   return;
@@ -789,7 +828,8 @@ void main() {
 
           poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
             baseOptions: {
-              modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
             },
             runningMode: "VIDEO",
             numPoses: 1,
@@ -1035,9 +1075,15 @@ void main() {
                 const camX = gx / GRID_W;
                 const camY = 1 - gy / GRID_H;
                 if (sar >= vAspect) {
-                  renEdgePoints.push(camX, (camY - 0.5) * (sar / vAspect) + 0.5);
+                  renEdgePoints.push(
+                    camX,
+                    (camY - 0.5) * (sar / vAspect) + 0.5,
+                  );
                 } else {
-                  renEdgePoints.push((camX - 0.5) * (vAspect / sar) + 0.5, camY);
+                  renEdgePoints.push(
+                    (camX - 0.5) * (vAspect / sar) + 0.5,
+                    camY,
+                  );
                 }
               }
             }
@@ -1045,15 +1091,21 @@ void main() {
 
           /* Right hand tracking for ハツ aura focus — average of wrist/pinky/index/thumb */
           try {
-            const pr  = poseLandmarker.detectForVideo(video, now, {
+            const pr = poseLandmarker.detectForVideo(video, now, {
               imageSize: { width: video.videoWidth, height: video.videoHeight },
             });
-            const lm  = pr?.landmarks?.[0];
-            const p16 = lm?.[16], p18 = lm?.[18], p20 = lm?.[20], p22 = lm?.[22];
-            const raw = (p16 && p18 && p20 && p22)
-              ? { x: (p16.x + p18.x + p20.x + p22.x) / 4,
-                  y: (p16.y + p18.y + p20.y + p22.y) / 4 }
-              : (p16 ?? null);
+            const lm = pr?.landmarks?.[0];
+            const p16 = lm?.[16],
+              p18 = lm?.[18],
+              p20 = lm?.[20],
+              p22 = lm?.[22];
+            const raw =
+              p16 && p18 && p20 && p22
+                ? {
+                    x: (p16.x + p18.x + p20.x + p22.x) / 4,
+                    y: (p16.y + p18.y + p20.y + p22.y) / 4,
+                  }
+                : (p16 ?? null);
             if (raw) {
               const cx = 1 - raw.x;
               const cy = 1 - raw.y;
@@ -1066,7 +1118,9 @@ void main() {
             } else {
               wristUV = null;
             }
-          } catch { wristUV = null; }
+          } catch {
+            wristUV = null;
+          }
         }
 
         /* ---- Navier-Stokes fluid step ---- */
@@ -1152,31 +1206,56 @@ void main() {
           }
 
           /* Hatsu wrist — wild chaotic dual-vortex */
-          if (currentPreset === 'hatsu' && wristUV) {
-            const wx = wristUV.x, wy = wristUV.y;
+          if (currentPreset === "hatsu" && wristUV) {
+            const wx = wristUV.x,
+              wy = wristUV.y;
             const t = totalTime;
             for (let j = 0; j < 6; j++) {
-              const angle = (j / 6) * Math.PI * 2 + t * 6.5 + Math.sin(t * (4.0 + j * 1.9)) * 1.6;
+              const angle =
+                (j / 6) * Math.PI * 2 +
+                t * 6.5 +
+                Math.sin(t * (4.0 + j * 1.9)) * 1.6;
               const r = 0.013 + Math.sin(t * (5.5 + j * 2.3)) * 0.007;
               useFBO(vel.write);
               gl.useProgram(progSplat);
               bindFBOTex(0, vel.read);
               gl.uniform1i(progSplat.u.u_base, 0);
-              gl.uniform2f(progSplat.u.u_point, wx + Math.cos(angle) * r, wy + Math.sin(angle) * r);
-              gl.uniform3f(progSplat.u.u_color, -Math.sin(angle) * 0.40, Math.cos(angle) * 0.40, 0.0);
-              gl.uniform1f(progSplat.u.u_r, 0.0020);
+              gl.uniform2f(
+                progSplat.u.u_point,
+                wx + Math.cos(angle) * r,
+                wy + Math.sin(angle) * r,
+              );
+              gl.uniform3f(
+                progSplat.u.u_color,
+                -Math.sin(angle) * 0.4,
+                Math.cos(angle) * 0.4,
+                0.0,
+              );
+              gl.uniform1f(progSplat.u.u_r, 0.002);
               drawQuad();
               vel.swap();
             }
             for (let j = 0; j < 4; j++) {
-              const angle = (j / 4) * Math.PI * 2 - t * 4.2 + Math.sin(t * (3.5 + j * 2.6)) * 1.4;
-              const r = 0.030 + Math.sin(t * (4.5 + j * 1.9)) * 0.010;
+              const angle =
+                (j / 4) * Math.PI * 2 -
+                t * 4.2 +
+                Math.sin(t * (3.5 + j * 2.6)) * 1.4;
+              const r = 0.03 + Math.sin(t * (4.5 + j * 1.9)) * 0.01;
               useFBO(vel.write);
               gl.useProgram(progSplat);
               bindFBOTex(0, vel.read);
               gl.uniform1i(progSplat.u.u_base, 0);
-              gl.uniform2f(progSplat.u.u_point, wx + Math.cos(angle) * r, wy + Math.sin(angle) * r);
-              gl.uniform3f(progSplat.u.u_color, Math.sin(angle) * 0.26, -Math.cos(angle) * 0.26, 0.0);
+              gl.uniform2f(
+                progSplat.u.u_point,
+                wx + Math.cos(angle) * r,
+                wy + Math.sin(angle) * r,
+              );
+              gl.uniform3f(
+                progSplat.u.u_color,
+                Math.sin(angle) * 0.26,
+                -Math.cos(angle) * 0.26,
+                0.0,
+              );
               gl.uniform1f(progSplat.u.u_r, 0.0025);
               drawQuad();
               vel.swap();
@@ -1184,7 +1263,7 @@ void main() {
           }
 
           /* Ren body — dual-vortex rings at N silhouette points (same logic as hatsu wrist) */
-          if (currentPreset === 'ren' && renEdgePoints.length >= 2) {
+          if (currentPreset === "ren" && renEdgePoints.length >= 2) {
             const t = totalTime;
             const totalPts = renEdgePoints.length >> 1;
             const N_PTS = 8;
@@ -1192,31 +1271,57 @@ void main() {
               const idx = Math.floor((pi / N_PTS) * totalPts) * 2;
               const wx = renEdgePoints[idx];
               const wy = renEdgePoints[idx + 1];
-              const phase = pi * (Math.PI * 2 / N_PTS);
+              const phase = pi * ((Math.PI * 2) / N_PTS);
               // Inner CCW ring
               for (let j = 0; j < 6; j++) {
-                const angle = (j / 6) * Math.PI * 2 + t * 1.4 + phase + Math.sin(t * (1.2 + j * 0.5)) * 0.5;
+                const angle =
+                  (j / 6) * Math.PI * 2 +
+                  t * 1.4 +
+                  phase +
+                  Math.sin(t * (1.2 + j * 0.5)) * 0.5;
                 const r = 0.013 + Math.sin(t * (1.8 + j * 0.7)) * 0.005;
                 useFBO(vel.write);
                 gl.useProgram(progSplat);
                 bindFBOTex(0, vel.read);
                 gl.uniform1i(progSplat.u.u_base, 0);
-                gl.uniform2f(progSplat.u.u_point, wx + Math.cos(angle) * r, wy + Math.sin(angle) * r);
-                gl.uniform3f(progSplat.u.u_color, -Math.sin(angle) * 0.17, Math.cos(angle) * 0.17, 0.0);
-                gl.uniform1f(progSplat.u.u_r, 0.0020);
+                gl.uniform2f(
+                  progSplat.u.u_point,
+                  wx + Math.cos(angle) * r,
+                  wy + Math.sin(angle) * r,
+                );
+                gl.uniform3f(
+                  progSplat.u.u_color,
+                  -Math.sin(angle) * 0.17,
+                  Math.cos(angle) * 0.17,
+                  0.0,
+                );
+                gl.uniform1f(progSplat.u.u_r, 0.002);
                 drawQuad();
                 vel.swap();
               }
               // Outer CW ring
               for (let j = 0; j < 4; j++) {
-                const angle = (j / 4) * Math.PI * 2 - t * 0.9 + phase + Math.sin(t * (1.1 + j * 0.8)) * 0.4;
-                const r = 0.030 + Math.sin(t * (1.4 + j * 0.6)) * 0.007;
+                const angle =
+                  (j / 4) * Math.PI * 2 -
+                  t * 0.9 +
+                  phase +
+                  Math.sin(t * (1.1 + j * 0.8)) * 0.4;
+                const r = 0.03 + Math.sin(t * (1.4 + j * 0.6)) * 0.007;
                 useFBO(vel.write);
                 gl.useProgram(progSplat);
                 bindFBOTex(0, vel.read);
                 gl.uniform1i(progSplat.u.u_base, 0);
-                gl.uniform2f(progSplat.u.u_point, wx + Math.cos(angle) * r, wy + Math.sin(angle) * r);
-                gl.uniform3f(progSplat.u.u_color, Math.sin(angle) * 0.11, -Math.cos(angle) * 0.11, 0.0);
+                gl.uniform2f(
+                  progSplat.u.u_point,
+                  wx + Math.cos(angle) * r,
+                  wy + Math.sin(angle) * r,
+                );
+                gl.uniform3f(
+                  progSplat.u.u_color,
+                  Math.sin(angle) * 0.11,
+                  -Math.cos(angle) * 0.11,
+                  0.0,
+                );
                 gl.uniform1f(progSplat.u.u_r, 0.0025);
                 drawQuad();
                 vel.swap();
@@ -1262,8 +1367,9 @@ void main() {
           dye.swap();
 
           /* Hatsu wrist — HDR dye splats */
-          if (currentPreset === 'hatsu' && wristUV) {
-            const wx = wristUV.x, wy = wristUV.y;
+          if (currentPreset === "hatsu" && wristUV) {
+            const wx = wristUV.x,
+              wy = wristUV.y;
             const t = totalTime;
             useFBO(dye.write);
             gl.useProgram(progSplat);
@@ -1271,27 +1377,39 @@ void main() {
             gl.uniform1i(progSplat.u.u_base, 0);
             gl.uniform2f(progSplat.u.u_point, wx, wy);
             gl.uniform3f(progSplat.u.u_color, 2.0, 1.2, 0.4);
-            gl.uniform1f(progSplat.u.u_r, 0.0030);
+            gl.uniform1f(progSplat.u.u_r, 0.003);
             drawQuad();
             dye.swap();
             const wristHues = [
               [1.0, 0.05, 0.02],
-              [1.0, 0.42, 0.00],
-              [1.0, 0.95, 0.10],
+              [1.0, 0.42, 0.0],
+              [1.0, 0.95, 0.1],
               [0.55, 0.05, 1.0],
-              [0.00, 0.70, 1.0],
+              [0.0, 0.7, 1.0],
             ];
             for (let k = 0; k < 5; k++) {
-              const a  = (k / 5) * Math.PI * 2 + t * (8.0 + k * 2.8) + Math.sin(t * (5.5 + k * 2.1)) * 1.8;
-              const dr = 0.010 + Math.sin(t * (6.5 + k * 2.5)) * 0.009;
-              const s  = 2.0 + Math.sin(t * (5.5 + k * 2.2)) * 0.8;
+              const a =
+                (k / 5) * Math.PI * 2 +
+                t * (8.0 + k * 2.8) +
+                Math.sin(t * (5.5 + k * 2.1)) * 1.8;
+              const dr = 0.01 + Math.sin(t * (6.5 + k * 2.5)) * 0.009;
+              const s = 2.0 + Math.sin(t * (5.5 + k * 2.2)) * 0.8;
               const cr = wristHues[k];
               useFBO(dye.write);
               gl.useProgram(progSplat);
               bindFBOTex(0, dye.read);
               gl.uniform1i(progSplat.u.u_base, 0);
-              gl.uniform2f(progSplat.u.u_point, wx + Math.cos(a) * dr, wy + Math.sin(a) * dr);
-              gl.uniform3f(progSplat.u.u_color, s * cr[0], s * cr[1], s * cr[2]);
+              gl.uniform2f(
+                progSplat.u.u_point,
+                wx + Math.cos(a) * dr,
+                wy + Math.sin(a) * dr,
+              );
+              gl.uniform3f(
+                progSplat.u.u_color,
+                s * cr[0],
+                s * cr[1],
+                s * cr[2],
+              );
               gl.uniform1f(progSplat.u.u_r, 0.0017);
               drawQuad();
               dye.swap();
