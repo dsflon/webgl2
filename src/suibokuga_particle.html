@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>水墨画 — PARTICLE</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #f0ede8;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+      }
+      .loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #9a968e;
+        font-size: 11px;
+        letter-spacing: 0.32em;
+        background: #f0ede8;
+        transition: opacity 0.8s ease;
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+        pointer-events: none;
+        z-index: 10;
+      }
+      .loading.done {
+        opacity: 0;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <div class="loading" id="loading">LOADING</div>
+    <script>
+      // ─────────────────────────────────────────────
+      // CONFIG
+      // ─────────────────────────────────────────────
+      const TEX = 512; // TEX² = 262,144 particles
+      const NUM = TEX * TEX;
+      const IMG = "suibokuga.png";
+
+      // ─────────────────────────────────────────────
+      // WEBGL2 INIT
+      // ─────────────────────────────────────────────
+      const canvas = document.getElementById("gl");
+      const gl = canvas.getContext("webgl2", {
+        antialias: true,
+        preserveDrawingBuffer: false,
+      });
+      if (!gl) {
+        document.getElementById("loading").textContent = "WebGL2 not supported";
+        throw new Error("no webgl2");
+      }
+      const extCBF = gl.getExtension("EXT_color_buffer_float");
+      if (!extCBF) {
+        document.getElementById("loading").textContent =
+          "EXT_color_buffer_float not supported";
+        throw new Error("no float fb");
+      }
+
+      // ─────────────────────────────────────────────
+      // SHADERS
+      // ─────────────────────────────────────────────
+
+      // Fullscreen quad VS (shared by physics passes)
+      const vsQuad = `#version 300 es
+layout(location=0) in vec2 a_pos;
+out vec2 v_uv;
+void main() { v_uv = a_pos * .5 + .5; gl_Position = vec4(a_pos, 0., 1.); }`;
+
+      // Velocity update FS — ds.html style: puff envelope + drift noise
+      const fsVel = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_pos;
+uniform sampler2D u_vel;
+uniform sampler2D u_home;
+uniform vec2  u_mouse;   // smooth mouse in image UV
+uniform float u_puff;    // 0..1 envelope driven by mouse movement
+uniform float u_springK;
+uniform float u_damp;
+uniform float u_dt;
+uniform float u_step;    // dt * 60
+uniform float u_time;
+out vec4 o;
+
+// 2D simplex noise
+vec3 mod289v(vec3 x){ return x - floor(x*(1./289.))*289.; }
+vec2 mod289v(vec2 x){ return x - floor(x*(1./289.))*289.; }
+vec3 permute(vec3 x){ return mod289v(((x*34.)+1.)*x); }
+float snoise(vec2 v){
+  const vec4 C = vec4(.211324865,.366025403,-.577350269,.024390243);
+  vec2 i  = floor(v + dot(v,C.yy));
+  vec2 x0 = v - i + dot(i,C.xx);
+  vec2 i1  = x0.x>x0.y ? vec2(1,0) : vec2(0,1);
+  vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
+  i = mod289v(i);
+  vec3 p = permute(permute(i.y+vec3(0,i1.y,1))+i.x+vec3(0,i1.x,1));
+  vec3 m = max(.5-vec3(dot(x0,x0),dot(x12.xy,x12.xy),dot(x12.zw,x12.zw)),0.);
+  m=m*m; m=m*m;
+  vec3 x2 = 2.*fract(p*C.www)-1., h=abs(x2)-.5, ox=floor(x2+.5), a0=x2-ox;
+  m *= 1.79284291-.85373472*(a0*a0+h*h);
+  vec3 gv; gv.x=a0.x*x0.x+h.x*x0.y; gv.yz=a0.yz*x12.xz+h.yz*x12.yw;
+  return 130.*dot(m,gv);
+}
+
+void main() {
+  ivec2 fc   = ivec2(gl_FragCoord.xy);
+  vec2  pos  = texelFetch(u_pos,  fc, 0).xy;
+  vec2  vel  = texelFetch(u_vel,  fc, 0).xy;
+  vec4  hd   = texelFetch(u_home, fc, 0);
+  vec2  home = hd.xy;
+  float seed = hd.w;   // per-particle random seed
+
+  // Spring toward home (gentle, always on)
+  vec2 force = (home - pos) * u_springK;
+
+  // Puff: slowly building radial expansion from mouse cursor
+  if (u_puff > 0.003) {
+    vec2  dm   = pos - u_mouse;
+    float d    = length(dm);
+    float fall = exp(-d * d * 35.0);       // tighter radius in image UV
+    float sens = 0.55 + 0.9 * seed;        // per-particle sensitivity
+    vec2  dir  = dm / max(d, 0.02);
+    force += dir * fall * u_puff * 2.1 * sens;
+  }
+
+  // Drift: simplex noise swirl while displaced from home
+  float disp = clamp(length(pos - home) * 5.0, 0.0, 1.0);
+  if (disp > 0.01) {
+    vec2 sw = vec2(
+      snoise(pos * 4.0 + vec2(u_time * 0.10, seed * 7.0)),
+      snoise(pos.yx * 4.0 - vec2(u_time * 0.08, seed * 3.0)));
+    force += sw * disp * 0.30;
+  }
+
+  vel = vel * u_damp + force * u_dt;
+
+  // Velocity cap (ds.html style: 0.030 * step in world, ~0.012 in image UV)
+  float sp  = length(vel);
+  float cap = 0.012 * u_step;
+  vel *= min(sp, cap) / max(sp, 1e-5);
+
+  o = vec4(vel, 0., 1.);
+}`;
+
+      // Position update FS — fixed-step like ds.html: pos += vel (no *dt)
+      const fsPos = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_pos;
+uniform sampler2D u_vel;
+out vec4 o;
+void main() {
+  ivec2 fc = ivec2(gl_FragCoord.xy);
+  vec2 pos = texelFetch(u_pos, fc, 0).xy;
+  vec2 vel = texelFetch(u_vel, fc, 0).xy;
+  o = vec4(pos + vel, 0., 1.);
+}`;
+
+      // Particle VS — reads position texture by ID, outputs clip position + color
+      const vsParticle = `#version 300 es
+precision highp float;
+layout(location=0) in float a_id;
+uniform sampler2D u_pos;
+uniform sampler2D u_col;
+uniform vec2      u_imgOff;    // contain-fit: offset (UV)
+uniform vec2      u_imgScale;  // contain-fit: scale (UV)
+uniform float     u_ptSize;    // base point size (physical px)
+out vec4 v_col;
+void main() {
+  int   id  = int(a_id);
+  ivec2 fc  = ivec2(id % ${TEX}, id / ${TEX});
+  v_col     = texelFetch(u_col, fc, 0);
+
+  // Cull invisible particles (push off-screen)
+  if (v_col.a < 0.03) { gl_Position = vec4(9., 9., 0., 1.); gl_PointSize = 0.; return; }
+
+  vec2 pos = texelFetch(u_pos, fc, 0).xy;
+
+  // Image UV → screen UV → NDC  (image Y=0 is top; NDC Y=1 is top)
+  vec2 suv  = u_imgOff + pos * u_imgScale;
+  vec2 clip = suv * 2.0 - 1.0;
+  clip.y    = -clip.y;
+
+  gl_Position  = vec4(clip, 0., 1.);
+
+  // Per-particle size jitter (hash on id, no extra texture)
+  float rnd    = fract(sin(float(id) * 0.31758) * 43758.5453);
+  gl_PointSize = u_ptSize * (0.85 + rnd * 0.3);
+}`;
+
+      // Particle FS — soft circular ink dot
+      const fsParticle = `#version 300 es
+precision mediump float;
+in vec4  v_col;
+out vec4 o;
+void main() {
+  vec2  d  = gl_PointCoord - .5;
+  float r2 = dot(d, d);
+  float a  = exp(-r2 * 4.0) * v_col.a;
+  if (a < 0.01) discard;
+  o = vec4(v_col.rgb, a);
+}`;
+
+      // ─────────────────────────────────────────────
+      // GL HELPERS
+      // ─────────────────────────────────────────────
+      function compile(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+          throw new Error(
+            gl.getShaderInfoLog(s) + "\n---\n" + src.slice(0, 400),
+          );
+        return s;
+      }
+
+      function mkProg(vs, fs) {
+        const p = gl.createProgram();
+        gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+        gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+        gl.linkProgram(p);
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+          throw new Error(gl.getProgramInfoLog(p));
+        const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+        p.u = {};
+        for (let i = 0; i < n; i++) {
+          const info = gl.getActiveUniform(p, i);
+          p.u[info.name] = gl.getUniformLocation(p, info.name);
+        }
+        return p;
+      }
+
+      function mkTex32F(w, h, data) {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA32F,
+          w,
+          h,
+          0,
+          gl.RGBA,
+          gl.FLOAT,
+          data ?? null,
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return t;
+      }
+
+      function mkFBO(tex) {
+        const fb = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(
+          gl.FRAMEBUFFER,
+          gl.COLOR_ATTACHMENT0,
+          gl.TEXTURE_2D,
+          tex,
+          0,
+        );
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return fb;
+      }
+
+      // ─────────────────────────────────────────────
+      // COMPILE PROGRAMS
+      // ─────────────────────────────────────────────
+      const progVel = mkProg(vsQuad, fsVel);
+      const progPos = mkProg(vsQuad, fsPos);
+      const progPts = mkProg(vsParticle, fsParticle);
+
+      // ─────────────────────────────────────────────
+      // VAOs
+      // ─────────────────────────────────────────────
+
+      // Fullscreen quad (for physics passes)
+      const quadVAO = gl.createVertexArray();
+      gl.bindVertexArray(quadVAO);
+      {
+        const b = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, b);
+        gl.bufferData(
+          gl.ARRAY_BUFFER,
+          new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+          gl.STATIC_DRAW,
+        );
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      }
+
+      // Particle IDs (one float per particle)
+      const ptsVAO = gl.createVertexArray();
+      gl.bindVertexArray(ptsVAO);
+      {
+        const ids = new Float32Array(NUM);
+        for (let i = 0; i < NUM; i++) ids[i] = i;
+        const b = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, b);
+        gl.bufferData(gl.ARRAY_BUFFER, ids, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
+      }
+
+      function drawQuad() {
+        gl.bindVertexArray(quadVAO);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+
+      // ─────────────────────────────────────────────
+      // MAIN
+      // ─────────────────────────────────────────────
+      async function init() {
+        // Load source image
+        const img = await new Promise((res, rej) => {
+          const el = new Image();
+          el.onload = () => res(el);
+          el.onerror = rej;
+          el.src = IMG;
+        });
+
+        // Sample image at TEX×TEX resolution into a CPU canvas
+        const oc = document.createElement("canvas");
+        oc.width = TEX;
+        oc.height = TEX;
+        const ctx2d = oc.getContext("2d");
+        ctx2d.drawImage(img, 0, 0, TEX, TEX);
+        const px = ctx2d.getImageData(0, 0, TEX, TEX).data; // RGBA bytes, Y=0 is top
+
+        const imgW = img.naturalWidth;
+        const imgH = img.naturalHeight;
+
+        // Build home (position) and color textures
+        const homeData = new Float32Array(NUM * 4);
+        const colorData = new Float32Array(NUM * 4);
+
+        for (let j = 0; j < TEX; j++) {
+          for (let i = 0; i < TEX; i++) {
+            const idx = j * TEX + i;
+            const p = idx * 4;
+            const r = px[p] / 255;
+            const g = px[p + 1] / 255;
+            const b = px[p + 2] / 255;
+            const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            const ink = 1.0 - lum; // 0=white paper, 1=black ink
+
+            // Image UV: x in [0,1] left→right, y in [0,1] top→bottom
+            const x = (i + 0.5) / TEX;
+            const y = (j + 0.5) / TEX;
+
+            homeData[idx * 4 + 0] = x;
+            homeData[idx * 4 + 1] = y;
+            homeData[idx * 4 + 2] = 0.0;
+            homeData[idx * 4 + 3] = Math.random(); // per-particle seed
+
+            // Color: fixed near-black ink (墨) regardless of source pixel brightness.
+            // Alpha: sqrt(ink) expands mid-tone coverage; noise gives mottled texture.
+            const noise = 0.75 + Math.random() * 0.5;
+            colorData[idx * 4 + 0] = 0.06;
+            colorData[idx * 4 + 1] = 0.05;
+            colorData[idx * 4 + 2] = 0.08;
+            colorData[idx * 4 + 3] = Math.min(
+              1.0,
+              Math.pow(ink, 0.5) * noise * 1.1,
+            );
+          }
+        }
+
+        // Physics textures (ping-pong)
+        const homeTex = mkTex32F(TEX, TEX, homeData);
+        const colTex = mkTex32F(TEX, TEX, colorData);
+        const posTexA = mkTex32F(TEX, TEX, homeData); // particles start at home
+        const posTexB = mkTex32F(TEX, TEX, null);
+        const velTexA = mkTex32F(TEX, TEX, null); // zero velocity initially
+        const velTexB = mkTex32F(TEX, TEX, null);
+
+        const posFbA = mkFBO(posTexA),
+          posFbB = mkFBO(posTexB);
+        const velFbA = mkFBO(velTexA),
+          velFbB = mkFBO(velTexB);
+
+        let posR = posTexA,
+          posW = posTexB,
+          posFbR = posFbA,
+          posFbW = posFbB;
+        let velR = velTexA,
+          velW = velTexB,
+          velFbR = velFbA,
+          velFbW = velFbB;
+
+        // ─── Contain-fit geometry ──────────────────
+        let W = 1,
+          H = 1;
+        let imgOffX = 0,
+          imgOffY = 0,
+          imgScaleX = 1,
+          imgScaleY = 1;
+        const imgAspect = imgW / imgH;
+
+        function resize() {
+          W = (canvas.clientWidth * devicePixelRatio) | 0;
+          H = (canvas.clientHeight * devicePixelRatio) | 0;
+          canvas.width = W;
+          canvas.height = H;
+          const s = Math.min(W / imgW, H / imgH);
+          const dW = imgW * s;
+          const dH = imgH * s;
+          imgScaleX = dW / W;
+          imgScaleY = dH / H;
+          imgOffX = (W - dW) / (2 * W);
+          imgOffY = (H - dH) / (2 * H);
+        }
+        resize();
+        window.addEventListener("resize", resize);
+
+        // ─── Input state (ds.html style) ──────────
+        // M.x/y: actual mouse in image UV
+        // M.sx/sy: smoothed mouse (lags behind)
+        // M.moveAmt: accumulates movement, drives puff
+        const M = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, has: false, moveAmt: 0 };
+        let puff = 0; // slowly rising/falling envelope 0..1
+
+        function toImgUV(cx, cy) {
+          const px = (cx * devicePixelRatio) / W;
+          const py = (cy * devicePixelRatio) / H;
+          return {
+            x: (px - imgOffX) / imgScaleX,
+            y: (py - imgOffY) / imgScaleY,
+          };
+        }
+
+        function onPointerMove(cx, cy) {
+          const uv = toImgUV(cx, cy);
+          if (M.has) {
+            // Scale UV delta to match ds.html's world-space sensitivity
+            M.moveAmt = Math.min(
+              1.5,
+              M.moveAmt + Math.hypot(uv.x - M.x, uv.y - M.y) * 8.0,
+            );
+          }
+          M.x = uv.x;
+          M.y = uv.y;
+          M.has = true;
+        }
+
+        canvas.addEventListener("pointermove", (e) =>
+          onPointerMove(e.clientX, e.clientY),
+        );
+        canvas.addEventListener("pointerdown", (e) =>
+          onPointerMove(e.clientX, e.clientY),
+        );
+        canvas.addEventListener("pointerleave", () => {
+          M.has = false;
+        });
+
+        // ─── Render loop ───────────────────────────
+        let lastT = null;
+        let totalTime = 0;
+        document.getElementById("loading").classList.add("done");
+
+        function frame(ts) {
+          requestAnimationFrame(frame);
+          if (!lastT) {
+            lastT = ts;
+            return;
+          }
+          const dt = Math.min((ts - lastT) / 1000, 0.05);
+          lastT = ts;
+          totalTime += dt;
+          const step = dt * 60;
+
+          // puff envelope: attack ~0.5s / release ~2.2s
+          const target = Math.min(1, M.moveAmt);
+          M.moveAmt *= Math.pow(0.25, dt);
+          const rate =
+            target > puff ? 1 - Math.pow(0.08, dt) : 1 - Math.pow(0.55, dt);
+          puff += (target - puff) * rate;
+
+          // smooth mouse follower
+          const k = 1 - Math.pow(0.004, dt);
+          M.sx += (M.x - M.sx) * k;
+          M.sy += (M.y - M.sy) * k;
+
+          const damp = Math.pow(0.93, step);
+
+          // ── Velocity update ───────────────────────
+          gl.bindFramebuffer(gl.FRAMEBUFFER, velFbW);
+          gl.viewport(0, 0, TEX, TEX);
+          gl.useProgram(progVel);
+
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, posR);
+          gl.uniform1i(progVel.u["u_pos"], 0);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, velR);
+          gl.uniform1i(progVel.u["u_vel"], 1);
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, homeTex);
+          gl.uniform1i(progVel.u["u_home"], 2);
+
+          gl.uniform2f(progVel.u["u_mouse"], M.sx, M.sy);
+          gl.uniform1f(progVel.u["u_puff"], M.has ? puff : 0);
+          gl.uniform1f(progVel.u["u_springK"], 2.4);
+          gl.uniform1f(progVel.u["u_damp"], damp);
+          gl.uniform1f(progVel.u["u_dt"], dt);
+          gl.uniform1f(progVel.u["u_step"], step);
+          gl.uniform1f(progVel.u["u_time"], totalTime);
+
+          drawQuad();
+          [velR, velW, velFbR, velFbW] = [velW, velR, velFbW, velFbR];
+
+          // ── Position update ───────────────────────
+          gl.bindFramebuffer(gl.FRAMEBUFFER, posFbW);
+          gl.viewport(0, 0, TEX, TEX);
+          gl.useProgram(progPos);
+
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, posR);
+          gl.uniform1i(progPos.u["u_pos"], 0);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, velR);
+          gl.uniform1i(progPos.u["u_vel"], 1);
+
+          drawQuad();
+          [posR, posW, posFbR, posFbW] = [posW, posR, posFbW, posFbR];
+
+          // ── Render particles ──────────────────────
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.viewport(0, 0, W, H);
+          gl.clearColor(240 / 255, 237 / 255, 232 / 255, 1.0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.useProgram(progPts);
+
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, posR);
+          gl.uniform1i(progPts.u["u_pos"], 0);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, colTex);
+          gl.uniform1i(progPts.u["u_col"], 1);
+
+          gl.uniform2f(progPts.u["u_imgOff"], imgOffX, imgOffY);
+          gl.uniform2f(progPts.u["u_imgScale"], imgScaleX, imgScaleY);
+
+          // Point size: 3x cell width to fill gaps between particles
+          const cellPx = Math.min(imgScaleX * W, imgScaleY * H) / TEX;
+          gl.uniform1f(
+            progPts.u["u_ptSize"],
+            Math.max(3.0, Math.min(cellPx * 3.0, 14.0)),
+          );
+
+          gl.bindVertexArray(ptsVAO);
+          gl.drawArrays(gl.POINTS, 0, NUM);
+          gl.disable(gl.BLEND);
+        }
+
+        requestAnimationFrame(frame);
+      }
+
+      init().catch((e) => {
+        console.error(e);
+        const el = document.getElementById("loading");
+        el.textContent = "ERROR: " + (e.message || e);
+        el.style.opacity = "1";
+        el.style.pointerEvents = "none";
+      });
+    </script>
+  </body>
+</html>
