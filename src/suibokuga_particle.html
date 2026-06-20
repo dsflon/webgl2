@@ -53,7 +53,6 @@
       // ─────────────────────────────────────────────
       const TEX = 1024; // TEX² = 1,048,576 particles
       const NUM = TEX * TEX;
-      const IMG = "suibokuga.png";
 
       // ─────────────────────────────────────────────
       // WEBGL2 INIT
@@ -87,7 +86,6 @@ void main() { v_uv = a_pos * .5 + .5; gl_Position = vec4(a_pos, 0., 1.); }`;
       // Velocity update FS — ds.html style: puff envelope + drift noise
       const fsVel = `#version 300 es
 precision highp float;
-in vec2 v_uv;
 uniform sampler2D u_pos;
 uniform sampler2D u_vel;
 uniform sampler2D u_home1;
@@ -186,7 +184,6 @@ void main() {
       // Position update FS — fixed-step like ds.html: pos += vel (no *dt)
       const fsPos = `#version 300 es
 precision highp float;
-in vec2 v_uv;
 uniform sampler2D u_pos;
 uniform sampler2D u_vel;
 out vec4 o;
