@@ -370,14 +370,21 @@ void main() {
           loadImg("image_suzuki.png"),
         ]);
 
-        // Compute contain-fit params for a given image and canvas size
-        function computeFit(iW, iH, cW, cH) {
-          const s = Math.max(cW / iW, cH / iH);
+        // Cover-fit: odd images (0,2) pad left, even images (1,3) pad right
+        function computeFit(iW, iH, cW, cH, idx) {
+          const padT = 0.15;
+          const padL = idx % 2 === 0 ? 0.25 : 0.0;
+          const padR = idx % 2 === 0 ? 0.0 : 0.25;
+          const aW = cW * (1 - padL - padR),
+            aH = cH * (1 - padT);
+          const s = Math.max(aW / iW, aH / iH);
           const dW = iW * s,
             dH = iH * s;
+          const cx = padL + (1 - padL - padR) / 2;
+          const cy = padT + (1 - padT) / 2;
           return {
-            offX: (cW - dW) / (2 * cW),
-            offY: (cH - dH) / (2 * cH),
+            offX: cx - dW / cW / 2,
+            offY: cy - dH / cH / 2,
             scaleX: dW / cW,
             scaleY: dH / cH,
           };
@@ -456,8 +463,8 @@ void main() {
           H = (canvas.clientHeight * devicePixelRatio) | 0;
           canvas.width = W;
           canvas.height = H;
-          fits = imgs.map((img) =>
-            computeFit(img.naturalWidth, img.naturalHeight, W, H),
+          fits = imgs.map((img, i) =>
+            computeFit(img.naturalWidth, img.naturalHeight, W, H, i),
           );
         }
         resize();
@@ -679,7 +686,10 @@ void main() {
           gl.uniform1i(progPts.u["u_col2"], 2);
           gl.uniform1f(progPts.u["u_imgBlend"], imgBlend);
 
-          const t = imgBlend;
+          // Use transT (linear 0→1, exact 1.0 at finalization) for fit interpolation
+          // so the display offset never snaps when currentIdx resets.
+          // imgBlend (exponential ease) is kept for physics/color only.
+          const t = transT < 0 ? 0.0 : transT;
           const cf = fits[currentIdx];
           const nf = fits[nextIdx];
           const curOffX = cf.offX + (nf.offX - cf.offX) * t;
