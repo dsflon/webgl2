@@ -464,15 +464,29 @@ void main() {
           M.has = true;
         }
 
-        canvas.addEventListener("pointermove", (e) =>
-          onPointerMove(e.clientX, e.clientY),
-        );
-        canvas.addEventListener("pointerdown", (e) =>
-          onPointerMove(e.clientX, e.clientY),
-        );
-        canvas.addEventListener("pointerleave", () => {
-          M.has = false;
+        // Desktop
+        canvas.addEventListener("pointermove", (e) => {
+          if (e.pointerType !== "touch") onPointerMove(e.clientX, e.clientY);
         });
+        canvas.addEventListener("pointerdown", (e) => {
+          if (e.pointerType !== "touch") onPointerMove(e.clientX, e.clientY);
+        });
+        canvas.addEventListener("pointerleave", (e) => {
+          if (e.pointerType !== "touch") M.has = false;
+        });
+
+        // Mobile touch
+        canvas.addEventListener("touchmove", (e) => {
+          e.preventDefault();
+          onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: false });
+        canvas.addEventListener("touchstart", (e) => {
+          e.preventDefault();
+          onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: false });
+        canvas.addEventListener("touchend", () => {
+          M.has = false;
+        }, { passive: false });
 
         // ─── Render loop ───────────────────────────
         let lastT = null;
