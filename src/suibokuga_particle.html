@@ -90,7 +90,10 @@ precision highp float;
 in vec2 v_uv;
 uniform sampler2D u_pos;
 uniform sampler2D u_vel;
-uniform sampler2D u_home;
+uniform sampler2D u_home1;
+uniform sampler2D u_home2;
+uniform float u_imgBlend; // home position blend 0=img1, 1=img2
+uniform float u_chaos;   // 0..1 turbulence strength (sin curve during transition)
 uniform vec2  u_mouse;   // smooth mouse in image UV
 uniform float u_puff;    // 0..1 envelope driven by mouse movement
 uniform float u_springK;
@@ -124,35 +127,55 @@ void main() {
   ivec2 fc   = ivec2(gl_FragCoord.xy);
   vec2  pos  = texelFetch(u_pos,  fc, 0).xy;
   vec2  vel  = texelFetch(u_vel,  fc, 0).xy;
-  vec4  hd   = texelFetch(u_home, fc, 0);
-  vec2  home = hd.xy;
-  float seed = hd.w;   // per-particle random seed
+  vec4  hd1  = texelFetch(u_home1, fc, 0);
+  vec4  hd2  = texelFetch(u_home2, fc, 0);
+  vec2  home = mix(hd1.xy, hd2.xy, u_imgBlend);
+  float seed = hd1.w;
 
-  // Spring toward home (gentle, always on)
+  // Spring toward home (always fully active)
   vec2 force = (home - pos) * u_springK;
 
-  // Puff: slowly building radial expansion from mouse cursor
-  if (u_puff > 0.003) {
+  if (u_chaos > 0.01) {
+    // Ghost mice: 4 points orbiting the image with different frequencies/phases.
+    // Uses the exact same puff formula as real mouse interaction → same organic feel.
+    float ct = u_time * 1.8;
+    vec2 g0 = vec2(0.5 + cos(ct * 1.00)        * 0.40, 0.5 + sin(ct * 1.30)        * 0.36);
+    vec2 g1 = vec2(0.5 + cos(ct * 1.70 + 1.57) * 0.36, 0.5 + sin(ct * 1.10 + 1.57) * 0.40);
+    vec2 g2 = vec2(0.5 + cos(ct * 1.30 + 3.14) * 0.38, 0.5 + sin(ct * 1.90 + 3.14) * 0.30);
+    vec2 g3 = vec2(0.5 + cos(ct * 2.10 + 4.71) * 0.30, 0.5 + sin(ct * 1.50 + 4.71) * 0.38);
+
+    vec2 ghosts[4];
+    ghosts[0] = g0; ghosts[1] = g1; ghosts[2] = g2; ghosts[3] = g3;
+
+    float sens = 0.55 + 0.9 * seed;
+    for (int k = 0; k < 4; k++) {
+      vec2  dm   = pos - ghosts[k];
+      float d    = length(dm);
+      float fall = exp(-d * d * 20.0);
+      vec2  dir  = dm / max(d, 0.02);
+      force += dir * fall * u_chaos * 2.8 * sens;
+    }
+  } else if (u_puff > 0.003) {
     vec2  dm   = pos - u_mouse;
     float d    = length(dm);
-    float fall = exp(-d * d * 35.0);       // tighter radius in image UV
-    float sens = 0.55 + 0.9 * seed;        // per-particle sensitivity
+    float fall = exp(-d * d * 35.0);
+    float sens = 0.55 + 0.9 * seed;
     vec2  dir  = dm / max(d, 0.02);
     force += dir * fall * u_puff * 2.1 * sens;
   }
 
-  // Drift: simplex noise swirl while displaced from home
+  // Drift noise while displaced — weakened during convergence to reduce vortexing
   float disp = clamp(length(pos - home) * 5.0, 0.0, 1.0);
   if (disp > 0.01) {
     vec2 sw = vec2(
       snoise(pos * 4.0 + vec2(u_time * 0.10, seed * 7.0)),
       snoise(pos.yx * 4.0 - vec2(u_time * 0.08, seed * 3.0)));
-    force += sw * disp * 0.30;
+    float driftAmt = 0.08 + u_chaos * 0.22;
+    force += sw * disp * driftAmt;
   }
 
   vel = vel * u_damp + force * u_dt;
 
-  // Velocity cap (ds.html style: 0.030 * step in world, ~0.012 in image UV)
   float sp  = length(vel);
   float cap = 0.012 * u_step;
   vel *= min(sp, cap) / max(sp, 1e-5);
@@ -179,7 +202,9 @@ void main() {
 precision highp float;
 layout(location=0) in float a_id;
 uniform sampler2D u_pos;
-uniform sampler2D u_col;
+uniform sampler2D u_col1;
+uniform sampler2D u_col2;
+uniform float     u_imgBlend;
 uniform vec2      u_imgOff;    // contain-fit: offset (UV)
 uniform vec2      u_imgScale;  // contain-fit: scale (UV)
 uniform float     u_ptSize;    // base point size (physical px)
@@ -187,7 +212,7 @@ out vec4 v_col;
 void main() {
   int   id  = int(a_id);
   ivec2 fc  = ivec2(id % ${TEX}, id / ${TEX});
-  v_col     = texelFetch(u_col, fc, 0);
+  v_col = mix(texelFetch(u_col1, fc, 0), texelFetch(u_col2, fc, 0), u_imgBlend);
 
   // Cull invisible particles (push off-screen)
   if (v_col.a < 0.02) { gl_Position = vec4(9., 9., 0., 1.); gl_PointSize = 0.; return; }
@@ -332,65 +357,71 @@ void main() {
       // MAIN
       // ─────────────────────────────────────────────
       async function init() {
-        // Load source image
-        const img = await new Promise((res, rej) => {
-          const el = new Image();
-          el.onload = () => res(el);
-          el.onerror = rej;
-          el.src = IMG;
-        });
+        // Load both images in parallel
+        function loadImg(src) {
+          return new Promise((res, rej) => {
+            const el = new Image();
+            el.onload = () => res(el);
+            el.onerror = rej;
+            el.src = src;
+          });
+        }
+        const [img1, img2] = await Promise.all([
+          loadImg("suibokuga.png"),
+          loadImg("suibokuga2.png"),
+        ]);
 
-        // Sample image at TEX×TEX resolution into a CPU canvas
-        const oc = document.createElement("canvas");
-        oc.width = TEX;
-        oc.height = TEX;
-        const ctx2d = oc.getContext("2d");
-        ctx2d.drawImage(img, 0, 0, TEX, TEX);
-        const px = ctx2d.getImageData(0, 0, TEX, TEX).data; // RGBA bytes, Y=0 is top
-
-        const imgW = img.naturalWidth;
-        const imgH = img.naturalHeight;
-
-        // Build home (position) and color textures
-        const homeData = new Float32Array(NUM * 4);
-        const colorData = new Float32Array(NUM * 4);
-
-        for (let j = 0; j < TEX; j++) {
-          for (let i = 0; i < TEX; i++) {
-            const idx = j * TEX + i;
-            const p = idx * 4;
-            const r = px[p] / 255;
-            const g = px[p + 1] / 255;
-            const b = px[p + 2] / 255;
-            const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-            const ink = 1.0 - lum; // 0=white paper, 1=black ink
-
-            // Image UV: randomize within each cell to break grid pattern
-            const x = (i + Math.random()) / TEX;
-            const y = (j + Math.random()) / TEX;
-
-            homeData[idx * 4 + 0] = x;
-            homeData[idx * 4 + 1] = y;
-            homeData[idx * 4 + 2] = 0.0;
-            homeData[idx * 4 + 3] = Math.random(); // per-particle seed
-
-            // Color: fixed near-black ink (墨) regardless of source pixel brightness.
-            // Alpha: sqrt(ink) expands mid-tone coverage; noise gives mottled texture.
-            const noise = 0.75 + Math.random() * 0.5;
-            colorData[idx * 4 + 0] = 0.06;
-            colorData[idx * 4 + 1] = 0.05;
-            colorData[idx * 4 + 2] = 0.08;
-            colorData[idx * 4 + 3] = Math.min(
-              1.0,
-              Math.pow(ink, 0.4) * noise * 1.4,
-            );
-          }
+        // Compute contain-fit params for a given image and canvas size
+        function computeFit(iW, iH, cW, cH) {
+          const s = Math.min(cW / iW, cH / iH);
+          const dW = iW * s, dH = iH * s;
+          return { offX: (cW-dW)/(2*cW), offY: (cH-dH)/(2*cH),
+                   scaleX: dW/cW, scaleY: dH/cH };
         }
 
+        // Sample an image into home+color Float32 arrays
+        function buildData(img) {
+          const oc = document.createElement("canvas");
+          oc.width = TEX; oc.height = TEX;
+          const ctx2d = oc.getContext("2d");
+          ctx2d.drawImage(img, 0, 0, TEX, TEX);
+          const px = ctx2d.getImageData(0, 0, TEX, TEX).data;
+          const homeData  = new Float32Array(NUM * 4);
+          const colorData = new Float32Array(NUM * 4);
+          for (let j = 0; j < TEX; j++) {
+            for (let i = 0; i < TEX; i++) {
+              const idx = j * TEX + i;
+              const p   = idx * 4;
+              const r   = px[p]   / 255;
+              const g   = px[p+1] / 255;
+              const b   = px[p+2] / 255;
+              const lum = 0.299*r + 0.587*g + 0.114*b;
+              const ink = 1.0 - lum;
+              const x   = (i + Math.random()) / TEX;
+              const y   = (j + Math.random()) / TEX;
+              homeData[idx*4+0] = x;
+              homeData[idx*4+1] = y;
+              homeData[idx*4+2] = 0.0;
+              homeData[idx*4+3] = Math.random();
+              const noise = 0.75 + Math.random() * 0.5;
+              colorData[idx*4+0] = 0.06;
+              colorData[idx*4+1] = 0.05;
+              colorData[idx*4+2] = 0.08;
+              colorData[idx*4+3] = Math.min(1.0, Math.pow(ink, 0.4) * noise * 1.4);
+            }
+          }
+          return { homeData, colorData };
+        }
+
+        const d1 = buildData(img1);
+        const d2 = buildData(img2);
+
         // Physics textures (ping-pong)
-        const homeTex = mkTex32F(TEX, TEX, homeData);
-        const colTex = mkTex32F(TEX, TEX, colorData);
-        const posTexA = mkTex32F(TEX, TEX, homeData); // particles start at home
+        const homeTex1 = mkTex32F(TEX, TEX, d1.homeData);
+        const homeTex2 = mkTex32F(TEX, TEX, d2.homeData);
+        const colTex1  = mkTex32F(TEX, TEX, d1.colorData);
+        const colTex2  = mkTex32F(TEX, TEX, d2.colorData);
+        const posTexA = mkTex32F(TEX, TEX, d1.homeData); // particles start at img1 home
         const posTexB = mkTex32F(TEX, TEX, null);
         const velTexA = mkTex32F(TEX, TEX, null); // zero velocity initially
         const velTexB = mkTex32F(TEX, TEX, null);
@@ -410,26 +441,17 @@ void main() {
           velFbW = velFbB;
 
         // ─── Contain-fit geometry ──────────────────
-        let W = 1,
-          H = 1;
-        let imgOffX = 0,
-          imgOffY = 0,
-          imgScaleX = 1,
-          imgScaleY = 1;
-        const imgAspect = imgW / imgH;
+        let W = 1, H = 1;
+        let fit1 = { offX:0, offY:0, scaleX:1, scaleY:1 };
+        let fit2 = { offX:0, offY:0, scaleX:1, scaleY:1 };
 
         function resize() {
           W = (canvas.clientWidth * devicePixelRatio) | 0;
           H = (canvas.clientHeight * devicePixelRatio) | 0;
           canvas.width = W;
           canvas.height = H;
-          const s = Math.min(W / imgW, H / imgH);
-          const dW = imgW * s;
-          const dH = imgH * s;
-          imgScaleX = dW / W;
-          imgScaleY = dH / H;
-          imgOffX = (W - dW) / (2 * W);
-          imgOffY = (H - dH) / (2 * H);
+          fit1 = computeFit(img1.naturalWidth, img1.naturalHeight, W, H);
+          fit2 = computeFit(img2.naturalWidth, img2.naturalHeight, W, H);
         }
         resize();
         window.addEventListener("resize", resize);
@@ -441,12 +463,42 @@ void main() {
         const M = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, has: false, moveAmt: 0 };
         let puff = 0; // slowly rising/falling envelope 0..1
 
+        // Image switching
+        let transT         = -1.0; // -1=idle, 0..1=transitioning
+        let activeImgIdx   = 0;
+        let imgBlend       = 0.0;
+        let imgBlendTarget = 0.0;
+
+        function switchImage() {
+          if (transT >= 0) return; // already transitioning
+          transT         = 0.0;
+          activeImgIdx   = 1 - activeImgIdx;
+          // Start blending home + color immediately — no sudden switch
+          imgBlendTarget = activeImgIdx === 0 ? 0.0 : 1.0;
+        }
+
+        // Desktop click (skip if mouse moved → puff interaction)
+        canvas.addEventListener("click", () => switchImage());
+
+        // Mobile tap: touchend without significant movement
+        let touchStartX = 0, touchStartY = 0;
+        canvas.addEventListener("touchstart", (e) => {
+          touchStartX = e.touches[0].clientX;
+          touchStartY = e.touches[0].clientY;
+        }, { passive: true });
+        canvas.addEventListener("touchend", (e) => {
+          const dx = e.changedTouches[0].clientX - touchStartX;
+          const dy = e.changedTouches[0].clientY - touchStartY;
+          if (Math.hypot(dx, dy) < 10) switchImage();
+        }, { passive: true });
+
         function toImgUV(cx, cy) {
+          const f  = activeImgIdx === 0 ? fit1 : fit2;
           const px = (cx * devicePixelRatio) / W;
           const py = (cy * devicePixelRatio) / H;
           return {
-            x: (px - imgOffX) / imgScaleX,
-            y: (py - imgOffY) / imgScaleY,
+            x: (px - f.offX) / f.scaleX,
+            y: (py - f.offY) / f.scaleY,
           };
         }
 
@@ -518,6 +570,17 @@ void main() {
 
           const damp = Math.pow(0.93, step);
 
+          // Transition: chaos rises and falls over 1.4s on a sin curve
+          let chaos = 0.0;
+          if (transT >= 0) {
+            transT = Math.min(1.0, transT + dt / 1.4);
+            chaos  = Math.sin(transT * Math.PI);
+            if (transT >= 1.0) transT = -1.0;
+          }
+
+          // Home + color blend: starts immediately on click, no sudden switch
+          imgBlend += (imgBlendTarget - imgBlend) * Math.min(1, dt * 1.2);
+
           // ── Velocity update ───────────────────────
           gl.bindFramebuffer(gl.FRAMEBUFFER, velFbW);
           gl.viewport(0, 0, TEX, TEX);
@@ -530,8 +593,13 @@ void main() {
           gl.bindTexture(gl.TEXTURE_2D, velR);
           gl.uniform1i(progVel.u["u_vel"], 1);
           gl.activeTexture(gl.TEXTURE2);
-          gl.bindTexture(gl.TEXTURE_2D, homeTex);
-          gl.uniform1i(progVel.u["u_home"], 2);
+          gl.bindTexture(gl.TEXTURE_2D, homeTex1);
+          gl.uniform1i(progVel.u["u_home1"], 2);
+          gl.activeTexture(gl.TEXTURE3);
+          gl.bindTexture(gl.TEXTURE_2D, homeTex2);
+          gl.uniform1i(progVel.u["u_home2"], 3);
+          gl.uniform1f(progVel.u["u_imgBlend"], imgBlend);
+          gl.uniform1f(progVel.u["u_chaos"], chaos);
 
           gl.uniform2f(progVel.u["u_mouse"], M.sx, M.sy);
           gl.uniform1f(progVel.u["u_puff"], M.has ? puff : 0);
@@ -573,17 +641,26 @@ void main() {
           gl.bindTexture(gl.TEXTURE_2D, posR);
           gl.uniform1i(progPts.u["u_pos"], 0);
           gl.activeTexture(gl.TEXTURE1);
-          gl.bindTexture(gl.TEXTURE_2D, colTex);
-          gl.uniform1i(progPts.u["u_col"], 1);
+          gl.bindTexture(gl.TEXTURE_2D, colTex1);
+          gl.uniform1i(progPts.u["u_col1"], 1);
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, colTex2);
+          gl.uniform1i(progPts.u["u_col2"], 2);
+          gl.uniform1f(progPts.u["u_imgBlend"], imgBlend);
 
-          gl.uniform2f(progPts.u["u_imgOff"], imgOffX, imgOffY);
-          gl.uniform2f(progPts.u["u_imgScale"], imgScaleX, imgScaleY);
+          const t = imgBlend;
+          const curOffX   = fit1.offX   + (fit2.offX   - fit1.offX)   * t;
+          const curOffY   = fit1.offY   + (fit2.offY   - fit1.offY)   * t;
+          const curScaleX = fit1.scaleX + (fit2.scaleX - fit1.scaleX) * t;
+          const curScaleY = fit1.scaleY + (fit2.scaleY - fit1.scaleY) * t;
+          gl.uniform2f(progPts.u["u_imgOff"],   curOffX,   curOffY);
+          gl.uniform2f(progPts.u["u_imgScale"], curScaleX, curScaleY);
 
           // Point size: ~2x cell spacing for dense, gapless coverage
-          const cellPx = Math.min(imgScaleX * W, imgScaleY * H) / TEX;
+          const cellPx = Math.min(curScaleX * W, curScaleY * H) / TEX;
           gl.uniform1f(
             progPts.u["u_ptSize"],
-            Math.max(1.8, Math.min(cellPx * 2.8, 7.0)),
+            Math.max(2.0, Math.min(cellPx * 3.5, 9.0)),
           );
 
           gl.bindVertexArray(ptsVAO);
