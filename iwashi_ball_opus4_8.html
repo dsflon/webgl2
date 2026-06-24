@@ -1,0 +1,1547 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Sardine Bait Ball — WebGL2</title>
+    <style>
+      :root {
+        --abyss: #02101f;
+        --ink: #dfeaf2;
+        --muted: #7f93a3;
+        --line: rgba(150, 180, 205, 0.18);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: #02101f;
+        color: var(--ink);
+        font-family:
+          "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Yu Gothic",
+          sans-serif;
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+      }
+      #gl {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        cursor: crosshair;
+      }
+
+      /* ---- HUD ---- */
+      .hud {
+        position: fixed;
+        top: 18px;
+        left: 20px;
+        z-index: 10;
+        pointer-events: none;
+        text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
+      }
+      .hud .eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.34em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 0 0 4px;
+        font-weight: 600;
+      }
+      .hud h1 {
+        margin: 0;
+        font-weight: 300;
+        font-size: clamp(20px, 3.4vw, 34px);
+        letter-spacing: 0.02em;
+        line-height: 1.05;
+      }
+      .hud .sub {
+        margin: 6px 0 0;
+        font-size: 12.5px;
+        color: var(--muted);
+        max-width: 30ch;
+        line-height: 1.5;
+      }
+
+      /* ---- Panel ---- */
+      .panel {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        z-index: 10;
+        width: 248px;
+        max-width: calc(100vw - 36px);
+        background: rgba(6, 20, 34, 0.62);
+        backdrop-filter: blur(9px);
+        -webkit-backdrop-filter: blur(9px);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px 14px 8px;
+        font-size: 12px;
+        color: var(--ink);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
+      }
+      .panel .ttl {
+        font-size: 10px;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 0 0 12px;
+        font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+      .panel .fps {
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0.05em;
+        color: #86d6ff;
+      }
+      .row {
+        margin: 0 0 11px;
+      }
+      .row label {
+        display: flex;
+        justify-content: space-between;
+        margin: 0 0 4px;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+      .row label b {
+        color: var(--ink);
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+      }
+      input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        height: 3px;
+        border-radius: 3px;
+        background: linear-gradient(90deg, #2f6f9c, #173049);
+        outline: none;
+        margin: 0;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        background: #bfe6ff;
+        border: 2px solid #04121f;
+        cursor: pointer;
+        box-shadow: 0 0 8px rgba(120, 200, 255, 0.6);
+      }
+      input[type="range"]::-moz-range-thumb {
+        width: 13px;
+        height: 13px;
+        border: 2px solid #04121f;
+        border-radius: 50%;
+        background: #bfe6ff;
+        cursor: pointer;
+      }
+      .btns {
+        display: flex;
+        gap: 8px;
+        margin: 14px 0 8px;
+      }
+      .seg {
+        display: flex;
+        gap: 6px;
+        margin: 0 0 14px;
+      }
+      .seg button {
+        flex: 1;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11.5px;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+        background: rgba(12, 30, 48, 0.6);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 0;
+        transition: 0.15s;
+      }
+      .seg button.on {
+        color: #04121f;
+        background: #bfe6ff;
+        border-color: #bfe6ff;
+        font-weight: 600;
+      }
+      .seg button:not(.on):hover {
+        background: rgba(30, 64, 94, 0.75);
+        color: var(--ink);
+      }
+      .btns button {
+        flex: 1;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11.5px;
+        letter-spacing: 0.04em;
+        color: var(--ink);
+        background: rgba(20, 46, 70, 0.7);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 0;
+        transition: 0.15s;
+      }
+      .btns button:hover {
+        background: rgba(40, 82, 118, 0.8);
+        border-color: rgba(150, 200, 235, 0.4);
+      }
+      .btns button:active {
+        transform: translateY(1px);
+      }
+      .hint {
+        position: fixed;
+        bottom: 16px;
+        left: 20px;
+        z-index: 10;
+        pointer-events: none;
+        font-size: 11.5px;
+        color: var(--muted);
+        letter-spacing: 0.03em;
+        text-shadow: 0 1px 10px rgba(0, 0, 0, 0.6);
+      }
+      .hint b {
+        color: #bfe6ff;
+        font-weight: 500;
+      }
+      .toggle {
+        cursor: pointer;
+        pointer-events: auto;
+        color: var(--muted);
+        font-size: 18px;
+        line-height: 1;
+        background: none;
+        border: none;
+      }
+      #controlsToggle {
+        position: fixed;
+        right: 14px;
+        bottom: calc(12px + env(safe-area-inset-bottom));
+        z-index: 11;
+        display: none;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(6, 20, 34, 0.78);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        transition: bottom 0.24s ease;
+      }
+      #controlsToggle.controls-toggle-open {
+        bottom: calc(45vh + 20px + env(safe-area-inset-bottom));
+      }
+      @media (max-width: 560px) {
+        #controlsToggle {
+          display: block;
+        }
+        .panel {
+          top: auto;
+          bottom: 14px;
+          right: 14px;
+          left: 14px;
+          width: auto;
+          max-height: 45vh;
+          transition:
+            transform 0.24s ease,
+            opacity 0.24s ease;
+        }
+        .panel.controls-collapsed {
+          transform: translateY(
+            calc(100% + 20px + env(safe-area-inset-bottom))
+          );
+          opacity: 0;
+          pointer-events: none;
+        }
+        .hud {
+          top: 14px;
+          left: 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <button
+      id="controlsToggle"
+      type="button"
+      aria-controls="panel"
+      aria-expanded="true"
+    >
+      Controls
+    </button>
+
+    <div class="hud">
+      <p class="eyebrow">Pelagic · Sardina pilchardus</p>
+      <h1>Bait Ball</h1>
+      <p class="sub">
+        数万尾のイワシが渦を巻く。カーソルは捕食者 —
+        近づくと群れが裂け、離れれば再び玉になる。
+      </p>
+    </div>
+
+    <div class="panel" id="panel">
+      <p class="ttl">
+        <span>Shoal Controls</span><span class="fps" id="fps">— fps</span>
+      </p>
+      <div class="seg" id="shape">
+        <button data-s="0" class="on">球 Sphere</button>
+        <button data-s="1">竜巻 Tornado</button>
+      </div>
+      <div class="row">
+        <label>個体数 <b id="vCount">—</b></label
+        ><input
+          id="count"
+          type="range"
+          min="2000"
+          max="40000"
+          step="1000"
+          value="22000"
+        />
+      </div>
+      <div class="row">
+        <label>遊泳速度 <b id="vSpeed">—</b></label
+        ><input
+          id="speed"
+          type="range"
+          min="20"
+          max="120"
+          step="1"
+          value="62"
+        />
+      </div>
+      <div class="row">
+        <label>分離 Separation <b id="vSep">—</b></label
+        ><input id="sep" type="range" min="0" max="3" step="0.05" value="1.5" />
+      </div>
+      <div class="row">
+        <label>整列 Alignment <b id="vAli">—</b></label
+        ><input id="ali" type="range" min="0" max="3" step="0.05" value="1.1" />
+      </div>
+      <div class="row">
+        <label>結合 Cohesion <b id="vCoh">—</b></label
+        ><input
+          id="coh"
+          type="range"
+          min="0"
+          max="3"
+          step="0.05"
+          value="0.95"
+        />
+      </div>
+      <div class="row">
+        <label>渦力 Vortex <b id="vVor">—</b></label
+        ><input id="vor" type="range" min="0" max="3" step="0.05" value="1.0" />
+      </div>
+      <div class="row">
+        <label>ゆらぎ Noise <b id="vNoi">—</b></label
+        ><input id="noi" type="range" min="0" max="2" step="0.05" value="0.7" />
+      </div>
+      <div class="row">
+        <label>捕食者の強さ <b id="vFear">—</b></label
+        ><input id="fear" type="range" min="0" max="6" step="0.1" value="6" aria-label="捕食者の強さ" />
+      </div>
+      <div class="row">
+        <label>捕食者の範囲 <b id="vRad">—</b></label
+        ><input id="rad" type="range" min="10" max="90" step="1" value="42" />
+      </div>
+      <div class="row">
+        <label>霧の濃さ Fog <b id="vFog">—</b></label
+        ><input
+          id="fog"
+          type="range"
+          min="0"
+          max="2.5"
+          step="0.05"
+          value="1.0"
+        />
+      </div>
+      <div class="btns">
+        <button id="pause">Pause</button>
+        <button id="reset">Reset</button>
+      </div>
+    </div>
+
+    <script>
+      "use strict";
+      /* =========================================================================
+   Sardine Bait Ball — WebGL2 GPGPU Boids
+   --------------------------------------------------------------------------
+   - 位置(xyz) と 速度(xyz) を float テクスチャに格納（1テクセル = 1個体）。
+   - フラグメントシェーダで Boids(分離/整列/結合)+渦+カールノイズ+境界
+     +マウス捕食者反発 を計算し、ping-pong で毎フレーム更新。
+   - 描画は instanced + 頂点テクスチャフェッチ。各個体は速度方向に体を
+     向け、尾びれを揺らし、銀色のフレネル反射＋距離フォグで奥行きを出す。
+   ========================================================================= */
+
+      const canvas = document.getElementById("gl");
+      const gl = canvas.getContext("webgl2", {
+        antialias: true,
+        alpha: false,
+        powerPreference: "high-performance",
+      });
+      if (!gl) {
+        document.body.innerHTML =
+          '<p style="color:#cfe;padding:40px;font-family:sans-serif">このブラウザは WebGL2 に対応していません。</p>';
+        throw new Error("no webgl2");
+      }
+
+      const extCBF = gl.getExtension("EXT_color_buffer_float");
+      gl.getExtension("OES_texture_float_linear");
+      if (!extCBF) {
+        document.body.innerHTML =
+          '<p style="color:#cfe;padding:40px;font-family:sans-serif">EXT_color_buffer_float が利用できません。</p>';
+        throw new Error("no float rtt");
+      }
+
+      /* ----------------------------- tiny math ------------------------------- */
+      const V3 = {
+        cross: (a, b) => [
+          a[1] * b[2] - a[2] * b[1],
+          a[2] * b[0] - a[0] * b[2],
+          a[0] * b[1] - a[1] * b[0],
+        ],
+        sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+        norm: (a) => {
+          const l = Math.hypot(a[0], a[1], a[2]) || 1;
+          return [a[0] / l, a[1] / l, a[2] / l];
+        },
+      };
+      function perspective(fovy, asp, n, f) {
+        const t = 1 / Math.tan(fovy / 2),
+          nf = 1 / (n - f);
+        return [
+          t / asp,
+          0,
+          0,
+          0,
+          0,
+          t,
+          0,
+          0,
+          0,
+          0,
+          (f + n) * nf,
+          -1,
+          0,
+          0,
+          2 * f * n * nf,
+          0,
+        ];
+      }
+      function lookAt(eye, c, up) {
+        const z = V3.norm(V3.sub(eye, c));
+        const x = V3.norm(V3.cross(up, z));
+        const y = V3.cross(z, x);
+        return [
+          x[0],
+          y[0],
+          z[0],
+          0,
+          x[1],
+          y[1],
+          z[1],
+          0,
+          x[2],
+          y[2],
+          z[2],
+          0,
+          -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]),
+          -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]),
+          -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]),
+          1,
+        ];
+      }
+      function mul(a, b) {
+        const o = new Array(16);
+        for (let r = 0; r < 4; r++)
+          for (let cc = 0; cc < 4; cc++) {
+            o[cc * 4 + r] =
+              a[r] * b[cc * 4] +
+              a[4 + r] * b[cc * 4 + 1] +
+              a[8 + r] * b[cc * 4 + 2] +
+              a[12 + r] * b[cc * 4 + 3];
+          }
+        return o;
+      }
+      function invert(m) {
+        // general 4x4 inverse (for unproject)
+        const inv = new Array(16),
+          a = m;
+        inv[0] =
+          a[5] * a[10] * a[15] -
+          a[5] * a[11] * a[14] -
+          a[9] * a[6] * a[15] +
+          a[9] * a[7] * a[14] +
+          a[13] * a[6] * a[11] -
+          a[13] * a[7] * a[10];
+        inv[4] =
+          -a[4] * a[10] * a[15] +
+          a[4] * a[11] * a[14] +
+          a[8] * a[6] * a[15] -
+          a[8] * a[7] * a[14] -
+          a[12] * a[6] * a[11] +
+          a[12] * a[7] * a[10];
+        inv[8] =
+          a[4] * a[9] * a[15] -
+          a[4] * a[11] * a[13] -
+          a[8] * a[5] * a[15] +
+          a[8] * a[7] * a[13] +
+          a[12] * a[5] * a[11] -
+          a[12] * a[7] * a[9];
+        inv[12] =
+          -a[4] * a[9] * a[14] +
+          a[4] * a[10] * a[13] +
+          a[8] * a[5] * a[14] -
+          a[8] * a[6] * a[13] -
+          a[12] * a[5] * a[10] +
+          a[12] * a[6] * a[9];
+        inv[1] =
+          -a[1] * a[10] * a[15] +
+          a[1] * a[11] * a[14] +
+          a[9] * a[2] * a[15] -
+          a[9] * a[3] * a[14] -
+          a[13] * a[2] * a[11] +
+          a[13] * a[3] * a[10];
+        inv[5] =
+          a[0] * a[10] * a[15] -
+          a[0] * a[11] * a[14] -
+          a[8] * a[2] * a[15] +
+          a[8] * a[3] * a[14] +
+          a[12] * a[2] * a[11] -
+          a[12] * a[3] * a[10];
+        inv[9] =
+          -a[0] * a[9] * a[15] +
+          a[0] * a[11] * a[13] +
+          a[8] * a[1] * a[15] -
+          a[8] * a[3] * a[13] -
+          a[12] * a[1] * a[11] +
+          a[12] * a[3] * a[9];
+        inv[13] =
+          a[0] * a[9] * a[14] -
+          a[0] * a[10] * a[13] -
+          a[8] * a[1] * a[14] +
+          a[8] * a[2] * a[13] +
+          a[12] * a[1] * a[10] -
+          a[12] * a[2] * a[9];
+        inv[2] =
+          a[1] * a[6] * a[15] -
+          a[1] * a[7] * a[14] -
+          a[5] * a[2] * a[15] +
+          a[5] * a[3] * a[14] +
+          a[13] * a[2] * a[7] -
+          a[13] * a[3] * a[6];
+        inv[6] =
+          -a[0] * a[6] * a[15] +
+          a[0] * a[7] * a[14] +
+          a[4] * a[2] * a[15] -
+          a[4] * a[3] * a[14] -
+          a[12] * a[2] * a[7] +
+          a[12] * a[3] * a[6];
+        inv[10] =
+          a[0] * a[5] * a[15] -
+          a[0] * a[7] * a[13] -
+          a[4] * a[1] * a[15] +
+          a[4] * a[3] * a[13] +
+          a[12] * a[1] * a[7] -
+          a[12] * a[3] * a[5];
+        inv[14] =
+          -a[0] * a[5] * a[14] +
+          a[0] * a[6] * a[13] +
+          a[4] * a[1] * a[14] -
+          a[4] * a[2] * a[13] -
+          a[12] * a[1] * a[6] +
+          a[12] * a[2] * a[5];
+        inv[3] =
+          -a[1] * a[6] * a[11] +
+          a[1] * a[7] * a[10] +
+          a[5] * a[2] * a[11] -
+          a[5] * a[3] * a[10] -
+          a[9] * a[2] * a[7] +
+          a[9] * a[3] * a[6];
+        inv[7] =
+          a[0] * a[6] * a[11] -
+          a[0] * a[7] * a[10] -
+          a[4] * a[2] * a[11] +
+          a[4] * a[3] * a[10] +
+          a[8] * a[2] * a[7] -
+          a[8] * a[3] * a[6];
+        inv[11] =
+          -a[0] * a[5] * a[11] +
+          a[0] * a[7] * a[9] +
+          a[4] * a[1] * a[11] -
+          a[4] * a[3] * a[9] -
+          a[8] * a[1] * a[7] +
+          a[8] * a[3] * a[5];
+        inv[15] =
+          a[0] * a[5] * a[10] -
+          a[0] * a[6] * a[9] -
+          a[4] * a[1] * a[10] +
+          a[4] * a[2] * a[9] +
+          a[8] * a[1] * a[6] -
+          a[8] * a[2] * a[5];
+        let det =
+          a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+        if (!det) return null;
+        det = 1 / det;
+        for (let i = 0; i < 16; i++) inv[i] *= det;
+        return inv;
+      }
+
+      /* --------------------------- GL helpers -------------------------------- */
+      function sh(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+          throw new Error(gl.getShaderInfoLog(s) + "\n" + src);
+        return s;
+      }
+      function prog(vs, fs, varyings) {
+        const p = gl.createProgram();
+        gl.attachShader(p, sh(gl.VERTEX_SHADER, vs));
+        gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+        if (varyings)
+          gl.transformFeedbackVaryings(p, varyings, gl.SEPARATE_ATTRIBS);
+        gl.linkProgram(p);
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+          throw new Error(gl.getProgramInfoLog(p));
+        return p;
+      }
+      function uni(p) {
+        const u = {};
+        const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+        for (let i = 0; i < n; i++) {
+          const info = gl.getActiveUniform(p, i);
+          u[info.name.replace("[0]", "")] = gl.getUniformLocation(p, info.name);
+        }
+        return u;
+      }
+
+      /* =======================================================================
+   1) SIMULATION shaders (GPGPU, fullscreen-triangle pass)
+   ======================================================================= */
+      const QUAD_VS = `#version 300 es
+precision highp float;
+out vec2 uv;
+void main(){
+  vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2); // 0,2 -> fullscreen tri
+  uv = p;
+  gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
+}`;
+
+      const SIM_FS = `#version 300 es
+precision highp float;
+in vec2 uv;
+layout(location=0) out vec4 outPos;   // xyz + (w: phase seed)
+layout(location=1) out vec4 outVel;   // xyz + (w: unused)
+
+uniform sampler2D uPos;
+uniform sampler2D uVel;
+uniform vec2  uTexSize;     // simulation texture dims
+uniform float uCount;       // active agent count
+uniform float uDt;
+uniform float uTime;
+
+uniform float uMaxSpeed;
+uniform float uSep, uAli, uCoh, uVor, uNoise;
+uniform float uBoundsR;     // soft spherical bounds radius
+uniform float uShape;       // 0 = sphere (ball), 1 = tornado (column)
+
+uniform vec3  uPredator;    // mouse world pos
+uniform float uPredActive;  // 0/1
+uniform float uFear, uFearRad;
+
+// --- curl noise (cheap, gradient-of-noise style) ---
+vec3 hash3(vec3 p){
+  p = vec3(dot(p,vec3(127.1,311.7,74.7)),
+           dot(p,vec3(269.5,183.3,246.1)),
+           dot(p,vec3(113.5,271.9,124.6)));
+  return fract(sin(p)*43758.5453123)*2.0-1.0;
+}
+float vnoise(vec3 p){
+  vec3 i=floor(p), f=fract(p);
+  vec3 u=f*f*(3.0-2.0*f);
+  float n=0.0;
+  for(int x=0;x<2;x++)for(int y=0;y<2;y++)for(int z=0;z<2;z++){
+    vec3 g=vec3(x,y,z);
+    float w=mix(1.0-u.x,u.x,g.x)*mix(1.0-u.y,u.y,g.y)*mix(1.0-u.z,u.z,g.z);
+    n += w*dot(hash3(i+g), f-g);
+  }
+  return n;
+}
+vec3 curl(vec3 p){
+  const float e=0.35;
+  float n1=vnoise(p+vec3(0,e,0)), n2=vnoise(p-vec3(0,e,0));
+  float n3=vnoise(p+vec3(0,0,e)), n4=vnoise(p-vec3(0,0,e));
+  float n5=vnoise(p+vec3(e,0,0)), n6=vnoise(p-vec3(e,0,0));
+  float x=(n1-n2)-(n3-n4);
+  float y=(n3-n4)-(n5-n6);
+  float z=(n5-n6)-(n1-n2);
+  return normalize(vec3(x,y,z)+1e-5);
+}
+
+ivec2 idx2tex(int i){ int w=int(uTexSize.x); return ivec2(i%w, i/w); }
+
+void main(){
+  int self = int(gl_FragCoord.y)*int(uTexSize.x) + int(gl_FragCoord.x);
+  if(float(self) >= uCount){ outPos=vec4(0.0); outVel=vec4(0.0); return; }
+
+  vec4 P = texelFetch(uPos, ivec2(gl_FragCoord.xy), 0);
+  vec4 Vv= texelFetch(uVel, ivec2(gl_FragCoord.xy), 0);
+  vec3 pos=P.xyz, vel=Vv.xyz;
+
+  // --- neighborhood scan (strided sample to bound cost) ---
+  vec3 sepF=vec3(0.0), aliF=vec3(0.0), cohF=vec3(0.0);
+  float nA=0.0, nC=0.0;
+  const float PERCEPT = 9.0;
+  const float SEPDIST = 3.2;
+  int total=int(uCount);
+  int SAMPLES=48;
+  int stride = max(1, total/SAMPLES);
+  // offset start by self to decorrelate sampling between agents
+  int start = (self*7) % stride;
+  for(int s=0;s<SAMPLES;s++){
+    int j = start + s*stride;
+    if(j>=total) break;
+    if(j==self) continue;
+    vec3 op = texelFetch(uPos, idx2tex(j), 0).xyz;
+    vec3 d  = pos-op;
+    float dist=length(d);
+    if(dist<PERCEPT && dist>1e-3){
+      if(dist<SEPDIST) sepF += normalize(d)/dist; // push away, stronger up close
+      vec3 ov = texelFetch(uVel, idx2tex(j), 0).xyz;
+      aliF += ov; nA+=1.0;
+      cohF += op; nC+=1.0;
+    }
+  }
+  vec3 acc=vec3(0.0);
+
+  // boids steering (computed once, applied tangentially below)
+  vec3 steer=vec3(0.0);
+  if(nA>0.0){ aliF/=nA; steer += (aliF-vel)*uAli; }
+  if(nC>0.0){ cohF/=nC; steer += (cohF-pos)*uCoh*0.5; }
+  steer += sepF*uSep*3.5;
+
+  vec3 toC = -pos;
+  float r = length(toC)+1e-3;
+  vec3 nrm = toC/r;                 // unit vector toward centre point
+  float seed = fract(sin(float(self)*12.9898)*43758.5453);
+
+  // curl-noise field (the lively churn / swirl), shared by both shapes
+  vec3 churn = curl(pos*0.05 + vec3(0.0, uTime*0.05, 0.0)) * uNoise * 5.5;
+
+  vec3 vNew;
+
+  if(uShape < 0.5){
+    // =================== SPHERE (solid swirling ball) ===================
+    // Per-fish target radius spread by cube-root -> uniform VOLUME density,
+    // so the ball is filled (no hollow core, no equatorial ring).
+    float targetR = uBoundsR * pow(seed, 0.3333);
+    float vr = dot(vel, -nrm);          // outward radial speed
+    vec3 velRad = (-nrm)*vr;
+    vec3 velTan = vel - velRad;
+    // strong radial spring-damper: radius is locked -> cannot inflate OR flatten
+    float springAcc = -(r - targetR)*5.0 - vr*2.6;
+    velRad += (-nrm)*springAcc*uDt;
+    // gentle rigid rotation about a near-vertical axis (kept weak so it never
+    // pumps the system into a disc); the visible "swirl" is mostly the curl churn.
+    vec3 axis = normalize(vec3(0.10, 1.0, 0.05));
+    vec3 tang = normalize(cross(axis, pos)+1e-4);
+    velTan += tang * uVor * 1.3 * uDt;
+    // churn + boids, projected onto the tangent sphere so they can't change radius
+    vec3 tanForce = churn + steer;
+    tanForce -= (-nrm)*dot(tanForce, -nrm);
+    velTan += tanForce*uDt;
+    vNew = velRad + velTan;
+  } else {
+    // =================== TORNADO (rotating column) ===================
+    vec3 axis = vec3(0.0, 1.0, 0.0);
+    vec3 axialOut = vec3(pos.x, 0.0, pos.z);   // horizontal offset from axis
+    float aR = length(axialOut)+1e-3;
+    vec3 aN = axialOut/aR;                      // outward, horizontal
+    // target column radius, filled cross-section, tapering toward the top
+    float hT = clamp((pos.y + uBoundsR)/(2.0*uBoundsR), 0.0, 1.0); // 0 bottom..1 top
+    float colR = uBoundsR*0.55 * pow(seed, 0.5) * mix(1.0, 0.4, hT);
+    float vr = dot(vel, aN);
+    vec3 velRad = aN*vr;
+    vec3 velTan = vel - velRad;
+    // spring toward the axis LINE (horizontal) -> stays a column, never flattens
+    float springAcc = -(aR - colR)*5.0 - vr*2.6;
+    velRad += aN*springAcc*uDt;
+    // strong swirl about the vertical axis
+    vec3 tang = normalize(cross(axis, axialOut)+1e-4);
+    velTan += tang * (uVor + 0.4) * 7.0 * uDt;
+    // updraft in the core, downdraft at the rim -> recirculating funnel
+    float core = 1.0 - clamp(aR/(uBoundsR*0.55), 0.0, 1.0);
+    velTan.y += (core*2.0 - 0.8) * 5.5 * uDt;
+    // tall soft vertical bounds
+    float yLim = uBoundsR*1.25;
+    if(abs(pos.y) > yLim) velTan.y += -sign(pos.y)*(abs(pos.y)-yLim)*4.0*uDt;
+    // churn + boids, projected horizontal-tangential (can't pump column radius)
+    vec3 tanForce = churn + steer;
+    tanForce -= aN*dot(tanForce, aN);
+    velTan += tanForce*uDt;
+    vNew = velRad + velTan;
+  }
+
+  // --- predator (mouse) repulsion: the "split" (allowed to push any direction) ---
+  if(uPredActive>0.5){
+    vec3 dp = pos - uPredator;
+    float dl = length(dp);
+    if(dl < uFearRad){
+      float f = (1.0 - dl/uFearRad);
+      vNew += normalize(dp+1e-4) * f*f * uFear * 90.0 * uDt;
+    }
+  }
+
+  // --- integrate ---
+  vNew *= (1.0 - 0.6*uDt);                  // mild global drag
+  float sp=length(vNew);
+  if(sp>uMaxSpeed) vNew = vNew/sp*uMaxSpeed;
+  else if(sp<uMaxSpeed*0.30) vNew = (sp>1e-3? vNew/sp : vec3(0,0,1))*uMaxSpeed*0.30;
+  vel = vNew;
+  pos += vel*uDt;
+
+  outPos = vec4(pos, P.w);
+  outVel = vec4(vel, 0.0);
+}`;
+
+      /* =======================================================================
+   2) RENDER shaders — instanced fish with vertex-texture fetch
+   ======================================================================= */
+      const FISH_VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aPos;   // local fish mesh vertex
+layout(location=1) in vec3 aNorm;  // local normal
+uniform sampler2D uPos;
+uniform sampler2D uVel;
+uniform vec2  uTexSize;
+uniform mat4  uVP;
+uniform vec3  uCam;
+uniform float uTime;
+uniform float uFishLen;
+uniform float uShiftX;   // NDC horizontal shift (keeps the ball clear of the panel)
+
+out vec3 vN;
+out vec3 vWorld;
+out float vDist;
+out float vBelly;   // for silver gradient (local up)
+
+ivec2 idx2tex(int i){ int w=int(uTexSize.x); return ivec2(i%w, i/w); }
+mat3 basisFromDir(vec3 dir){
+  vec3 f=normalize(dir);
+  vec3 up=abs(f.y)>0.95?vec3(0,0,1):vec3(0,1,0);
+  vec3 r=normalize(cross(up,f));
+  vec3 u=cross(f,r);
+  return mat3(r,u,f); // x=right, y=up, z=forward
+}
+void main(){
+  int id=gl_InstanceID;
+  vec4 P=texelFetch(uPos, idx2tex(id),0);
+  vec3 V=texelFetch(uVel, idx2tex(id),0).xyz;
+  vec3 dir = length(V)>1e-3 ? normalize(V) : vec3(0,0,1);
+  mat3 B=basisFromDir(dir);
+
+  // swimming undulation: lateral sway increasing toward the tail (-z)
+  float phase = P.w*6.2831 + uTime*9.0;
+  float tail = smoothstep(0.0, -uFishLen, aPos.z*uFishLen); // 0 head .. 1 tail
+  float sway = sin(phase + aPos.z*5.0) * 0.16 * (0.15+tail);
+  vec3 local = aPos;
+  local.x += sway;                 // body wave
+  vec3 nLocal = normalize(aNorm + vec3(cos(phase+aPos.z*5.0)*0.4*tail,0.0,0.0));
+
+  vec3 world = P.xyz + B*(local*uFishLen);
+  vN = normalize(B*nLocal);
+  vWorld = world;
+  vBelly = aPos.y;          // +up back, -down belly
+  vDist = length(world-uCam);
+  gl_Position = uVP*vec4(world,1.0);
+  gl_Position.x += uShiftX * gl_Position.w;   // shift the shoal left of the panel
+}`;
+
+      const FISH_FS = `#version 300 es
+precision highp float;
+in vec3 vN; in vec3 vWorld; in float vDist; in float vBelly;
+out vec4 frag;
+uniform vec3 uCam;
+uniform vec3 uLightDir;     // pointing downward from surface
+uniform float uFogK;
+uniform vec3 uFogColor;
+
+void main(){
+  vec3 N=normalize(vN);
+  vec3 viewDir=normalize(uCam-vWorld);
+  vec3 L=normalize(-uLightDir);
+
+  float diff = clamp(dot(N,L)*0.5+0.5, 0.0, 1.0);
+
+  // silver body: dark blue-green back -> bright silver belly
+  vec3 back  = vec3(0.10,0.22,0.30);
+  vec3 belly = vec3(0.78,0.86,0.92);
+  float t = clamp(vBelly*1.6+0.5, 0.0, 1.0);
+  vec3 base = mix(belly, back, t);
+
+  // anisotropic-ish specular streak + fresnel -> the metallic flash
+  vec3 H=normalize(L+viewDir);
+  float spec=pow(max(dot(N,H),0.0), 42.0);
+  float fres=pow(1.0-max(dot(N,viewDir),0.0), 3.0);
+
+  vec3 col = base*(0.35+0.75*diff);
+  col += vec3(0.9,0.97,1.0)*spec*1.4;        // sharp silver highlight
+  col += vec3(0.55,0.75,0.95)*fres*0.9;       // rim / fresnel sheen
+
+  // distance fog -> depth: far fish melt into the blue
+  float fog = 1.0 - exp(-vDist*0.011*uFogK);
+  fog = clamp(fog,0.0,1.0);
+  col = mix(col, uFogColor, fog);
+
+  frag = vec4(col, 1.0);
+}`;
+
+      /* =======================================================================
+   3) BACKGROUND — gradient + god rays + marine snow (fullscreen)
+   ======================================================================= */
+      const BG_FS = `#version 300 es
+precision highp float;
+in vec2 uv;            // 0..1
+out vec4 frag;
+uniform float uTime;
+uniform vec2  uRes;
+
+float hash(vec2 p){ return fract(sin(dot(p,vec2(41.3,289.1)))*43758.5453); }
+
+void main(){
+  vec2 p=uv;
+  // deep blue vertical gradient: bright surface up top
+  vec3 top = vec3(0.06,0.42,0.62);
+  vec3 mid = vec3(0.02,0.18,0.34);
+  vec3 bot = vec3(0.004,0.05,0.12);
+  vec3 col = mix(bot, mid, smoothstep(0.0,0.62,p.y));
+  col = mix(col, top, smoothstep(0.5,1.0,p.y));
+
+  // god rays from upper area
+  vec2 sun=vec2(0.5,1.18);
+  vec2 d=p-sun;
+  float ang=atan(d.x,-d.y);
+  float rays=0.0;
+  rays += 0.5+0.5*sin(ang*40.0 + uTime*0.15);
+  rays *= 0.5+0.5*sin(ang*17.0 - uTime*0.10);
+  float fall=smoothstep(1.25,0.1,length(d));
+  col += vec3(0.35,0.6,0.8)*rays*fall*0.10*smoothstep(0.0,1.0,p.y);
+
+  // marine snow drifting up
+  vec2 sp=p*vec2(uRes.x/uRes.y,1.0)*7.0;
+  for(int i=0;i<2;i++){
+    vec2 g=sp*(1.0+float(i)*1.7);
+    vec2 cell=floor(g);
+    float h=hash(cell+float(i)*13.0);
+    vec2 c=fract(g)-0.5;
+    float drift=fract(h+uTime*0.02*(0.5+h));
+    c.y += (drift-0.5);
+    float m=smoothstep(0.06,0.0,length(c))*step(0.93,h);
+    col += vec3(0.6,0.75,0.85)*m*0.5;
+  }
+  frag=vec4(col,1.0);
+}`;
+
+      /* =======================================================================
+   3b) PREDATOR MARKER — a soft glow at the cursor's 3D position
+   ======================================================================= */
+      const MARK_VS = `#version 300 es
+precision highp float;
+uniform mat4 uVP; uniform vec3 uPos; uniform float uSize; uniform vec2 uViewport;
+out vec2 vC;
+void main(){
+  // billboarded quad from gl_VertexID (two triangles, 6 verts)
+  vec2 corners[6] = vec2[6](vec2(-1.0,-1.0),vec2(1.0,-1.0),vec2(-1.0,1.0),
+                            vec2(-1.0,1.0),vec2(1.0,-1.0),vec2(1.0,1.0));
+  vec2 q = corners[gl_VertexID];
+  vC=q;
+  vec4 clip=uVP*vec4(uPos,1.0);
+  clip.xy += q*uSize*clip.w/uViewport*2.0;
+  gl_Position=clip;
+}`;
+      const MARK_FS = `#version 300 es
+precision highp float;
+in vec2 vC; out vec4 frag; uniform float uOn;
+void main(){
+  float d=length(vC);
+  if(d>1.0) discard;
+  float ring=smoothstep(1.0,0.7,d)*smoothstep(0.32,0.62,d); // soft halo ring
+  float core=smoothstep(0.45,0.0,d)*0.22;
+  float a=(ring*0.45+core)*uOn;
+  frag=vec4(vec3(0.6,0.78,0.98), a);
+}`;
+      const markProg = prog(MARK_VS, MARK_FS);
+      const markU = uni(markProg);
+
+      /* ----------------------- build programs -------------------------------- */
+      const simProg = prog(QUAD_VS, SIM_FS);
+      const simU = uni(simProg);
+      const fishProg = prog(FISH_VS, FISH_FS);
+      const fishU = uni(fishProg);
+      const bgProg = prog(QUAD_VS, BG_FS);
+      const bgU = uni(bgProg);
+
+      const emptyVAO = gl.createVertexArray(); // for attributeless fullscreen draws
+
+      /* ----------------------- fish mesh (low-poly) -------------------------- */
+      // A simple double-sided diamond body + tail fin, length along +z (head) to -z (tail).
+      function buildFish() {
+        const pos = [],
+          nrm = [];
+        // body: 4 spine points (head->tail), cross-section is a vertical diamond
+        const spine = [
+          [0.5, 0.0, 0.0], // nose
+          [0.18, 0.0, 0.1], // shoulder
+          [-0.2, 0.0, 0.07], // mid
+          [-0.5, 0.0, 0.0], // tail base
+        ];
+        const halfH = [0.03, 0.12, 0.085, 0.025]; // body height
+        const halfW = [0.022, 0.07, 0.05, 0.018]; // body width
+        function ring(i) {
+          const z = spine[i][0];
+          const h = halfH[i],
+            w = halfW[i];
+          return [
+            [0, h, z],
+            [w, 0, z],
+            [0, -h, z],
+            [-w, 0, z],
+          ]; // up,right,down,left
+        }
+        for (let i = 0; i < spine.length - 1; i++) {
+          const a = ring(i),
+            b = ring(i + 1);
+          for (let k = 0; k < 4; k++) {
+            const k2 = (k + 1) % 4;
+            // quad a[k],a[k2],b[k2],b[k] -> 2 tris
+            const quad = [a[k], a[k2], b[k2], a[k], b[k2], b[k]];
+            for (const v of quad) {
+              pos.push(v[0], v[1], v[2]);
+              const n = V3.norm([v[0], v[1], 0.0001]);
+              nrm.push(n[0], n[1], n[2] * 0.2);
+            }
+          }
+        }
+        // tail fin (forked), in z<-0.5
+        function tri(p1, p2, p3, n) {
+          for (const v of [p1, p2, p3]) {
+            pos.push(v[0], v[1], v[2]);
+            nrm.push(n[0], n[1], n[2]);
+          }
+        }
+        const tn = [0, 0, 1];
+        tri([-0.5, 0.0, 0.0], [-0.78, 0.16, 0.0], [-0.66, 0.0, 0.0], tn);
+        tri([-0.5, 0.0, 0.0], [-0.78, -0.16, 0.0], [-0.66, 0.0, 0.0], tn);
+        const tn2 = [0, 0, -1];
+        tri([-0.5, 0.0, 0.0], [-0.66, 0.0, 0.0], [-0.78, 0.16, 0.0], tn2);
+        tri([-0.5, 0.0, 0.0], [-0.66, 0.0, 0.0], [-0.78, -0.16, 0.0], tn2);
+
+        // NOTE: mesh built with length along local X; we want length along z for shader.
+        // Rotate (x->z): swap so forward is +z. We'll just remap on upload.
+        const P = [],
+          Nn = [];
+        for (let i = 0; i < pos.length; i += 3) {
+          // map local (X length, Y up, Z side) -> (x=side, y=up, z=length)
+          P.push(pos[i + 2], pos[i + 1], pos[i]);
+          Nn.push(nrm[i + 2], nrm[i + 1], nrm[i]);
+        }
+        return {
+          pos: new Float32Array(P),
+          nrm: new Float32Array(Nn),
+          count: P.length / 3,
+        };
+      }
+      const fish = buildFish();
+
+      const fishVAO = gl.createVertexArray();
+      gl.bindVertexArray(fishVAO);
+      const fpb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, fpb);
+      gl.bufferData(gl.ARRAY_BUFFER, fish.pos, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      const fnb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, fnb);
+      gl.bufferData(gl.ARRAY_BUFFER, fish.nrm, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+
+      /* ----------------------- simulation state ------------------------------ */
+      let SIM_W = 0,
+        SIM_H = 0,
+        CAP = 0; // texture dims & capacity
+      let posTex = [],
+        velTex = [],
+        fbo = [],
+        pp = 0; // ping-pong
+      let COUNT = 22000;
+
+      function makeTex(data) {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA32F,
+          SIM_W,
+          SIM_H,
+          0,
+          gl.RGBA,
+          gl.FLOAT,
+          data,
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return t;
+      }
+      function allocSim(cap) {
+        CAP = cap;
+        SIM_W = Math.ceil(Math.sqrt(cap));
+        SIM_H = Math.ceil(cap / SIM_W);
+        const n = SIM_W * SIM_H;
+        const pData = new Float32Array(n * 4);
+        const vData = new Float32Array(n * 4);
+        for (let i = 0; i < n; i++) {
+          // initial cloud: random points in a sphere (uniform in volume)
+          let x, y, z, r2;
+          do {
+            x = Math.random() * 2 - 1;
+            y = Math.random() * 2 - 1;
+            z = Math.random() * 2 - 1;
+            r2 = x * x + y * y + z * z;
+          } while (r2 > 1);
+          const R = 18;
+          pData[i * 4] = x * R;
+          pData[i * 4 + 1] = y * R;
+          pData[i * 4 + 2] = z * R;
+          pData[i * 4 + 3] = Math.random();
+          // small random initial velocity -> no built-in angular momentum (avoids the ring)
+          vData[i * 4] = (Math.random() * 2 - 1) * 6;
+          vData[i * 4 + 1] = (Math.random() * 2 - 1) * 6;
+          vData[i * 4 + 2] = (Math.random() * 2 - 1) * 6;
+          vData[i * 4 + 3] = 0;
+        }
+        // clean old
+        posTex.forEach((t) => gl.deleteTexture(t));
+        velTex.forEach((t) => gl.deleteTexture(t));
+        fbo.forEach((f) => gl.deleteFramebuffer(f));
+        posTex = [makeTex(pData), makeTex(pData)];
+        velTex = [makeTex(vData), makeTex(vData)];
+        fbo = [gl.createFramebuffer(), gl.createFramebuffer()];
+        for (let k = 0; k < 2; k++) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[k]);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            posTex[k],
+            0,
+          );
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT1,
+            gl.TEXTURE_2D,
+            velTex[k],
+            0,
+          );
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        pp = 0;
+      }
+      function ay(a, b) {
+        return [
+          a[1] * b[2] - a[2] * b[1],
+          a[2] * b[0] - a[0] * b[2],
+          a[0] * b[1] - a[1] * b[0],
+        ];
+      } // cross helper (reserved)
+      allocSim(40000); // allocate to the max capacity once; COUNT controls active agents
+
+      /* ----------------------- params / UI ----------------------------------- */
+      const P = {
+        speed: 62,
+        sep: 1.5,
+        ali: 1.1,
+        coh: 0.95,
+        vor: 1.0,
+        noi: 0.7,
+        fear: 6,
+        rad: 42,
+        fog: 1.0,
+      };
+      let paused = false;
+      let SHAPE = 0; // 0 = sphere, 1 = tornado
+
+      function bind(id, key, fmt) {
+        const el = document.getElementById(id);
+        const out = document.getElementById(
+          "v" + id.charAt(0).toUpperCase() + id.slice(1),
+        );
+        const upd = () => {
+          P[key] = parseFloat(el.value);
+          if (out) out.textContent = fmt ? fmt(P[key]) : P[key];
+        };
+        el.addEventListener("input", upd);
+        upd();
+      }
+      bind("speed", "speed", (v) => v.toFixed(0));
+      bind("sep", "sep", (v) => v.toFixed(2));
+      bind("ali", "ali", (v) => v.toFixed(2));
+      bind("coh", "coh", (v) => v.toFixed(2));
+      bind("vor", "vor", (v) => v.toFixed(2));
+      bind("noi", "noi", (v) => v.toFixed(2));
+      bind("fear", "fear", (v) => v.toFixed(1));
+      bind("rad", "rad", (v) => v.toFixed(0));
+      bind("fog", "fog", (v) => v.toFixed(2));
+
+      const countEl = document.getElementById("count");
+      const vCount = document.getElementById("vCount");
+      function setCount() {
+        COUNT = parseInt(countEl.value);
+        vCount.textContent = COUNT.toLocaleString();
+      }
+      countEl.addEventListener("input", setCount);
+      setCount();
+
+      document.getElementById("pause").addEventListener("click", (e) => {
+        paused = !paused;
+        e.target.textContent = paused ? "Resume" : "Pause";
+      });
+      document.getElementById("reset").addEventListener("click", () => {
+        allocSim(40000);
+      });
+
+      // shape selector (Sphere / Tornado)
+      const shapeWrap = document.getElementById("shape");
+      shapeWrap.addEventListener("click", (e) => {
+        const b = e.target.closest("button");
+        if (!b) return;
+        SHAPE = parseInt(b.dataset.s);
+        [...shapeWrap.children].forEach((c) =>
+          c.classList.toggle("on", c === b),
+        );
+        allocSim(40000); // re-seed so the new shape forms cleanly from a fresh cloud
+      });
+
+      /* ----------------------- mouse predator -------------------------------- */
+      let mouseNDC = [0, 0],
+        predActive = 0,
+        predWorld = [0, 0, 0];
+      let lastMove = performance.now();
+      function setMouse(cx, cy) {
+        const r = canvas.getBoundingClientRect();
+        mouseNDC = [
+          ((cx - r.left) / r.width) * 2 - 1,
+          -(((cy - r.top) / r.height) * 2 - 1),
+        ];
+        predActive = 1;
+        lastMove = performance.now();
+      }
+      canvas.addEventListener("mousemove", (e) =>
+        setMouse(e.clientX, e.clientY),
+      );
+      canvas.addEventListener("mouseleave", () => {
+        predActive = 0;
+      });
+      canvas.addEventListener(
+        "touchmove",
+        (e) => {
+          if (e.touches[0])
+            setMouse(e.touches[0].clientX, e.touches[0].clientY);
+        },
+        { passive: true },
+      );
+      canvas.addEventListener("touchend", () => {
+        predActive = 0;
+      });
+
+      /* ----------------------- resize ---------------------------------------- */
+      let VP = [],
+        invVP = [],
+        camPos = [0, 0, 70];
+      let shiftX = 0; // NDC horizontal shift applied to the shoal
+      const BOUNDS_R = 26; // shoal radius (sim + camera-fit share this)
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(innerWidth * dpr);
+        canvas.height = Math.floor(innerHeight * dpr);
+        canvas.style.width = innerWidth + "px";
+        canvas.style.height = innerHeight + "px";
+      }
+      window.addEventListener("resize", resize);
+      resize();
+
+      /* ----------------------- render loop ----------------------------------- */
+      gl.enable(gl.DEPTH_TEST);
+      gl.enable(gl.CULL_FACE);
+      gl.disable(gl.CULL_FACE); // fish are double-sided -> no cull
+      const fogColor = [0.03, 0.16, 0.3];
+      const lightDir = [0.1, -1.0, 0.15];
+
+      let t0 = performance.now(),
+        tAcc = 0,
+        frames = 0,
+        fpsT = performance.now();
+      const fpsEl = document.getElementById("fps");
+
+      function unprojectMouseToPredator() {
+        // Build a ray from the camera through the mouse, then place the predator at the
+        // point on that ray closest to the shoal centre (origin). This keeps the predator
+        // right on the visible ball from ANY camera angle, so "fleeing" always reads clearly.
+        if (!invVP) return;
+        const mx = mouseNDC[0] - shiftX; // undo the panel shift so the predator lands on the visible ball
+        const near = [mx, mouseNDC[1], -1, 1];
+        const far = [mx, mouseNDC[1], 1, 1];
+        function tx(m, v) {
+          const o = [0, 0, 0, 0];
+          for (let i = 0; i < 4; i++)
+            o[i] =
+              m[i] * v[0] +
+              m[4 + i] * v[1] +
+              m[8 + i] * v[2] +
+              m[12 + i] * v[3];
+          return o;
+        }
+        const A = tx(invVP, near),
+          B = tx(invVP, far);
+        for (let i = 0; i < 3; i++) {
+          A[i] /= A[3];
+          B[i] /= B[3];
+        }
+        const o = camPos;
+        const dir = [B[0] - o[0], B[1] - o[1], B[2] - o[2]];
+        const dl = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+        dir[0] /= dl;
+        dir[1] /= dl;
+        dir[2] /= dl;
+        // t at closest approach to origin = -(o · dir)
+        let t = -(o[0] * dir[0] + o[1] * dir[1] + o[2] * dir[2]);
+        t = Math.max(t, 1.0);
+        predWorld = [o[0] + dir[0] * t, o[1] + dir[1] * t, o[2] + dir[2] * t];
+      }
+
+      function frame(now) {
+        let dt = (now - t0) / 1000;
+        t0 = now;
+        dt = Math.min(dt, 0.033);
+        const time = now * 0.001;
+
+        // auto-release predator shortly after mouse stops (keeps the ball reforming)
+        if (predActive && now - lastMove > 120) {
+          /* keep active while hovering */
+        }
+
+        /* ---------- camera: auto-fit the whole shoal, clear of the panel ---------- */
+        const FOVY = (48 * Math.PI) / 180;
+        const aspect = canvas.width / canvas.height;
+        const tanH = Math.tan(FOVY / 2);
+        // scene half-extent depends on shape (tornado is tall)
+        const extV = SHAPE === 0 ? BOUNDS_R + 6 : BOUNDS_R * 1.25 + 7;
+        const extH = SHAPE === 0 ? BOUNDS_R + 6 : BOUNDS_R * 0.55 + 7;
+        const fill = 0.74; // ball fills 74% of the limiting half-axis
+        const distV = extV / (tanH * fill);
+        const distH = extH / (tanH * aspect * fill);
+        const dist = Math.max(distV, distH);
+        // panel sits on the right (desktop) -> shift the shoal left into the free area
+        const isWide = innerWidth > 560;
+        shiftX = isWide ? -(266 / innerWidth) : 0.0; // NDC shift (responsive)
+
+        const ang = time * 0.05;
+        camPos = [
+          Math.sin(ang) * dist,
+          Math.sin(time * 0.035) * dist * 0.1,
+          Math.cos(ang) * dist,
+        ];
+        const proj = perspective(FOVY, aspect, 0.5, 2000);
+        const view = lookAt(camPos, [0, 0, 0], [0, 1, 0]);
+        VP = mul(proj, view);
+        invVP = invert(VP);
+        unprojectMouseToPredator();
+
+        /* ---------- SIMULATION step (GPGPU) ---------- */
+        if (!paused) {
+          const SUB = 1; // substeps
+          for (let s = 0; s < SUB; s++) {
+            const src = pp,
+              dst = 1 - pp;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[dst]);
+            gl.viewport(0, 0, SIM_W, SIM_H);
+            gl.disable(gl.DEPTH_TEST);
+            gl.useProgram(simProg);
+            gl.bindVertexArray(emptyVAO);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, posTex[src]);
+            gl.uniform1i(simU.uPos, 0);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, velTex[src]);
+            gl.uniform1i(simU.uVel, 1);
+            gl.uniform2f(simU.uTexSize, SIM_W, SIM_H);
+            gl.uniform1f(simU.uCount, COUNT);
+            gl.uniform1f(simU.uDt, Math.min(dt, 0.02) / SUB);
+            gl.uniform1f(simU.uTime, time);
+            gl.uniform1f(simU.uMaxSpeed, P.speed);
+            gl.uniform1f(simU.uSep, P.sep);
+            gl.uniform1f(simU.uAli, P.ali);
+            gl.uniform1f(simU.uCoh, P.coh);
+            gl.uniform1f(simU.uVor, P.vor);
+            gl.uniform1f(simU.uNoise, P.noi);
+            gl.uniform1f(simU.uBoundsR, BOUNDS_R);
+            gl.uniform1f(simU.uShape, SHAPE);
+            gl.uniform3f(
+              simU.uPredator,
+              predWorld[0],
+              predWorld[1],
+              predWorld[2],
+            );
+            gl.uniform1f(simU.uPredActive, predActive);
+            gl.uniform1f(simU.uFear, P.fear);
+            gl.uniform1f(simU.uFearRad, P.rad);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            pp = dst;
+          }
+        }
+
+        /* ---------- RENDER ---------- */
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0.01, 0.05, 0.11, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        // background
+        gl.disable(gl.DEPTH_TEST);
+        gl.useProgram(bgProg);
+        gl.bindVertexArray(emptyVAO);
+        gl.uniform1f(bgU.uTime, time);
+        gl.uniform2f(bgU.uRes, canvas.width, canvas.height);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+        // fish
+        gl.enable(gl.DEPTH_TEST);
+        gl.useProgram(fishProg);
+        gl.bindVertexArray(fishVAO);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, posTex[pp]);
+        gl.uniform1i(fishU.uPos, 0);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, velTex[pp]);
+        gl.uniform1i(fishU.uVel, 1);
+        gl.uniform2f(fishU.uTexSize, SIM_W, SIM_H);
+        gl.uniformMatrix4fv(fishU.uVP, false, new Float32Array(VP));
+        gl.uniform3f(fishU.uCam, camPos[0], camPos[1], camPos[2]);
+        gl.uniform1f(fishU.uTime, time);
+        gl.uniform1f(fishU.uFishLen, 2.9);
+        gl.uniform1f(fishU.uShiftX, shiftX);
+        gl.uniform3f(fishU.uLightDir, lightDir[0], lightDir[1], lightDir[2]);
+        gl.uniform1f(fishU.uFogK, P.fog);
+        gl.uniform3f(fishU.uFogColor, fogColor[0], fogColor[1], fogColor[2]);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, fish.count, COUNT);
+
+        // predator marker (additive glow), only while active
+        if (predActive > 0.5) {
+          gl.depthMask(false);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+          gl.useProgram(markProg);
+          gl.bindVertexArray(emptyVAO);
+          gl.uniformMatrix4fv(markU.uVP, false, new Float32Array(VP));
+          gl.uniform3f(markU.uPos, predWorld[0], predWorld[1], predWorld[2]);
+          gl.uniform1f(markU.uSize, P.rad * 0.9);
+          gl.uniform2f(markU.uViewport, canvas.width, canvas.height);
+          gl.uniform1f(markU.uOn, 1.0);
+          gl.drawArrays(gl.TRIANGLES, 0, 6);
+          gl.disable(gl.BLEND);
+          gl.depthMask(true);
+        }
+
+        // fps
+        frames++;
+        if (now - fpsT > 500) {
+          fpsEl.textContent =
+            ((frames * 1000) / (now - fpsT)).toFixed(0) + " fps";
+          frames = 0;
+          fpsT = now;
+        }
+
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+
+      /* diag hook (harmless): reports mean radius & mean speed of active agents */
+      window.__diag = function () {
+        const n = SIM_W * SIM_H;
+        const buf = new Float32Array(n * 4);
+        const tmp = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, tmp);
+        gl.framebufferTexture2D(
+          gl.FRAMEBUFFER,
+          gl.COLOR_ATTACHMENT0,
+          gl.TEXTURE_2D,
+          posTex[pp],
+          0,
+        );
+        gl.readBuffer(gl.COLOR_ATTACHMENT0);
+        gl.readPixels(0, 0, SIM_W, SIM_H, gl.RGBA, gl.FLOAT, buf);
+        let sr = 0,
+          mx = 0,
+          c = Math.min(COUNT, n);
+        for (let i = 0; i < c; i++) {
+          const x = buf[i * 4],
+            y = buf[i * 4 + 1],
+            z = buf[i * 4 + 2];
+          const r = Math.hypot(x, y, z);
+          sr += r;
+          if (r > mx) mx = r;
+        }
+        gl.deleteFramebuffer(tmp);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return { meanR: sr / c, maxR: mx, count: c };
+      };
+
+      /* controls panel open/close toggle */
+      const panelEl = document.getElementById("panel");
+      const controlsToggle = document.getElementById("controlsToggle");
+      const mobileQuery = window.matchMedia("(max-width:560px)");
+      let controlsOpen = !mobileQuery.matches;
+
+      function syncPanel() {
+        panelEl.classList.toggle("controls-collapsed", !controlsOpen);
+        controlsToggle.classList.toggle("controls-toggle-open", controlsOpen);
+        controlsToggle.setAttribute("aria-expanded", String(controlsOpen));
+        controlsToggle.textContent = controlsOpen ? "閉じる" : "Controls";
+      }
+      syncPanel();
+
+      controlsToggle.addEventListener("click", () => {
+        controlsOpen = !controlsOpen;
+        syncPanel();
+      });
+      mobileQuery.addEventListener("change", (ev) => {
+        controlsOpen = !ev.matches;
+        syncPanel();
+      });
+    </script>
+  </body>
+</html>

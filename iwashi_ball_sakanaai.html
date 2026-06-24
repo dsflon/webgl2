@@ -31,6 +31,7 @@
         display: block;
         cursor: crosshair;
         background: #00111f;
+        touch-action: none;
       }
       #readme {
         position: fixed;
@@ -63,10 +64,27 @@
         font-family: ui-monospace, Menlo, monospace;
         font-size: 11px;
       }
+      #controlsToggle {
+        position: fixed;
+        right: 12px;
+        bottom: calc(12px + env(safe-area-inset-bottom));
+        z-index: 4;
+        display: none;
+        min-width: 104px;
+        padding: 10px 13px;
+        border-radius: 999px;
+        background: rgba(4, 24, 43, 0.78);
+        backdrop-filter: blur(12px);
+        transition: bottom 0.24s ease;
+      }
+      #controlsToggle.controls-toggle-open {
+        bottom: calc(45vh + 20px + env(safe-area-inset-bottom));
+      }
       #controls {
         position: fixed;
         right: 14px;
         top: 12px;
+        z-index: 2;
         width: 286px;
         max-height: calc(100vh - 28px);
         overflow: auto;
@@ -164,13 +182,26 @@
         #readme {
           display: none;
         }
+        #controlsToggle {
+          display: block;
+        }
         #controls {
           left: 10px;
           right: 10px;
-          bottom: 10px;
+          bottom: calc(10px + env(safe-area-inset-bottom));
           top: auto;
           width: auto;
           max-height: 45vh;
+          transition:
+            transform 0.24s ease,
+            opacity 0.24s ease;
+        }
+        #controls.controls-collapsed {
+          transform: translateY(
+            calc(100% + 18px + env(safe-area-inset-bottom))
+          );
+          opacity: 0;
+          pointer-events: none;
         }
       }
     </style>
@@ -189,9 +220,17 @@ README / 操作方法
 - 捕食者座標は inverse(projection * view) による unproject でワールド平面へ投影します。
 -->
     <canvas id="gl"></canvas>
+    <button
+      id="controlsToggle"
+      type="button"
+      aria-controls="controls"
+      aria-expanded="true"
+    >
+      Controls
+    </button>
     <div id="readme">
       <strong>WebGL2 Iwashi Bait Ball</strong><br />GPU ping-pong Boids
-      によるイワシ玉。マウス = 捕食者。<br />近づけると群れが裂け、離すと
+      によるイワシ玉。マウス/タッチ = 捕食者。<br />近づけると群れが裂け、離すと
       Cohesion + Vortex で再形成します。<br /><kbd>Space</kbd> 一時停止 /
       <kbd>R</kbd> リセット / <kbd>H</kbd> 説明表示切替
     </div>
@@ -203,6 +242,7 @@ README / 操作方法
 
         const canvas = document.getElementById("gl");
         const controls = document.getElementById("controls");
+        const controlsToggle = document.getElementById("controlsToggle");
         const noticeEl = document.getElementById("notice");
         const readmeEl = document.getElementById("readme");
         const statusEl = document.createElement("div");
@@ -215,7 +255,7 @@ README / 操作方法
           cohesion: 0.82,
           vortex: 1.08,
           noise: 0.3,
-          predatorStrength: 13.5,
+          predatorStrength: 28,
           predatorRadius: 3.25,
           fogDensity: 0.034,
           cameraSpeed: 0.34,
@@ -625,7 +665,15 @@ void main(){
         const eye = [0, 6, 24];
         const target = [0, 0, 0];
         const cameraForward = [0, 0, -1];
-        const predator = { active: false, x: 0, y: 0, world: [999, 999, 999] };
+        const predator = {
+          active: false,
+          x: 0,
+          y: 0,
+          input: "none",
+          world: [999, 999, 999],
+        };
+        const mobileControlsQuery = window.matchMedia("(max-width: 760px)");
+        let controlsOpen = !mobileControlsQuery.matches;
 
         let texSize = 0,
           capacity = 0,
@@ -639,17 +687,42 @@ void main(){
           fps = 0;
 
         setupGui();
+        syncControlsPanel();
         resetSimulation(params.fishCount);
         requestAnimationFrame(loop);
 
-        canvas.addEventListener("pointermove", (ev) => {
-          const rect = canvas.getBoundingClientRect();
-          predator.x = ev.clientX - rect.left;
-          predator.y = ev.clientY - rect.top;
-          predator.active = true;
+        controlsToggle.addEventListener("click", () => {
+          controlsOpen = !controlsOpen;
+          syncControlsPanel();
         });
-        canvas.addEventListener("pointerleave", () => {
+        mobileControlsQuery.addEventListener("change", (ev) => {
+          controlsOpen = !ev.matches;
+          syncControlsPanel();
+        });
+
+        canvas.addEventListener("pointerdown", (ev) => {
+          if (!ev.isPrimary) return;
+          setPredatorFromPointer(ev);
+          canvas.setPointerCapture?.(ev.pointerId);
+          ev.preventDefault();
+        });
+        canvas.addEventListener("pointermove", (ev) => {
+          if (!ev.isPrimary) return;
+          setPredatorFromPointer(ev);
+          if (ev.pointerType !== "mouse") ev.preventDefault();
+        });
+        canvas.addEventListener("pointerup", (ev) => {
+          if (!ev.isPrimary) return;
+          if (ev.pointerType !== "mouse") predator.active = false;
+          canvas.releasePointerCapture?.(ev.pointerId);
+        });
+        canvas.addEventListener("pointercancel", (ev) => {
+          if (!ev.isPrimary) return;
           predator.active = false;
+          canvas.releasePointerCapture?.(ev.pointerId);
+        });
+        canvas.addEventListener("pointerleave", (ev) => {
+          if (ev.pointerType === "mouse") predator.active = false;
         });
         window.addEventListener("keydown", (ev) => {
           if (ev.code === "Space") {
@@ -819,6 +892,21 @@ void main(){
           );
           mat4Multiply(viewProjection, projection, view);
           mat4Invert(inverseViewProjection, viewProjection);
+        }
+
+        function setPredatorFromPointer(ev) {
+          const rect = canvas.getBoundingClientRect();
+          predator.x = ev.clientX - rect.left;
+          predator.y = ev.clientY - rect.top;
+          predator.input = ev.pointerType || "pointer";
+          predator.active = true;
+        }
+
+        function syncControlsPanel() {
+          controls.classList.toggle("controls-collapsed", !controlsOpen);
+          controlsToggle.classList.toggle("controls-toggle-open", controlsOpen);
+          controlsToggle.setAttribute("aria-expanded", String(controlsOpen));
+          controlsToggle.textContent = controlsOpen ? "閉じる" : "Controls";
         }
 
         function updatePredatorWorld() {
@@ -1179,7 +1267,9 @@ void main(){
             " fps / " +
             (params.paused ? "paused" : "running") +
             "<br>" +
-            "mouse predator: " +
+            "predator (" +
+            predator.input +
+            "): " +
             (predator.active ? "active" : "outside");
         }
 
