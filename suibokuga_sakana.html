@@ -1,0 +1,1609 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>水墨画魚 — WebGL2 Fluid Ink</title>
+    <!--
+      README / 操作方法
+
+      WebGL2 Fluid Ink — 水墨画インタラクティブ
+      ------------------------------------------------------------
+      前提:
+        - WebGL2 対応ブラウザ
+        - EXT_color_buffer_float 対応 GPU / ブラウザ
+        - 画像は既定で assets/suibokuga.png を読み込みます。
+          この HTML と同階層に assets/suibokuga.png を置いてください。
+          現在のプロジェクト用に ./src/suibokuga.png へも自動フォールバックします。
+        - 画像差し替え: URL パラメータ ?image=path/to/image.png でも指定できます。
+
+      操作:
+        - ポインタ移動: 水面をかき混ぜるように、絵が滲み歪みます（インク追加なし）。
+        - クリック / タップ: 墨汁が一滴落ち、円形に広がります。
+        - ドラッグ / touchmove: 墨を足しながら流れを作ります。
+        - 放置: 速度、歪み、追加インクが減衰し、自然に原画へ戻ります。
+
+      調整:
+        - 右上 GUI で復元速度、インクフェード、かき混ぜ強度、半径、墨濃度、
+          滴サイズ、屈折、ハイライト、圧力反復回数をリアルタイム調整できます。
+        - Reset で速度場 / 歪み場 / 追加インク場をゼロに戻します。
+
+      実装メモ:
+        - 生 WebGL2 + GLSL ES 3.00 のみ使用しています。
+        - Stable Fluids: advection → divergence → pressure(Jacobi) → gradient subtract。
+        - 基底画像は不変テクスチャとして保持し、distortion と ink だけを時間発展させます。
+        - distortion と ink がゼロへ戻るため、最終的に必ず元画像と一致します。
+    -->
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f5f0e8;
+        --paper-deep: #e8dfd0;
+        --ink: #151319;
+        --muted: rgba(50, 43, 35, 0.68);
+        --panel: rgba(250, 247, 239, 0.82);
+        --line: rgba(72, 60, 45, 0.16);
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            circle at 50% 42%,
+            rgba(255, 252, 245, 0.72),
+            transparent 56%
+          ),
+          linear-gradient(135deg, #fbf7ed, var(--paper));
+        font-family:
+          "Helvetica Neue", "Hiragino Kaku Gothic ProN", "Yu Gothic", Helvetica,
+          Arial, sans-serif;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.28;
+        background-image:
+          linear-gradient(90deg, rgba(80, 55, 25, 0.05) 1px, transparent 1px),
+          linear-gradient(0deg, rgba(80, 55, 25, 0.035) 1px, transparent 1px);
+        background-size:
+          7px 100%,
+          100% 9px;
+        mix-blend-mode: multiply;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+        touch-action: none;
+        user-select: none;
+      }
+
+      #loading,
+      #error {
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 28px;
+        color: #827a70;
+        background: var(--paper);
+        font-size: 12px;
+        line-height: 1.9;
+        letter-spacing: 0.18em;
+        text-align: center;
+        transition:
+          opacity 0.7s ease,
+          visibility 0.7s ease;
+      }
+
+      #loading.hide {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+
+      #error {
+        z-index: 40;
+        display: none;
+        color: #3e251e;
+        background:
+          radial-gradient(
+            circle at 50% 35%,
+            rgba(255, 255, 255, 0.65),
+            transparent 45%
+          ),
+          var(--paper);
+        letter-spacing: 0.08em;
+      }
+
+      #error.show {
+        display: flex;
+      }
+
+      #error pre {
+        max-width: min(760px, 92vw);
+        white-space: pre-wrap;
+        text-align: left;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        letter-spacing: 0;
+      }
+
+      .hint {
+        position: fixed;
+        left: 50%;
+        bottom: max(22px, env(safe-area-inset-bottom));
+        z-index: 5;
+        transform: translateX(-50%);
+        color: rgba(64, 55, 45, 0.52);
+        font-size: 10px;
+        letter-spacing: 0.36em;
+        white-space: nowrap;
+        pointer-events: none;
+        user-select: none;
+        transition:
+          opacity 1.6s ease,
+          transform 1.6s ease;
+      }
+
+      .hint.hide {
+        opacity: 0;
+        transform: translateX(-50%) translateY(8px);
+      }
+
+      .panel {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        right: max(14px, env(safe-area-inset-right));
+        z-index: 10;
+        width: min(330px, calc(100vw - 28px));
+        max-height: calc(100vh - 28px);
+        overflow: auto;
+        padding: 14px 14px 12px;
+        color: var(--muted);
+        background:
+          linear-gradient(
+            180deg,
+            rgba(255, 253, 247, 0.92),
+            rgba(241, 234, 221, 0.76)
+          ),
+          var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        box-shadow:
+          0 18px 50px rgba(50, 37, 22, 0.13),
+          inset 0 1px 0 rgba(255, 255, 255, 0.72);
+        backdrop-filter: blur(14px);
+        transition:
+          transform 0.42s cubic-bezier(0.2, 0.8, 0.2, 1),
+          opacity 0.32s ease;
+      }
+
+      .panel h1 {
+        margin-bottom: 4px;
+        color: rgba(33, 28, 24, 0.78);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.24em;
+      }
+
+      .panel p {
+        margin-bottom: 10px;
+        font-size: 10px;
+        line-height: 1.6;
+        letter-spacing: 0.06em;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 56px;
+        gap: 8px 10px;
+        align-items: center;
+        padding: 7px 0;
+        border-top: 1px solid rgba(68, 54, 38, 0.09);
+      }
+
+      .row label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        color: rgba(40, 35, 31, 0.72);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+
+      .row label span {
+        color: rgba(90, 76, 61, 0.58);
+        font-size: 9px;
+        letter-spacing: 0.05em;
+      }
+
+      .row output {
+        color: rgba(25, 22, 20, 0.62);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      input[type="range"] {
+        grid-column: 1 / -1;
+        width: 100%;
+        accent-color: #302923;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 10px;
+        padding: 9px 12px;
+        color: rgba(31, 25, 20, 0.76);
+        background: rgba(255, 255, 255, 0.46);
+        border: 1px solid rgba(55, 42, 30, 0.17);
+        border-radius: 999px;
+        font-size: 11px;
+        letter-spacing: 0.2em;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      #controlsToggle {
+        position: fixed;
+        right: max(12px, env(safe-area-inset-right));
+        bottom: max(12px, env(safe-area-inset-bottom));
+        z-index: 14;
+        display: none;
+        width: auto;
+        min-width: 112px;
+        margin: 0;
+        padding: 10px 14px;
+        color: rgba(30, 25, 20, 0.82);
+        background: rgba(255, 252, 245, 0.82);
+        box-shadow: 0 10px 28px rgba(50, 37, 22, 0.14);
+        backdrop-filter: blur(14px);
+      }
+
+      #controlsToggle.controls-toggle-open {
+        bottom: calc(45vh + 22px + env(safe-area-inset-bottom));
+      }
+
+      .status {
+        margin-top: 9px;
+        color: rgba(88, 78, 65, 0.58);
+        font-size: 9px;
+        line-height: 1.55;
+      }
+
+      @media (max-width: 720px) {
+        #controlsToggle {
+          display: block;
+        }
+
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 45vh;
+          padding: 12px;
+          border-radius: 16px;
+        }
+
+        .panel.controls-collapsed {
+          transform: translateY(
+            calc(100% + 22px + env(safe-area-inset-bottom))
+          );
+          opacity: 0;
+          pointer-events: none;
+        }
+
+        .hint {
+          bottom: calc(max(10px, env(safe-area-inset-bottom)) + 45vh + 18px);
+          font-size: 9px;
+        }
+
+        .row {
+          padding: 5px 0;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 水墨画インタラクティブ"></canvas>
+    <div id="loading">水面に墨を浮かべています ...</div>
+    <div id="error"><pre></pre></div>
+    <div class="hint" id="hint">MOVE · CLICK · DRAG</div>
+    <button
+      id="controlsToggle"
+      type="button"
+      aria-controls="controls"
+      aria-expanded="true"
+    >
+      閉じる
+    </button>
+
+    <section id="controls" class="panel" aria-label="調整パネル">
+      <h1>FLUID INK</h1>
+      <p>水面をなぞると絵が滲み、押すと墨が落ちます。値は即時反映されます。</p>
+
+      <div class="row">
+        <label for="restore"
+          >復元の速さ <span>歪み場がゼロへ戻る速度</span></label
+        >
+        <output id="restoreOut"></output>
+        <input id="restore" type="range" min="0.25" max="4.0" step="0.01" />
+      </div>
+
+      <div class="row">
+        <label for="inkFade"
+          >インクのフェード <span>追加墨が消える速度</span></label
+        >
+        <output id="inkFadeOut"></output>
+        <input id="inkFade" type="range" min="0.03" max="1.8" step="0.01" />
+      </div>
+
+      <div class="row">
+        <label for="stir">かき混ぜの強さ <span>速度場への注入係数</span></label>
+        <output id="stirOut"></output>
+        <input id="stir" type="range" min="0.15" max="2.8" step="0.01" />
+      </div>
+
+      <div class="row">
+        <label for="radius">注入半径 <span>筆先 / 指先の太さ</span></label>
+        <output id="radiusOut"></output>
+        <input id="radius" type="range" min="0.008" max="0.075" step="0.001" />
+      </div>
+
+      <div class="row">
+        <label for="inkDensity">墨の濃さ <span>滴・ドラッグの濃度</span></label>
+        <output id="inkDensityOut"></output>
+        <input id="inkDensity" type="range" min="0.15" max="1.7" step="0.01" />
+      </div>
+
+      <div class="row">
+        <label for="dropSize"
+          >滴の大きさ <span>クリック / タップのブルーム</span></label
+        >
+        <output id="dropSizeOut"></output>
+        <input
+          id="dropSize"
+          type="range"
+          min="0.012"
+          max="0.105"
+          step="0.001"
+        />
+      </div>
+
+      <div class="row">
+        <label for="refraction"
+          >屈折の強さ <span>水越しのレンズ効果</span></label
+        >
+        <output id="refractionOut"></output>
+        <input id="refraction" type="range" min="0.0" max="2.4" step="0.01" />
+      </div>
+
+      <div class="row">
+        <label for="highlight">ハイライト <span>濡れた墨の光沢</span></label>
+        <output id="highlightOut"></output>
+        <input id="highlight" type="range" min="0.0" max="2.4" step="0.01" />
+      </div>
+
+      <div class="row">
+        <label for="pressure">圧力反復回数 <span>品質 ↔ 速度</span></label>
+        <output id="pressureOut"></output>
+        <input id="pressure" type="range" min="8" max="44" step="1" />
+      </div>
+
+      <button id="reset" type="button">RESET</button>
+      <div class="status" id="status">WebGL2 初期化中</div>
+    </section>
+
+    <script type="module">
+      const canvas = document.getElementById("gl");
+      const loading = document.getElementById("loading");
+      const hint = document.getElementById("hint");
+      const errorBox = document.getElementById("error");
+      const errorText = errorBox.querySelector("pre");
+      const statusEl = document.getElementById("status");
+      const controlsPanel = document.getElementById("controls");
+      const controlsToggle = document.getElementById("controlsToggle");
+      const mobileControlsQuery = window.matchMedia("(max-width: 720px)");
+      let controlsOpen = !mobileControlsQuery.matches;
+
+      function syncControlsPanel() {
+        controlsPanel.classList.toggle("controls-collapsed", !controlsOpen);
+        controlsToggle.classList.toggle("controls-toggle-open", controlsOpen);
+        controlsToggle.setAttribute("aria-expanded", String(controlsOpen));
+        controlsToggle.textContent = controlsOpen ? "閉じる" : "Controls";
+      }
+
+      controlsToggle.addEventListener("click", () => {
+        controlsOpen = !controlsOpen;
+        syncControlsPanel();
+      });
+
+      mobileControlsQuery.addEventListener("change", (ev) => {
+        controlsOpen = !ev.matches;
+        syncControlsPanel();
+      });
+
+      syncControlsPanel();
+
+      const reducedMotion = matchMedia(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+
+      const queryImage = new URLSearchParams(location.search).get("image");
+      const IMAGE_CANDIDATES = [
+        queryImage || "assets/suibokuga.png",
+        "./assets/suibokuga.png",
+        "assets/suibokuga.png",
+        "./src/suibokuga.png",
+        "src/suibokuga.png",
+      ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+      const gl = canvas.getContext("webgl2", {
+        alpha: false,
+        antialias: false,
+        depth: false,
+        stencil: false,
+        preserveDrawingBuffer: false,
+        powerPreference: "high-performance",
+      });
+
+      function fail(message, detail = "") {
+        loading.classList.add("hide");
+        errorText.textContent = `${message}${detail ? "\n\n" + detail : ""}`;
+        errorBox.classList.add("show");
+        throw new Error(`${message}\n${detail}`);
+      }
+
+      if (!gl) {
+        fail("WebGL2 が利用できません。WebGL2 対応ブラウザで開いてください。");
+      }
+
+      const colorBufferFloat = gl.getExtension("EXT_color_buffer_float");
+      const floatLinear = gl.getExtension("OES_texture_float_linear");
+      if (!colorBufferFloat) {
+        fail(
+          "EXT_color_buffer_float が利用できません。",
+          "このデモは浮動小数点テクスチャへのレンダリングを使用します。ブラウザ / GPU 設定を確認してください。",
+        );
+      }
+
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.CULL_FACE);
+      gl.disable(gl.BLEND);
+
+      const isMobile =
+        /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+        Math.min(innerWidth, innerHeight) < 760;
+      const SIM_SIZE = reducedMotion ? 224 : isMobile ? 256 : 384;
+      const simFilter = floatLinear ? gl.LINEAR : gl.NEAREST;
+
+      const params = {
+        restore: reducedMotion ? 2.4 : 1.15,
+        inkFade: reducedMotion ? 0.82 : 0.36,
+        stir: reducedMotion ? 0.58 : 1.0,
+        radius: reducedMotion ? 0.021 : 0.028,
+        inkDensity: reducedMotion ? 0.55 : 0.86,
+        dropSize: reducedMotion ? 0.028 : 0.044,
+        refraction: reducedMotion ? 0.52 : 1.04,
+        highlight: reducedMotion ? 0.62 : 1.05,
+        pressure: reducedMotion ? 16 : isMobile ? 20 : 28,
+      };
+
+      const sliderMap = [
+        ["restore", "restoreOut", "restore", 2],
+        ["inkFade", "inkFadeOut", "inkFade", 2],
+        ["stir", "stirOut", "stir", 2],
+        ["radius", "radiusOut", "radius", 3],
+        ["inkDensity", "inkDensityOut", "inkDensity", 2],
+        ["dropSize", "dropSizeOut", "dropSize", 3],
+        ["refraction", "refractionOut", "refraction", 2],
+        ["highlight", "highlightOut", "highlight", 2],
+        ["pressure", "pressureOut", "pressure", 0],
+      ];
+
+      function refreshUI() {
+        for (const [id, outId, key, digits] of sliderMap) {
+          const input = document.getElementById(id);
+          const output = document.getElementById(outId);
+          if (document.activeElement !== input) input.value = params[key];
+          output.textContent =
+            digits === 0
+              ? String(Math.round(params[key]))
+              : Number(params[key]).toFixed(digits);
+        }
+      }
+
+      for (const [id, , key] of sliderMap) {
+        const input = document.getElementById(id);
+        input.value = params[key];
+        input.addEventListener("input", () => {
+          params[key] =
+            key === "pressure"
+              ? Math.round(input.valueAsNumber)
+              : input.valueAsNumber;
+          refreshUI();
+        });
+      }
+      refreshUI();
+
+      const vsQuad = `#version 300 es
+layout(location=0) in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+      /*
+       * Semi-Lagrangian advection.
+       * velocity 自身、distortion、ink を同じパスで移流する。
+       * u_dissipation により速度は粘性、distortion/ink は自然復元・フェードを得る。
+       */
+      const fsAdvect = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_velocity;
+uniform sampler2D u_source;
+uniform float u_dt;
+uniform float u_dissipation;
+out vec4 o;
+void main() {
+  vec2 velocity = texture(u_velocity, v_uv).xy;
+  vec2 uv = clamp(v_uv - velocity * u_dt, 0.001, 0.999);
+  o = texture(u_source, uv) * u_dissipation;
+}`;
+
+      /*
+       * Divergence.
+       * 速度場の発散を計算し、圧力 Poisson 方程式の右辺にする。
+       */
+      const fsDivergence = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_velocity;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  vec2 c = texture(u_velocity, v_uv).xy;
+  vec2 l = texture(u_velocity, v_uv - vec2(u_texel.x, 0.0)).xy;
+  vec2 r = texture(u_velocity, v_uv + vec2(u_texel.x, 0.0)).xy;
+  vec2 b = texture(u_velocity, v_uv - vec2(0.0, u_texel.y)).xy;
+  vec2 t = texture(u_velocity, v_uv + vec2(0.0, u_texel.y)).xy;
+
+  if (v_uv.x < u_texel.x) l.x = -c.x;
+  if (v_uv.x > 1.0 - u_texel.x) r.x = -c.x;
+  if (v_uv.y < u_texel.y) b.y = -c.y;
+  if (v_uv.y > 1.0 - u_texel.y) t.y = -c.y;
+
+  float div = 0.5 * ((r.x - l.x) + (t.y - b.y));
+  o = vec4(div, 0.0, 0.0, 1.0);
+}`;
+
+      /*
+       * Pressure Jacobi iteration.
+       * divergence を打ち消す圧力を 20〜40 回程度の反復で解く。
+       */
+      const fsPressure = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_pressure;
+uniform sampler2D u_divergence;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  float l = texture(u_pressure, v_uv - vec2(u_texel.x, 0.0)).x;
+  float r = texture(u_pressure, v_uv + vec2(u_texel.x, 0.0)).x;
+  float b = texture(u_pressure, v_uv - vec2(0.0, u_texel.y)).x;
+  float t = texture(u_pressure, v_uv + vec2(0.0, u_texel.y)).x;
+  float div = texture(u_divergence, v_uv).x;
+  float p = (l + r + b + t - div) * 0.25;
+  o = vec4(p, 0.0, 0.0, 1.0);
+}`;
+
+      /*
+       * Gradient subtract.
+       * velocity -= grad(pressure) として速度場を非圧縮化する。
+       */
+      const fsGradientSubtract = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_velocity;
+uniform sampler2D u_pressure;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  float l = texture(u_pressure, v_uv - vec2(u_texel.x, 0.0)).x;
+  float r = texture(u_pressure, v_uv + vec2(u_texel.x, 0.0)).x;
+  float b = texture(u_pressure, v_uv - vec2(0.0, u_texel.y)).x;
+  float t = texture(u_pressure, v_uv + vec2(0.0, u_texel.y)).x;
+  vec2 velocity = texture(u_velocity, v_uv).xy - vec2(r - l, t - b) * 0.5;
+  o = vec4(velocity, 0.0, 1.0);
+}`;
+
+      const fsBoundary = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_velocity;
+uniform vec2 u_texel;
+out vec4 o;
+void main() {
+  vec2 v = texture(u_velocity, v_uv).xy;
+  if (v_uv.x < u_texel.x) v.x = abs(v.x) * 0.08;
+  if (v_uv.x > 1.0 - u_texel.x) v.x = -abs(v.x) * 0.08;
+  if (v_uv.y < u_texel.y) v.y = abs(v.y) * 0.08;
+  if (v_uv.y > 1.0 - u_texel.y) v.y = -abs(v.y) * 0.08;
+  o = vec4(v, 0.0, 1.0);
+}`;
+
+      /*
+       * Gaussian splat.
+       * ポインタ座標をシミュレーション UV へ変換して、速度 / 歪み / インクへ加算する。
+       * u_aspect により画面上で概ね円形に見える注入半径へ補正する。
+       */
+      const fsSplat = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_target;
+uniform vec2 u_point;
+uniform vec4 u_value;
+uniform float u_radius;
+uniform float u_aspect;
+uniform float u_noise;
+uniform float u_time;
+out vec4 o;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash(i);
+  float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0));
+  float d = hash(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm(vec2 p) {
+  float s = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    s += a * noise(p);
+    p = p * 2.07 + 13.7;
+    a *= 0.5;
+  }
+  return s;
+}
+
+void main() {
+  vec2 d = v_uv - u_point;
+  d.x *= u_aspect;
+  float r = max(u_radius, 0.0001);
+  float g = exp(-dot(d, d) / (r * r));
+
+  float fiber = fbm(v_uv * 135.0 + u_point * 47.0 + u_time * 0.03);
+  float edge = smoothstep(0.04, 0.92, g) * (0.82 + 0.38 * fiber);
+  float amount = mix(g, edge, u_noise);
+
+  o = texture(u_target, v_uv) + u_value * amount;
+}`;
+
+      /*
+       * Ink diffusion / decay.
+       * 追加インクだけをゆっくり拡散させ、同時にフェードさせる。
+       * 拡散量にノイズを混ぜ、和紙へ染み込む不規則な輪郭を作る。
+       */
+      const fsInkDiffuse = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_ink;
+uniform vec2 u_texel;
+uniform float u_diffusion;
+uniform float u_decay;
+uniform float u_time;
+out vec4 o;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(41.7, 289.1))) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
+    f.y
+  );
+}
+
+void main() {
+  float c = texture(u_ink, v_uv).r;
+  float l = texture(u_ink, v_uv - vec2(u_texel.x, 0.0)).r;
+  float r = texture(u_ink, v_uv + vec2(u_texel.x, 0.0)).r;
+  float b = texture(u_ink, v_uv - vec2(0.0, u_texel.y)).r;
+  float t = texture(u_ink, v_uv + vec2(0.0, u_texel.y)).r;
+
+  float paper = noise(v_uv * vec2(320.0, 560.0) + u_time * 0.035);
+  float coarse = noise(v_uv * 58.0 - u_time * 0.02);
+  float irregular = 0.58 + 0.72 * mix(paper, coarse, 0.35);
+  float lap = (l + r + b + t) * 0.25 - c;
+
+  float ink = max(0.0, c + lap * u_diffusion * irregular);
+  ink *= u_decay;
+  o = vec4(ink, 0.0, 0.0, 1.0);
+}`;
+
+      const fsDisplay = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_base;
+uniform sampler2D u_velocity;
+uniform sampler2D u_distortion;
+uniform sampler2D u_ink;
+uniform vec2 u_texel;
+uniform float u_imageAR;
+uniform float u_screenAR;
+uniform float u_time;
+uniform vec2 u_pointer;
+uniform float u_refraction;
+uniform float u_highlight;
+uniform float u_parallax;
+uniform float u_inkDarkness;
+out vec4 o;
+
+vec2 screenToImage(vec2 uv) {
+  if (u_screenAR > u_imageAR) {
+    float frac = u_imageAR / u_screenAR;
+    float border = (1.0 - frac) * 0.5;
+    return vec2((uv.x - border) / frac, uv.y);
+  } else {
+    float frac = u_screenAR / u_imageAR;
+    float border = (1.0 - frac) * 0.5;
+    return vec2(uv.x, (uv.y - border) / frac);
+  }
+}
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash(i);
+  float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0));
+  float d = hash(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm(vec2 p) {
+  float s = 0.0;
+  float a = 0.52;
+  for (int i = 0; i < 5; i++) {
+    s += a * noise(p);
+    p = p * 2.04 + 19.13;
+    a *= 0.51;
+  }
+  return s;
+}
+
+vec3 sampleBase(vec2 uv) {
+  return texture(u_base, clamp(uv, 0.001, 0.999)).rgb;
+}
+
+float luminance(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+  vec2 imageUV = screenToImage(v_uv);
+  vec3 paper = vec3(0.963, 0.948, 0.918);
+
+  bool inBounds =
+    imageUV.x >= 0.0 && imageUV.x <= 1.0 &&
+    imageUV.y >= 0.0 && imageUV.y <= 1.0;
+
+  if (!inBounds) {
+    float bgFiber = fbm(v_uv * vec2(180.0, 310.0));
+    float vignette = smoothstep(0.92, 0.18, length(v_uv - 0.5));
+    vec3 bg = paper * (0.985 + (bgFiber - 0.5) * 0.035) * (0.94 + 0.06 * vignette);
+    o = vec4(bg, 1.0);
+    return;
+  }
+
+  vec2 pointerShift = (u_pointer - 0.5) * u_parallax;
+  vec2 distortion = texture(u_distortion, imageUV).xy;
+  vec2 velocity = texture(u_velocity, imageUV).xy;
+
+  float inkC = texture(u_ink, imageUV).r;
+  float inkL = texture(u_ink, imageUV - vec2(u_texel.x, 0.0)).r;
+  float inkR = texture(u_ink, imageUV + vec2(u_texel.x, 0.0)).r;
+  float inkB = texture(u_ink, imageUV - vec2(0.0, u_texel.y)).r;
+  float inkT = texture(u_ink, imageUV + vec2(0.0, u_texel.y)).r;
+  vec2 inkGrad = vec2(inkR - inkL, inkT - inkB);
+
+  vec3 baseStill = sampleBase(imageUV + pointerShift * 0.045);
+  float baseDensity = 1.0 - luminance(baseStill);
+
+  // 屈折: 追加インクの高さ勾配 + 歪み場 + 流速を UV オフセットへ変換。
+  vec2 refractUV =
+    imageUV +
+    pointerShift * (0.11 + baseDensity * 0.23) +
+    distortion * (0.78 + inkC * 0.55) -
+    inkGrad * (0.010 + 0.010 * u_refraction) +
+    velocity * 0.006 * u_refraction;
+
+  vec2 flowDir = distortion + velocity * 0.018 + inkGrad * 0.004;
+  float flowLen = length(flowDir);
+  vec2 dir = flowLen > 0.00001 ? flowDir / flowLen : vec2(1.0, 0.0);
+  float smear = clamp(flowLen * 16.0 + inkC * 0.22, 0.0, 1.0);
+  float smearWidth = clamp(flowLen * 0.32 + inkC * 0.006, 0.0, 0.018);
+
+  vec3 b0 = sampleBase(refractUV);
+  vec3 b1 = sampleBase(refractUV + dir * smearWidth);
+  vec3 b2 = sampleBase(refractUV - dir * smearWidth * 0.7);
+  vec3 b3 = sampleBase(refractUV + vec2(-dir.y, dir.x) * smearWidth * 0.44);
+  vec3 baseWet = mix(b0, (b0 * 0.46 + b1 * 0.24 + b2 * 0.20 + b3 * 0.10), smear);
+
+  // 和紙繊維。白地を壊しすぎないよう非常に控えめに乗算。
+  float fiberLong = fbm(imageUV * vec2(95.0, 720.0) + vec2(0.0, u_time * 0.012));
+  float fiberCross = fbm(imageUV * vec2(520.0, 130.0) - vec2(u_time * 0.01, 0.0));
+  float paperFiber = (fiberLong * 0.68 + fiberCross * 0.32 - 0.5);
+  vec3 color = baseWet * (1.0 + paperFiber * 0.028);
+
+  // 追加墨。中心は濃く、滲み縁は毛羽立ちと濃いエッジを出す。
+  float density = clamp(inkC, 0.0, 1.8);
+  float softInk = pow(clamp(density, 0.0, 1.0), 0.58);
+  float edge = smoothstep(0.018, 0.16, length(inkGrad) * 5.0) * smoothstep(0.015, 0.9, density);
+  vec3 inkColor = vec3(0.030, 0.028, 0.036);
+  color = mix(color, inkColor, clamp(softInk * u_inkDarkness, 0.0, 0.95));
+  color = mix(color, inkColor * 0.66, edge * 0.34 * u_inkDarkness);
+
+  // 法線ライティング: インク濃度 + 原画の墨濃度を高さ場として濡れた光沢を作る。
+  float baseHeight = baseDensity * 0.10;
+  vec2 heightGrad = inkGrad * (1.45 + density * 0.9) + distortion * 1.7 + velocity * 0.035;
+  vec3 n = normalize(vec3(-heightGrad.x * 34.0, -heightGrad.y * 34.0, 1.0));
+  vec3 light = normalize(vec3(-0.38, 0.48, 0.79));
+  vec3 view = vec3(0.0, 0.0, 1.0);
+  vec3 halfV = normalize(light + view);
+
+  float wet = clamp(density * 1.6 + flowLen * 18.0 + baseHeight * 0.35, 0.0, 1.0);
+  float diff = 0.84 + 0.16 * max(dot(n, light), 0.0);
+  float spec = pow(max(dot(n, halfV), 0.0), 72.0) * wet;
+  float grazing = pow(1.0 - max(dot(n, view), 0.0), 2.0) * wet;
+
+  color *= mix(1.0, diff, 0.36 * wet * u_highlight);
+  color += vec3(0.30, 0.27, 0.22) * spec * 0.36 * u_highlight;
+  color += vec3(0.08, 0.075, 0.07) * grazing * 0.16 * u_highlight;
+
+  // 控えめな視差とビネット。奥行きは出すが原画の忠実性を保つ。
+  float vignette = smoothstep(0.95, 0.22, length((v_uv - 0.5) * vec2(u_screenAR, 1.0)));
+  color *= 0.955 + 0.045 * vignette;
+
+  o = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`;
+
+      function compileShader(type, source, label) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          const log = gl.getShaderInfoLog(shader) || "unknown shader error";
+          gl.deleteShader(shader);
+          fail(`Shader compile error: ${label}`, log);
+        }
+        return shader;
+      }
+
+      function createProgram(fragmentSource, label) {
+        const program = gl.createProgram();
+        const vs = compileShader(gl.VERTEX_SHADER, vsQuad, `${label}:vertex`);
+        const fs = compileShader(
+          gl.FRAGMENT_SHADER,
+          fragmentSource,
+          `${label}:fragment`,
+        );
+        gl.attachShader(program, vs);
+        gl.attachShader(program, fs);
+        gl.linkProgram(program);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          const log = gl.getProgramInfoLog(program) || "unknown program error";
+          gl.deleteProgram(program);
+          fail(`Program link error: ${label}`, log);
+        }
+
+        const uniforms = {};
+        const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
+        for (let i = 0; i < count; i++) {
+          const info = gl.getActiveUniform(program, i);
+          uniforms[info.name] = gl.getUniformLocation(program, info.name);
+        }
+
+        return { program, uniforms, label };
+      }
+
+      const quadVAO = gl.createVertexArray();
+      gl.bindVertexArray(quadVAO);
+      {
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(
+          gl.ARRAY_BUFFER,
+          new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+          gl.STATIC_DRAW,
+        );
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      }
+      gl.bindVertexArray(null);
+
+      function drawQuad() {
+        gl.bindVertexArray(quadVAO);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.bindVertexArray(null);
+      }
+
+      function createFBO(width, height, filter = simFilter) {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA16F,
+          width,
+          height,
+          0,
+          gl.RGBA,
+          gl.HALF_FLOAT,
+          null,
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const fb = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(
+          gl.FRAMEBUFFER,
+          gl.COLOR_ATTACHMENT0,
+          gl.TEXTURE_2D,
+          tex,
+          0,
+        );
+        const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        if (status !== gl.FRAMEBUFFER_COMPLETE) {
+          fail(
+            "Framebuffer を作成できません。",
+            `status = 0x${status.toString(16)}`,
+          );
+        }
+
+        return { tex, fb, width, height };
+      }
+
+      function createDoubleFBO(width, height, filter = simFilter) {
+        const fbos = [
+          createFBO(width, height, filter),
+          createFBO(width, height, filter),
+        ];
+        let index = 0;
+        return {
+          fbos,
+          get read() {
+            return fbos[index];
+          },
+          get write() {
+            return fbos[1 - index];
+          },
+          swap() {
+            index = 1 - index;
+          },
+        };
+      }
+
+      function bindTarget(target) {
+        if (target) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
+          gl.viewport(0, 0, target.width, target.height);
+        } else {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+      }
+
+      function bindTexture(unit, texture) {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+      }
+
+      function bindFBOTexture(unit, fbo) {
+        bindTexture(unit, fbo.tex);
+      }
+
+      function clearFBO(fbo, r = 0, g = 0, b = 0, a = 1) {
+        bindTarget(fbo);
+        gl.clearColor(r, g, b, a);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+
+      function clearDouble(doubleFBO) {
+        clearFBO(doubleFBO.fbos[0]);
+        clearFBO(doubleFBO.fbos[1]);
+      }
+
+      function loadImageFromCandidates(paths) {
+        return new Promise((resolve, reject) => {
+          let i = 0;
+          const errors = [];
+
+          const tryNext = () => {
+            if (i >= paths.length) {
+              reject(new Error(errors.join("\n")));
+              return;
+            }
+
+            const src = paths[i++];
+            const image = new Image();
+            image.decoding = "async";
+            image.onload = () => resolve({ image, src });
+            image.onerror = () => {
+              errors.push(`failed: ${src}`);
+              tryNext();
+            };
+            image.src = src;
+          };
+
+          tryNext();
+        });
+      }
+
+      const { image: sourceImage, src: loadedImagePath } =
+        await loadImageFromCandidates(IMAGE_CANDIDATES).catch((err) => {
+          fail(
+            "水墨画像を読み込めません。",
+            `既定パス assets/suibokuga.png、または ?image=... で画像を指定してください。\n${err.message}`,
+          );
+        });
+
+      const imageAR = sourceImage.naturalWidth / sourceImage.naturalHeight;
+
+      const sourceTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        sourceImage,
+      );
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+      const prog = {
+        advect: createProgram(fsAdvect, "advection"),
+        divergence: createProgram(fsDivergence, "divergence"),
+        pressure: createProgram(fsPressure, "pressure-jacobi"),
+        gradient: createProgram(fsGradientSubtract, "gradient-subtract"),
+        boundary: createProgram(fsBoundary, "boundary"),
+        splat: createProgram(fsSplat, "splat"),
+        inkDiffuse: createProgram(fsInkDiffuse, "ink-diffuse"),
+        display: createProgram(fsDisplay, "display"),
+      };
+
+      const velocity = createDoubleFBO(SIM_SIZE, SIM_SIZE, simFilter);
+      const distortion = createDoubleFBO(SIM_SIZE, SIM_SIZE, simFilter);
+      const ink = createDoubleFBO(SIM_SIZE, SIM_SIZE, simFilter);
+      const pressure = createDoubleFBO(SIM_SIZE, SIM_SIZE, gl.NEAREST);
+      const divergence = createFBO(SIM_SIZE, SIM_SIZE, gl.NEAREST);
+      const texel = [1 / SIM_SIZE, 1 / SIM_SIZE];
+
+      const pendingSplats = [];
+      const blooms = [];
+
+      function resetSimulation() {
+        clearDouble(velocity);
+        clearDouble(distortion);
+        clearDouble(ink);
+        clearDouble(pressure);
+        clearFBO(divergence);
+        pendingSplats.length = 0;
+        blooms.length = 0;
+      }
+
+      resetSimulation();
+
+      let dpr = Math.min(devicePixelRatio || 1, isMobile ? 1.5 : 2);
+      let screenW = 1;
+      let screenH = 1;
+      function resize() {
+        dpr = Math.min(devicePixelRatio || 1, isMobile ? 1.5 : 2);
+        screenW = Math.max(1, Math.round(innerWidth * dpr));
+        screenH = Math.max(1, Math.round(innerHeight * dpr));
+        canvas.width = screenW;
+        canvas.height = screenH;
+      }
+      addEventListener("resize", resize, { passive: true });
+      resize();
+
+      /*
+       * 画面 UV → 画像 UV。
+       * 画像は contain で全体表示されるため、余白を除いた座標へ変換する。
+       * この座標がそのままシミュレーションテクスチャの UV になる。
+       */
+      function screenToImageUV(sx, sy) {
+        const screenAR = innerWidth / innerHeight;
+        if (screenAR > imageAR) {
+          const frac = imageAR / screenAR;
+          const border = (1 - frac) * 0.5;
+          const x = (sx - border) / frac;
+          return { x, y: sy, inBounds: x >= 0 && x <= 1 && sy >= 0 && sy <= 1 };
+        }
+
+        const frac = screenAR / imageAR;
+        const border = (1 - frac) * 0.5;
+        const y = (sy - border) / frac;
+        return { x: sx, y, inBounds: sx >= 0 && sx <= 1 && y >= 0 && y <= 1 };
+      }
+
+      function screenDeltaToImageDelta(dx, dy) {
+        const screenAR = innerWidth / innerHeight;
+        if (screenAR > imageAR) {
+          return { x: (dx * screenAR) / imageAR, y: dy };
+        }
+        return { x: dx, y: (dy * imageAR) / screenAR };
+      }
+
+      const pointer = {
+        down: false,
+        active: false,
+        clientX: innerWidth * 0.5,
+        clientY: innerHeight * 0.5,
+        uvX: 0.5,
+        uvY: 0.5,
+        lastClientX: null,
+        lastClientY: null,
+        lastTime: performance.now(),
+      };
+
+      let lastInteractionTime = performance.now();
+
+      function updatePointerPosition(clientX, clientY) {
+        pointer.clientX = clientX;
+        pointer.clientY = clientY;
+        const sx = clientX / innerWidth;
+        const sy = 1 - clientY / innerHeight;
+        const uv = screenToImageUV(sx, sy);
+        pointer.uvX = Math.min(1, Math.max(0, uv.x));
+        pointer.uvY = Math.min(1, Math.max(0, uv.y));
+        return uv;
+      }
+
+      function queueDrop(x, y) {
+        pendingSplats.push({
+          kind: "drop",
+          x,
+          y,
+          dx: 0,
+          dy: 0,
+          speed: 0,
+        });
+        blooms.push({
+          x,
+          y,
+          age: 0,
+          life: reducedMotion ? 0.22 : 0.34,
+          size: params.dropSize,
+          density: params.inkDensity,
+        });
+      }
+
+      function handlePointerMove(e) {
+        if (e.pointerType === "touch") e.preventDefault();
+
+        const now = performance.now();
+        const uv = updatePointerPosition(e.clientX, e.clientY);
+
+        if (pointer.lastClientX === null || pointer.lastClientY === null) {
+          pointer.lastClientX = e.clientX;
+          pointer.lastClientY = e.clientY;
+          pointer.lastTime = now;
+          return;
+        }
+
+        const prevSX = pointer.lastClientX / innerWidth;
+        const prevSY = 1 - pointer.lastClientY / innerHeight;
+        const sx = e.clientX / innerWidth;
+        const sy = 1 - e.clientY / innerHeight;
+        const d = screenDeltaToImageDelta(sx - prevSX, sy - prevSY);
+        const dt = Math.max(0.008, (now - pointer.lastTime) / 1000);
+        const speed = Math.hypot(d.x, d.y) / dt;
+
+        pointer.lastClientX = e.clientX;
+        pointer.lastClientY = e.clientY;
+        pointer.lastTime = now;
+
+        if (!uv.inBounds) return;
+
+        if (Math.hypot(d.x, d.y) > 0.00005) {
+          pendingSplats.push({
+            kind: pointer.down ? "drag" : "stir",
+            x: pointer.uvX,
+            y: pointer.uvY,
+            dx: d.x,
+            dy: d.y,
+            speed,
+          });
+          lastInteractionTime = now;
+        }
+      }
+
+      canvas.addEventListener(
+        "pointermove",
+        (e) => {
+          handlePointerMove(e);
+        },
+        { passive: false },
+      );
+
+      canvas.addEventListener(
+        "pointerdown",
+        (e) => {
+          if (e.pointerType === "touch") e.preventDefault();
+          canvas.setPointerCapture?.(e.pointerId);
+          pointer.down = true;
+          pointer.active = true;
+          pointer.lastClientX = e.clientX;
+          pointer.lastClientY = e.clientY;
+          pointer.lastTime = performance.now();
+
+          const uv = updatePointerPosition(e.clientX, e.clientY);
+          if (uv.inBounds) {
+            queueDrop(pointer.uvX, pointer.uvY);
+            lastInteractionTime = performance.now();
+          }
+        },
+        { passive: false },
+      );
+
+      function endPointer(e) {
+        pointer.down = false;
+        pointer.active = false;
+        pointer.lastClientX = null;
+        pointer.lastClientY = null;
+        if (e?.pointerId !== undefined)
+          canvas.releasePointerCapture?.(e.pointerId);
+      }
+
+      canvas.addEventListener("pointerup", endPointer, { passive: true });
+      canvas.addEventListener("pointercancel", endPointer, { passive: true });
+      canvas.addEventListener("pointerleave", () => {
+        if (!pointer.down) endPointer();
+      });
+
+      document
+        .getElementById("reset")
+        .addEventListener("click", resetSimulation);
+
+      function splat(field, x, y, value, radius, noiseAmount = 0.0) {
+        bindTarget(field.write);
+        gl.useProgram(prog.splat.program);
+        bindFBOTexture(0, field.read);
+        gl.uniform1i(prog.splat.uniforms.u_target, 0);
+        gl.uniform2f(prog.splat.uniforms.u_point, x, y);
+        gl.uniform4f(
+          prog.splat.uniforms.u_value,
+          value[0],
+          value[1],
+          value[2],
+          value[3],
+        );
+        gl.uniform1f(prog.splat.uniforms.u_radius, radius);
+        gl.uniform1f(prog.splat.uniforms.u_aspect, imageAR);
+        gl.uniform1f(prog.splat.uniforms.u_noise, noiseAmount);
+        gl.uniform1f(prog.splat.uniforms.u_time, totalTime);
+        drawQuad();
+        field.swap();
+      }
+
+      function splatVelocity(x, y, vx, vy, radius) {
+        splat(velocity, x, y, [vx, vy, 0, 0], radius, 0.0);
+      }
+
+      function splatDistortion(x, y, dx, dy, radius) {
+        splat(distortion, x, y, [dx, dy, 0, 0], radius, 0.18);
+      }
+
+      function splatInk(x, y, amount, radius) {
+        splat(ink, x, y, [amount, 0, 0, 0], radius, 0.82);
+      }
+
+      function processInputSplats(dt) {
+        const maxPerFrame = isMobile ? 18 : 36;
+        const count = Math.min(pendingSplats.length, maxPerFrame);
+
+        for (let i = 0; i < count; i++) {
+          const s = pendingSplats.shift();
+          const radius = params.radius;
+          const force = params.stir * (reducedMotion ? 0.62 : 1.0);
+
+          if (s.kind === "stir") {
+            // 押下なし: 速度場と歪み場だけへ注入。インクは足さない。
+            const vx = s.dx * 30.0 * force;
+            const vy = s.dy * 30.0 * force;
+            splatVelocity(s.x, s.y, vx, vy, radius * 1.05);
+            splatDistortion(
+              s.x,
+              s.y,
+              s.dx * 0.34 * force,
+              s.dy * 0.34 * force,
+              radius * 1.18,
+            );
+          } else if (s.kind === "drag") {
+            // ドラッグ: 筆先を沈める。速度注入を強め、速度に応じた濃淡でインクを連続追加。
+            const vx = s.dx * 48.0 * force;
+            const vy = s.dy * 48.0 * force;
+            const slowDeposit = 0.34 + 0.72 / (1.0 + s.speed * 2.7);
+            const stringy = Math.min(1.6, 0.65 + s.speed * 0.12);
+            const density =
+              params.inkDensity * slowDeposit * (reducedMotion ? 0.72 : 1.0);
+
+            splatVelocity(s.x, s.y, vx, vy, radius * 1.08);
+            splatDistortion(
+              s.x,
+              s.y,
+              s.dx * 0.62 * force,
+              s.dy * 0.62 * force,
+              radius * 1.22,
+            );
+            splatInk(s.x, s.y, density * 0.26, radius * 0.72);
+            splatInk(s.x, s.y, density * 0.08, radius * 1.72 * stringy);
+          } else if (s.kind === "drop") {
+            // クリック / タップ: 小さな芯 + 暈けた外縁 + 放射状・下向き初速。
+            const size = params.dropSize;
+            const density = params.inkDensity * (reducedMotion ? 0.72 : 1.0);
+
+            splatInk(s.x, s.y, density * 0.72, size * 0.36);
+            splatInk(s.x, s.y, density * 0.22, size * 0.95);
+            splatInk(s.x, s.y, density * 0.07, size * 1.75);
+            splatDistortion(s.x, s.y, 0.0, -size * 0.12, size * 0.92);
+            splatVelocity(s.x, s.y, 0.0, -0.11 * force, size * 0.58);
+
+            const n = reducedMotion ? 8 : 13;
+            for (let j = 0; j < n; j++) {
+              const a = (j / n) * Math.PI * 2;
+              const ca = Math.cos(a);
+              const sa = Math.sin(a);
+              const px = s.x + (ca * size * 0.18) / Math.max(imageAR, 0.0001);
+              const py = s.y + sa * size * 0.18;
+              splatVelocity(
+                px,
+                py,
+                ca * 0.075 * force,
+                sa * 0.075 * force,
+                size * 0.32,
+              );
+            }
+          }
+        }
+
+        // 着水後の短いブルーム。初期は小さく、短時間で外側へ拡散する。
+        for (let i = blooms.length - 1; i >= 0; i--) {
+          const b = blooms[i];
+          b.age += dt;
+          const k = b.age / b.life;
+          if (k >= 1) {
+            blooms.splice(i, 1);
+            continue;
+          }
+
+          const ease = 1 - Math.pow(1 - k, 2);
+          const radius = b.size * (0.42 + ease * 2.15);
+          const amount = b.density * (1 - k) * 0.035 * Math.min(2.0, dt * 60.0);
+          splatInk(b.x, b.y, amount, radius);
+          splatDistortion(b.x, b.y, 0.0, -amount * 0.006, radius * 0.88);
+        }
+      }
+
+      function advect(field, dissipation, dt) {
+        bindTarget(field.write);
+        gl.useProgram(prog.advect.program);
+        bindFBOTexture(0, velocity.read);
+        gl.uniform1i(prog.advect.uniforms.u_velocity, 0);
+        bindFBOTexture(1, field.read);
+        gl.uniform1i(prog.advect.uniforms.u_source, 1);
+        gl.uniform1f(prog.advect.uniforms.u_dt, dt);
+        gl.uniform1f(prog.advect.uniforms.u_dissipation, dissipation);
+        drawQuad();
+        field.swap();
+      }
+
+      function diffuseInk(dt) {
+        bindTarget(ink.write);
+        gl.useProgram(prog.inkDiffuse.program);
+        bindFBOTexture(0, ink.read);
+        gl.uniform1i(prog.inkDiffuse.uniforms.u_ink, 0);
+        gl.uniform2f(prog.inkDiffuse.uniforms.u_texel, texel[0], texel[1]);
+        gl.uniform1f(
+          prog.inkDiffuse.uniforms.u_diffusion,
+          reducedMotion ? 0.08 : 0.14,
+        );
+        gl.uniform1f(
+          prog.inkDiffuse.uniforms.u_decay,
+          Math.exp(-params.inkFade * dt * 0.35),
+        );
+        gl.uniform1f(prog.inkDiffuse.uniforms.u_time, totalTime);
+        drawQuad();
+        ink.swap();
+      }
+
+      function projectVelocity() {
+        // divergence
+        bindTarget(divergence);
+        gl.useProgram(prog.divergence.program);
+        bindFBOTexture(0, velocity.read);
+        gl.uniform1i(prog.divergence.uniforms.u_velocity, 0);
+        gl.uniform2f(prog.divergence.uniforms.u_texel, texel[0], texel[1]);
+        drawQuad();
+
+        // pressure Jacobi
+        clearDouble(pressure);
+        const iterations = Math.max(
+          1,
+          Math.min(64, Math.round(params.pressure)),
+        );
+        for (let i = 0; i < iterations; i++) {
+          bindTarget(pressure.write);
+          gl.useProgram(prog.pressure.program);
+          bindFBOTexture(0, pressure.read);
+          gl.uniform1i(prog.pressure.uniforms.u_pressure, 0);
+          bindFBOTexture(1, divergence);
+          gl.uniform1i(prog.pressure.uniforms.u_divergence, 1);
+          gl.uniform2f(prog.pressure.uniforms.u_texel, texel[0], texel[1]);
+          drawQuad();
+          pressure.swap();
+        }
+
+        // gradient subtract
+        bindTarget(velocity.write);
+        gl.useProgram(prog.gradient.program);
+        bindFBOTexture(0, velocity.read);
+        gl.uniform1i(prog.gradient.uniforms.u_velocity, 0);
+        bindFBOTexture(1, pressure.read);
+        gl.uniform1i(prog.gradient.uniforms.u_pressure, 1);
+        gl.uniform2f(prog.gradient.uniforms.u_texel, texel[0], texel[1]);
+        drawQuad();
+        velocity.swap();
+
+        // soft boundary
+        bindTarget(velocity.write);
+        gl.useProgram(prog.boundary.program);
+        bindFBOTexture(0, velocity.read);
+        gl.uniform1i(prog.boundary.uniforms.u_velocity, 0);
+        gl.uniform2f(prog.boundary.uniforms.u_texel, texel[0], texel[1]);
+        drawQuad();
+        velocity.swap();
+      }
+
+      function render() {
+        bindTarget(null);
+        gl.useProgram(prog.display.program);
+        bindTexture(0, sourceTexture);
+        gl.uniform1i(prog.display.uniforms.u_base, 0);
+        bindFBOTexture(1, velocity.read);
+        gl.uniform1i(prog.display.uniforms.u_velocity, 1);
+        bindFBOTexture(2, distortion.read);
+        gl.uniform1i(prog.display.uniforms.u_distortion, 2);
+        bindFBOTexture(3, ink.read);
+        gl.uniform1i(prog.display.uniforms.u_ink, 3);
+
+        gl.uniform2f(prog.display.uniforms.u_texel, texel[0], texel[1]);
+        gl.uniform1f(prog.display.uniforms.u_imageAR, imageAR);
+        gl.uniform1f(
+          prog.display.uniforms.u_screenAR,
+          innerWidth / innerHeight,
+        );
+        gl.uniform1f(prog.display.uniforms.u_time, totalTime);
+        gl.uniform2f(prog.display.uniforms.u_pointer, pointer.uvX, pointer.uvY);
+        gl.uniform1f(prog.display.uniforms.u_refraction, params.refraction);
+        gl.uniform1f(prog.display.uniforms.u_highlight, params.highlight);
+        gl.uniform1f(
+          prog.display.uniforms.u_parallax,
+          reducedMotion ? 0.002 : 0.006,
+        );
+        gl.uniform1f(prog.display.uniforms.u_inkDarkness, params.inkDensity);
+        drawQuad();
+      }
+
+      let totalTime = 0;
+      let prevFrameTime = performance.now();
+
+      function frame(now) {
+        requestAnimationFrame(frame);
+
+        const rawDt = (now - prevFrameTime) / 1000;
+        prevFrameTime = now;
+        const dt = Math.min(0.033, Math.max(0.001, rawDt || 0.016));
+        totalTime += dt;
+
+        const idleSeconds = (now - lastInteractionTime) / 1000;
+        const idleBoost = idleSeconds > 2.0 ? 1.22 : 1.0;
+
+        // 1. 速度場を自己移流し、粘性減衰で自然に収束させる。
+        const velocityDissipation = Math.exp(
+          -(reducedMotion ? 2.25 : 1.38) * dt,
+        );
+        advect(velocity, velocityDissipation, dt);
+
+        // 2. ポインタ入力を速度 / 歪み / インクへ注入。
+        processInputSplats(dt);
+
+        // 3. 発散計算 → 圧力 Jacobi → 勾配差し引きで非圧縮化。
+        projectVelocity();
+
+        // 4. 歪み場を速度で移流し、毎フレームゼロへ緩和。これが「元に戻る」仕組み。
+        const distortionDissipation = Math.exp(
+          -params.restore * idleBoost * dt,
+        );
+        advect(distortion, distortionDissipation, dt);
+
+        // 5. 追加インク場を移流・フェード。ゼロになれば基底画像だけが残る。
+        const inkDissipation = Math.exp(-params.inkFade * dt);
+        advect(ink, inkDissipation, dt);
+        diffuseInk(dt);
+
+        // 6. フル解像度描画。歪み場による屈折、インク法線ライティング、紙繊維、視差を合成。
+        render();
+      }
+
+      loading.classList.add("hide");
+      statusEl.textContent = `image: ${loadedImagePath} / sim: ${SIM_SIZE}² / float: ${floatLinear ? "linear" : "nearest"}${
+        reducedMotion ? " / reduced-motion" : ""
+      }`;
+      setTimeout(() => hint.classList.add("hide"), 5200);
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
