@@ -255,8 +255,8 @@ README / 操作方法
           cohesion: 0.32,
           vortex: 3.08,
           noise: 1.3,
-          predatorStrength: 28,
-          predatorRadius: 7.0,
+          predatorStrength: 18,
+          predatorRadius: 5.0,
           fogDensity: 0.01,
           cameraSpeed: 0.34,
           paused: false,
@@ -300,6 +300,7 @@ uniform int uFishCount,uFrameMod;
 uniform float uDelta,uTime,uMaxSpeed,uMaxAccel;
 uniform float uSeparationWeight,uAlignmentWeight,uCohesionWeight,uVortexWeight,uNoiseWeight;
 uniform vec3 uPredatorPos;
+uniform vec3 uCameraForward;
 uniform float uPredatorRadius,uPredatorStrength,uPredatorActive,uBoundsRadius;
 const int NEIGHBOR_SAMPLES=52;
 vec3 safeNormalize(vec3 v){float l=length(v);return l>1e-5?v/l:vec3(0.0);}
@@ -388,11 +389,15 @@ void main(){
 
   if(uPredatorActive>.5){
     vec3 awayVec=pos-uPredatorPos;
-    float pd=length(awayVec);
+    // スクリーン垂直面（カメラ前方軸を除いた平面）での2D距離で判定
+    // → 手前・奥の魚も画面上でカーソルと重なれば反応する
+    vec3 camFwd=safeNormalize(uCameraForward);
+    vec3 awayPerp=awayVec-dot(awayVec,camFwd)*camFwd;
+    float pd=length(awayPerp);
     if(pd<uPredatorRadius){
-      vec3 away=safeNormalize(awayVec);
+      vec3 away=safeNormalize(awayPerp);
       float q=1.0-pd/uPredatorRadius;
-      vec3 shear=safeNormalize(cross(away,safeNormalize(vec3(.2,1.0,.1))));
+      vec3 shear=safeNormalize(cross(away,camFwd));
       accel+=away*(uPredatorStrength*q*q/max(pd,.085));
       accel+=shear*(uPredatorStrength*.22*q);
     }
@@ -609,6 +614,7 @@ void main(){
           "uVortexWeight",
           "uNoiseWeight",
           "uPredatorPos",
+          "uCameraForward",
           "uPredatorRadius",
           "uPredatorStrength",
           "uPredatorActive",
@@ -784,6 +790,12 @@ void main(){
             predator.world[0],
             predator.world[1],
             predator.world[2],
+          );
+          gl.uniform3f(
+            simU.uCameraForward,
+            cameraForward[0],
+            cameraForward[1],
+            cameraForward[2],
           );
           gl.uniform1f(simU.uPredatorRadius, params.predatorRadius);
           gl.uniform1f(simU.uPredatorStrength, params.predatorStrength);
