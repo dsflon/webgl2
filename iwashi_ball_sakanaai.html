@@ -563,40 +563,73 @@ void main(){
   outColor=vec4(.72,.92,1.0,a);
 }`;
 
-        const predatorVS = `#version 300 es
+        const sharkVS = `#version 300 es
 precision highp float;
+layout(location=0) in vec3 aPosition;
+layout(location=1) in vec3 aNormal;
 uniform mat4 uView,uProjection;
-uniform vec3 uPredatorPos;
-uniform float uPredatorRadius;
+uniform vec3 uSharkPos,uSharkForward,uSharkUp,uSharkSide;
+uniform vec3 uCameraPos;
+uniform float uTime,uFogDensity,uSharkScale;
+out vec3 vWorldPos,vNormal,vLocal;
+out float vFog;
 void main(){
-  vec4 clip=uProjection*uView*vec4(uPredatorPos,1.0);
-  gl_Position=clip;
-  gl_PointSize=clamp(uPredatorRadius*118.0/max(clip.w,.8),34.0,260.0);
+  vec3 local=aPosition*uSharkScale;
+  // 尾びれ付近を揺らす（x<-0.6で揺れ増大）
+  float tailMask=smoothstep(0.0,-1.4*uSharkScale,local.x);
+  float phase=uTime*2.8;
+  local.y+=sin(phase+local.x*2.1)*tailMask*.38;
+  local.z+=sin(phase*1.1+local.x*1.8)*tailMask*.06;
+  // ワールド座標へ変換（シャーク向きに合わせて回転）
+  vec3 worldPos=uSharkPos
+    +uSharkForward*local.x
+    +uSharkSide*local.y
+    +uSharkUp*local.z;
+  vec3 normal=normalize(uSharkForward*aNormal.x+uSharkSide*aNormal.y+uSharkUp*aNormal.z);
+  gl_Position=uProjection*uView*vec4(worldPos,1.0);
+  vWorldPos=worldPos;
+  vNormal=normal;
+  vLocal=local;
+  float distToCamera=distance(uCameraPos,uSharkPos);
+  vFog=clamp(1.0-exp(-uFogDensity*distToCamera),0.0,.96);
 }`;
 
-        const predatorFS = `#version 300 es
+        const sharkFS = `#version 300 es
 precision highp float;
+in vec3 vWorldPos,vNormal,vLocal;
+in float vFog;
+uniform vec3 uCameraPos,uFogColor;
+uniform float uTime;
 out vec4 outColor;
 void main(){
-  vec2 p=gl_PointCoord*2.0-1.0;
-  float d=length(p);
-  if(d>1.0) discard;
-  float ring=smoothstep(.58,.66,d)*(1.0-smoothstep(.92,1.0,d));
-  float core=1.0-smoothstep(0.0,.35,d);
-  float haze=1.0-smoothstep(.2,1.0,d);
-  vec3 col=mix(vec3(.24,.78,1.0),vec3(.95,.98,1.0),core);
-  outColor=vec4(col,ring*.18+core*.07+haze*.035);
+  vec3 N=normalize(vNormal);
+  if(!gl_FrontFacing) N=-N;
+  vec3 V=normalize(uCameraPos-vWorldPos);
+  vec3 L=normalize(vec3(-.24,.88,.40));
+  vec3 H=normalize(L+V);
+  float ndl=max(dot(N,L),0.0);
+  float hemi=.30+.70*max(N.y*.5+.5,0.0);
+  // 背側(z>0)=濃い青灰、腹側(z<0)=白　サメらしい2トーン
+  float t=smoothstep(-.12,.22,vLocal.z);
+  vec3 dorsal=vec3(.07,.11,.17);   // 背：深い青灰
+  vec3 ventral=vec3(.82,.84,.86);  // 腹：青白
+  vec3 base=mix(ventral,dorsal,t);
+  // 側面の境界線を少し暗く
+  float lateral=exp(-abs(vLocal.z-0.02)*12.0)*smoothstep(-.9,-.1,vLocal.x)*(1.0-smoothstep(.5,1.4,vLocal.x));
+  base*=1.0-lateral*.15;
+  float spec=pow(max(dot(N,H),0.0),52.0);
+  float fresnel=pow(1.0-clamp(dot(N,V),0.0,1.0),3.0);
+  vec3 color=base*(.25+.75*ndl)*hemi;
+  color+=vec3(.75,.88,.98)*(spec*1.4+fresnel*.30);
+  color=mix(color,uFogColor,vFog);
+  outColor=vec4(color,1.0);
 }`;
 
         const simProgram = createProgram(fullscreenVS, simFS, "simulation");
         const bgProgram = createProgram(fullscreenVS, bgFS, "background");
         const fishProgram = createProgram(fishVS, fishFS, "fish");
         const snowProgram = createProgram(snowVS, snowFS, "marine snow");
-        const predatorProgram = createProgram(
-          predatorVS,
-          predatorFS,
-          "predator",
-        );
+        const sharkProgram = createProgram(sharkVS, sharkFS, "shark");
 
         const simU = uniforms(simProgram, [
           "uPositionTex",
@@ -633,11 +666,10 @@ void main(){
           "uFogColor",
         ]);
         const snowU = uniforms(snowProgram, ["uView", "uProjection", "uTime"]);
-        const predatorU = uniforms(predatorProgram, [
-          "uView",
-          "uProjection",
-          "uPredatorPos",
-          "uPredatorRadius",
+        const sharkU = uniforms(sharkProgram, [
+          "uView","uProjection",
+          "uSharkPos","uSharkForward","uSharkUp","uSharkSide",
+          "uCameraPos","uTime","uFogDensity","uFogColor","uSharkScale",
         ]);
 
         const fullscreenVao = gl.createVertexArray();
@@ -653,6 +685,27 @@ void main(){
         gl.enableVertexAttribArray(1);
         gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
         gl.bindVertexArray(null);
+
+        const sharkMesh = makeSharkMesh();
+        const sharkVao = gl.createVertexArray();
+        const sharkBuffer = gl.createBuffer();
+        gl.bindVertexArray(sharkVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, sharkBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, sharkMesh.data, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+        gl.bindVertexArray(null);
+
+        // サメの状態（スムーズに泳ぐ）
+        const sharkState = {
+          pos: [0, 2, 0],
+          vel: [0, 0, 0],
+          forward: [1, 0, 0],
+          up:      [0, 0, 1],
+          side:    [0, 1, 0],
+        };
 
         const snow = makeSnow(950);
         const snowVao = gl.createVertexArray();
@@ -753,6 +806,7 @@ void main(){
           resize();
           updateCamera(t);
           updatePredatorWorld();
+          updateShark(dt);
           if (!params.paused) simulate(dt, t);
           render(t);
           updateStatus(now);
@@ -785,11 +839,12 @@ void main(){
           gl.uniform1f(simU.uCohesionWeight, params.cohesion);
           gl.uniform1f(simU.uVortexWeight, params.vortex);
           gl.uniform1f(simU.uNoiseWeight, params.noise);
+          // 常にサメの現在位置を捕食者として渡す（自由遊泳中も魚が逃げる）
           gl.uniform3f(
             simU.uPredatorPos,
-            predator.world[0],
-            predator.world[1],
-            predator.world[2],
+            sharkState.pos[0],
+            sharkState.pos[1],
+            sharkState.pos[2],
           );
           gl.uniform3f(
             simU.uCameraForward,
@@ -799,7 +854,7 @@ void main(){
           );
           gl.uniform1f(simU.uPredatorRadius, params.predatorRadius);
           gl.uniform1f(simU.uPredatorStrength, params.predatorStrength);
-          gl.uniform1f(simU.uPredatorActive, predator.active ? 1 : 0);
+          gl.uniform1f(simU.uPredatorActive, 1.0);
           gl.uniform1f(simU.uBoundsRadius, 8.7);
           gl.drawArrays(gl.TRIANGLES, 0, 3);
           const tmp = readState;
@@ -859,25 +914,28 @@ void main(){
             fishCount,
           );
 
-          if (predator.active) {
-            gl.depthMask(false);
-            gl.disable(gl.DEPTH_TEST);
-            gl.enable(gl.BLEND);
-            gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-            gl.useProgram(predatorProgram);
-            gl.bindVertexArray(fullscreenVao);
-            gl.uniformMatrix4fv(predatorU.uView, false, view);
-            gl.uniformMatrix4fv(predatorU.uProjection, false, projection);
-            gl.uniform3f(
-              predatorU.uPredatorPos,
-              predator.world[0],
-              predator.world[1],
-              predator.world[2],
-            );
-            gl.uniform1f(predatorU.uPredatorRadius, params.predatorRadius);
-            gl.drawArrays(gl.POINTS, 0, 1);
-            gl.depthMask(true);
-          }
+          // ---- サメを描画（常に表示、マウス位置へスムーズ追従）----
+          gl.depthMask(true);
+          gl.enable(gl.DEPTH_TEST);
+          gl.depthFunc(gl.LEQUAL);
+          gl.disable(gl.BLEND);
+          gl.disable(gl.CULL_FACE);
+          gl.useProgram(sharkProgram);
+          gl.bindVertexArray(sharkVao);
+          gl.uniformMatrix4fv(sharkU.uView, false, view);
+          gl.uniformMatrix4fv(sharkU.uProjection, false, projection);
+          gl.uniform3f(sharkU.uSharkPos,     sharkState.pos[0],     sharkState.pos[1],     sharkState.pos[2]);
+          gl.uniform3f(sharkU.uSharkForward, sharkState.forward[0], sharkState.forward[1], sharkState.forward[2]);
+          gl.uniform3f(sharkU.uSharkUp,      sharkState.up[0],      sharkState.up[1],      sharkState.up[2]);
+          gl.uniform3f(sharkU.uSharkSide,    sharkState.side[0],    sharkState.side[1],    sharkState.side[2]);
+          gl.uniform3f(sharkU.uCameraPos, eye[0], eye[1], eye[2]);
+          gl.uniform1f(sharkU.uTime, time);
+          gl.uniform1f(sharkU.uFogDensity, params.fogDensity);
+          gl.uniform3f(sharkU.uFogColor, 0.012, 0.105, 0.205);
+          // radius を主軸、strength を副軸にしてサメのサイズを決定
+          gl.uniform1f(sharkU.uSharkScale, params.predatorRadius * 0.15 + params.predatorStrength * 0.01);
+          gl.drawArrays(gl.TRIANGLES, 0, sharkMesh.vertexCount);
+
           gl.bindVertexArray(null);
         }
 
@@ -919,6 +977,43 @@ void main(){
           controlsToggle.classList.toggle("controls-toggle-open", controlsOpen);
           controlsToggle.setAttribute("aria-expanded", String(controlsOpen));
           controlsToggle.textContent = controlsOpen ? "閉じる" : "Controls";
+        }
+
+        function updateShark(dt) {
+          // サメをマウス（捕食者）の位置へスムーズに追従させる
+          const target = predator.active
+            ? predator.world
+            : [
+                Math.sin(Date.now() * 0.0004) * 5,
+                Math.sin(Date.now() * 0.00027) * 2,
+                Math.cos(Date.now() * 0.00035) * 5,
+              ];
+
+          const lerpK = 1.0 - Math.exp(-2.8 * dt);
+          const prevPos = sharkState.pos.slice();
+          for (let i = 0; i < 3; i++) {
+            sharkState.pos[i] += (target[i] - sharkState.pos[i]) * lerpK;
+          }
+
+          // 移動ベクトルから向きを決める
+          const moved = sub3(sharkState.pos, prevPos);
+          const speed = length3(moved);
+          if (speed > 0.001) {
+            const desiredFwd = normalize3(moved);
+            const fwdLerp = 1.0 - Math.exp(-5.0 * dt);
+            sharkState.forward = normalize3([
+              sharkState.forward[0] + (desiredFwd[0] - sharkState.forward[0]) * fwdLerp,
+              sharkState.forward[1] + (desiredFwd[1] - sharkState.forward[1]) * fwdLerp,
+              sharkState.forward[2] + (desiredFwd[2] - sharkState.forward[2]) * fwdLerp,
+            ]);
+          }
+
+          // 上方向・側面を更新
+          const worldUp = [0, 1, 0];
+          const absFwdY = Math.abs(sharkState.forward[1]);
+          const refUp = absFwdY > 0.9 ? [0, 0, 1] : worldUp;
+          sharkState.side = normalize3(cross3(refUp, sharkState.forward));
+          sharkState.up   = normalize3(cross3(sharkState.forward, sharkState.side));
         }
 
         function updatePredatorWorld() {
@@ -1109,6 +1204,105 @@ void main(){
             [-0.1, -0.1, -0.12],
             [-0.28, -0.52, -0.13],
           );
+          return {
+            data: new Float32Array(vertices),
+            vertexCount: vertices.length / 6,
+          };
+        }
+
+        function makeSharkMesh() {
+          const vertices = [];
+          const push = (v, n) => vertices.push(v[0], v[1], v[2], n[0], n[1], n[2]);
+          const addTri = (a, b, c) => {
+            const n = normalize3(cross3(sub3(b, a), sub3(c, a)));
+            push(a, n); push(b, n); push(c, n);
+          };
+          const addQuad = (a, b, c, d) => { addTri(a, b, c); addTri(a, c, d); };
+
+          // ── ボディの断面リング（x=前後, y=左右, z=上下）──
+          // [x, topZ, sideY, sideZ, bottomZ] として各断面の代表点を定義
+          // top=[x,0,tz] L=[x,ly,lz] bottom=[x,0,bz] R=[x,-ly,lz]
+          const S = [
+            // x     topZ    LY    LZ    botZ
+            [ 1.82,  0.00, 0.00, 0.00,  0.00],  // 0: 吻端
+            [ 1.30,  0.12, 0.13, 0.02, -0.10],  // 1
+            [ 0.60,  0.30, 0.40, 0.05, -0.22],  // 2 最大幅
+            [ 0.00,  0.32, 0.38, 0.04, -0.24],  // 3 中央
+            [-0.55,  0.26, 0.28, 0.03, -0.19],  // 4
+            [-1.00,  0.17, 0.16, 0.01, -0.12],  // 5 ペダンクル
+            [-1.22,  0.10, 0.09, 0.00, -0.07],  // 6 尾基部
+          ];
+          const pt = (s, part) => {
+            if (part === 0) return [s[0], 0,     s[1]];   // top
+            if (part === 1) return [s[0], s[2],  s[3]];   // left
+            if (part === 2) return [s[0], 0,     s[4]];   // bottom
+            if (part === 3) return [s[0], -s[2], s[3]];   // right
+          };
+          // 吻端から最初の断面へ
+          const snout = [S[0][0], 0, 0];
+          for (let p = 0; p < 4; p++) {
+            addTri(snout, pt(S[1], p), pt(S[1], (p+1)%4));
+          }
+          // 断面を順番にクワッドで繋ぐ
+          for (let i = 1; i < S.length - 1; i++) {
+            for (let p = 0; p < 4; p++) {
+              addQuad(
+                pt(S[i],   p),
+                pt(S[i],   (p+1)%4),
+                pt(S[i+1], (p+1)%4),
+                pt(S[i+1], p),
+              );
+            }
+          }
+          // 尾基部を閉じる
+          const tailBase = [S[6][0], 0, 0];
+          for (let p = 0; p < 4; p++) {
+            addTri(tailBase, pt(S[6], (p+1)%4), pt(S[6], p));
+          }
+
+          // ── 尾びれ（Heterocercal: 上葉が大きい）──
+          const tb = [-1.22, 0, 0];
+          // 上葉
+          addTri(tb, [-1.38,  0.04, 0.18], [-1.60,  0.03, 0.62]);
+          addTri(tb, [-1.60,  0.03, 0.62], [-1.90,  0.01, 0.48]);
+          addTri(tb, [-1.90,  0.01, 0.48], [-1.65,  0.00, 0.08]);
+          addTri([-1.65, 0.00, 0.08], [-1.90, 0.01, 0.48], tb);
+          // 下葉
+          addTri(tb, [-1.52,  0.02, -0.20], [-1.35,  0.03, -0.38]);
+          addTri([-1.35, 0.03, -0.38], [-1.55, 0.01, -0.22], tb);
+
+          // ── 背びれ（大型、シャークらしい高いシルエット）──
+          const dfBase1 = [ 0.18, 0, 0.30];
+          const dfBase2 = [-0.38, 0, 0.30];
+          const dfApex  = [-0.08, 0, 0.78];
+          addTri(dfBase1, dfApex, dfBase2);
+          addTri(dfBase2, dfApex, dfBase1); // 両面
+
+          // ── 胸びれ（大型、後退角付き）──
+          const pf = [
+            [ 0.50,  0.38,  0.04],
+            [ 0.10,  0.85, -0.25],
+            [-0.15,  0.58, -0.18],
+          ];
+          addTri(pf[0], pf[1], pf[2]);
+          addTri(pf[2], pf[1], pf[0]);
+          // 右側（Y反転）
+          const pfR = pf.map(v => [v[0], -v[1], v[2]]);
+          addTri(pfR[0], pfR[2], pfR[1]);
+          addTri(pfR[2], pfR[0], pfR[1]);
+
+          // ── 第2背びれ（小型）──
+          addTri([-0.70, 0, 0.20], [-0.92, 0, 0.34], [-0.88, 0, 0.20]);
+          addTri([-0.88, 0, 0.20], [-0.92, 0, 0.34], [-0.70, 0, 0.20]);
+
+          // ── 腹びれ（小型）──
+          const vfL = [[-0.55, 0.24, -0.18], [-0.55, 0.55, -0.30], [-0.80, 0.28, -0.20]];
+          addTri(vfL[0], vfL[1], vfL[2]);
+          addTri(vfL[2], vfL[1], vfL[0]);
+          const vfR = vfL.map(v => [v[0], -v[1], v[2]]);
+          addTri(vfR[0], vfR[2], vfR[1]);
+          addTri(vfR[2], vfR[0], vfR[1]);
+
           return {
             data: new Float32Array(vertices),
             vertexCount: vertices.length / 6,
