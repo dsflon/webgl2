@@ -69,16 +69,13 @@
         right: 12px;
         bottom: calc(12px + env(safe-area-inset-bottom));
         z-index: 4;
-        display: none;
+        display: block;
         min-width: 104px;
         padding: 10px 13px;
         border-radius: 999px;
         background: rgba(4, 24, 43, 0.78);
         backdrop-filter: blur(12px);
         transition: bottom 0.24s ease;
-      }
-      #controlsToggle.controls-toggle-open {
-        bottom: calc(45vh + 20px + env(safe-area-inset-bottom));
       }
       #controls {
         position: fixed;
@@ -99,7 +96,30 @@
         box-shadow: 0 14px 60px rgba(0, 0, 0, 0.34);
         backdrop-filter: blur(12px);
         user-select: none;
+        transition:
+          transform 0.24s ease,
+          opacity 0.24s ease;
       }
+      /* PC: 閉じているときは右へスライドアウト */
+      #controls.controls-collapsed {
+        transform: translateX(calc(100% + 18px));
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      /* PC: ボタンを右上固定、パネルをその下に */
+      @media (min-width: 761px) {
+        #controlsToggle {
+          top: 12px;
+          bottom: auto;
+          right: 14px;
+        }
+        #controls {
+          top: 58px;
+          max-height: calc(100vh - 72px);
+        }
+      }
+
       #controls h1 {
         margin: 0 0 8px;
         font-size: 13px;
@@ -182,8 +202,9 @@
         #readme {
           display: none;
         }
-        #controlsToggle {
-          display: block;
+        /* モバイル: パネルが開いているときボタンを上へ */
+        #controlsToggle.controls-toggle-open {
+          bottom: calc(45vh + 20px + env(safe-area-inset-bottom));
         }
         #controls {
           left: 10px;
@@ -192,10 +213,8 @@
           top: auto;
           width: auto;
           max-height: 45vh;
-          transition:
-            transform 0.24s ease,
-            opacity 0.24s ease;
         }
+        /* モバイル: 閉じているときは下へスライドアウト */
         #controls.controls-collapsed {
           transform: translateY(
             calc(100% + 18px + env(safe-area-inset-bottom))
@@ -731,8 +750,8 @@ void main(){
           input: "none",
           world: [999, 999, 999],
         };
-        const mobileControlsQuery = window.matchMedia("(max-width: 760px)");
-        let controlsOpen = !mobileControlsQuery.matches;
+        // PC・モバイル問わず最初は開いた状態
+        let controlsOpen = true;
 
         let texSize = 0,
           capacity = 0,
@@ -752,10 +771,6 @@ void main(){
 
         controlsToggle.addEventListener("click", () => {
           controlsOpen = !controlsOpen;
-          syncControlsPanel();
-        });
-        mobileControlsQuery.addEventListener("change", (ev) => {
-          controlsOpen = !ev.matches;
           syncControlsPanel();
         });
 
