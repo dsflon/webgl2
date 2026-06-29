@@ -906,7 +906,7 @@
             // quantized color as the visible glyph/block. This reduces the
             // washed-out white gaps around narrow glyph strokes while keeping
             // glyphs, solid blocks, and halftone marks crisp at full strength.
-            vec3 cellBackground = mix(backgroundColor, cellColor, 0.75);
+            vec3 cellBackground = mix(backgroundColor, cellColor, 0.15);
             outColor = vec4(
               mix(cellBackground, cellColor, clamp(coverage, 0.0, 1.0)),
               1.0
