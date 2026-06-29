@@ -312,7 +312,14 @@
     >
       HIDE UI
     </button>
-    <button id="flipCamera" type="button" class="panel-open" aria-label="Switch camera">REAR CAM</button>
+    <button
+      id="flipCamera"
+      type="button"
+      class="panel-open"
+      aria-label="Switch camera"
+    >
+      REAR CAM
+    </button>
 
     <section id="panel" class="panel" aria-label="ASCII mosaic controls">
       <h1>ASCII SAKANA</h1>
@@ -895,7 +902,15 @@
               glyphMode * glyphCoverage(luma, local) +
               halftoneMode * halftoneCoverage(luma, local, cell);
 
-            outColor = vec4(mix(backgroundColor, cellColor, clamp(coverage, 0.0, 1.0)), 1.0);
+            // Give every grid cell a subtle 30% paper tint using the same
+            // quantized color as the visible glyph/block. This reduces the
+            // washed-out white gaps around narrow glyph strokes while keeping
+            // glyphs, solid blocks, and halftone marks crisp at full strength.
+            vec3 cellBackground = mix(backgroundColor, cellColor, 0.50);
+            outColor = vec4(
+              mix(cellBackground, cellColor, clamp(coverage, 0.0, 1.0)),
+              1.0
+            );
           }
         `;
 
@@ -1452,8 +1467,10 @@
           });
 
           flipCameraBtn.addEventListener("click", () => {
-            state.facingMode = state.facingMode === "user" ? "environment" : "user";
-            flipCameraBtn.textContent = state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+            state.facingMode =
+              state.facingMode === "user" ? "environment" : "user";
+            flipCameraBtn.textContent =
+              state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
             ui.mirror.checked = state.facingMode === "user";
             requestCamera();
           });
