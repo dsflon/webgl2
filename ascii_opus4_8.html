@@ -152,6 +152,24 @@
   @media (max-width:520px){
     .panel{ width:calc(100vw - 24px); top:12px; left:12px; }
   }
+
+  #flipCamera{ display:none; }
+  @media (max-width:720px){
+    #flipCamera{
+      position:fixed; bottom:max(12px, env(safe-area-inset-bottom));
+      left:max(10px, env(safe-area-inset-left));
+      z-index:11; display:flex; align-items:center; justify-content:center;
+      min-width:100px; padding:8px 14px;
+      background:rgba(10,17,25,0.82);
+      border:1px solid var(--line);
+      color:var(--teal);
+      font-family:var(--mono); font-size:10.5px;
+      letter-spacing:0.13em; text-transform:uppercase;
+      cursor:pointer;
+      backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    }
+    #flipCamera:hover{ border-color:var(--teal); }
+  }
 </style>
 </head>
 <body>
@@ -205,6 +223,7 @@
     </div>
   </aside>
 
+  <button id="flipCamera" type="button" aria-label="Switch camera">REAR CAM</button>
   <h1 class="sr-only">TEXTMODE CAM</h1>
   <div id="state" role="alertdialog" aria-live="assertive" aria-label="Camera status">
     <div class="box" id="stateBox"></div>
@@ -238,7 +257,7 @@
     cols:48, contrast:1.25, gamma:0.90,
     blockiness:0.50, paletteSat:0.85, halftoneScale:3,
     glitch:0.12, dither:0.30,
-    mirror:true, invert:false
+    mirror:true, invert:false, facingMode:"user"
   };
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (reduceMotion) S.glitch = 0;
@@ -528,13 +547,15 @@
   let videoReady = false;
 
   async function startCamera(){
+    if (video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; }
+    videoReady = false;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
       showState(stateInsecure()); return;
     }
     showState(stateRequesting());
     try{
       const stream = await navigator.mediaDevices.getUserMedia({
-        video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:"user" }, audio:false
+        video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:S.facingMode }, audio:false
       });
       video.srcObject = stream;
       await video.play();
@@ -676,6 +697,13 @@
   const stateNoWebGL = (msg)=>`<div class="box"><h1>WebGL2 unavailable</h1>
     <p>This browser could not start WebGL2.${msg?`<br><br>(${escapeHtml(msg)})`:""}</p></div>`;
   function escapeHtml(s){ return String(s).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+  const flipCameraEl = document.getElementById("flipCamera");
+  flipCameraEl.addEventListener("click", ()=>{
+    S.facingMode = S.facingMode === "user" ? "environment" : "user";
+    flipCameraEl.textContent = S.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+    startCamera();
+  });
 
   updateReadout();
   startCamera();
