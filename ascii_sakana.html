@@ -324,7 +324,7 @@
     <section id="panel" class="panel" aria-label="ASCII mosaic controls">
       <h1>ASCII SAKANA</h1>
       <p>
-        Webcam → averaged RGB+luma grid FBO → 16-color blocks, halftone, and
+        Webcam → averaged RGB+luma grid FBO → 32-color blocks, halftone, and
         real Courier New atlas glyphs. Chunky by default: about 45 cells across.
       </p>
 
@@ -379,7 +379,7 @@
       <div class="row">
         <label for="saturation">
           Palette / saturation
-          <span>0 = grayscale quantization, 1 = full 16-color palette</span>
+          <span>0 = grayscale quantization, 1 = full 32-color palette</span>
         </label>
         <output id="saturationOut"></output>
         <input
@@ -579,10 +579,16 @@
           " ",
         ];
 
-        // Muted 16-color ANSI/VGA-inspired palette. Edit these hex values to
-        // swap palettes: #111318 #7A2426 #2F6F3E #8B6F2B #263F7F #70406F
-        // #2B7882 #B9B6A8 #555A60 #C94A4C #67A861 #D2AA4D #5F78C8
-        // #B46AA6 #58B6BE #ECE7D8
+        // Muted 32-color ANSI/VGA-inspired palette. The first 16 are the
+        // classic dark/bright pairs; the next 16 add extra midtones, skin/earth
+        // tones, and finer grays so quantization captures more of the scene.
+        // Edit these hex values to swap palettes:
+        //  base 16:
+        //   #111318 #7A2426 #2F6F3E #8B6F2B #263F7F #70406F #2B7882 #B9B6A8
+        //   #555A60 #C94A4C #67A861 #D2AA4D #5F78C8 #B46AA6 #58B6BE #ECE7D8
+        //  extra 16:
+        //   #1E2630 #3A3F4A #6E7780 #9AA3AC #D6DCE0 #5A2F1C #9C5A2E #C98A52
+        //   #E7C39A #3F5A2E #87A24B #2E5A6E #6FA9C0 #5B3A6E #A36D8E #E0A9B4
         const paletteHex = [
           "#111318",
           "#7A2426",
@@ -600,6 +606,22 @@
           "#B46AA6",
           "#58B6BE",
           "#ECE7D8",
+          "#1E2630",
+          "#3A3F4A",
+          "#6E7780",
+          "#9AA3AC",
+          "#D6DCE0",
+          "#5A2F1C",
+          "#9C5A2E",
+          "#C98A52",
+          "#E7C39A",
+          "#3F5A2E",
+          "#87A24B",
+          "#2E5A6E",
+          "#6FA9C0",
+          "#5B3A6E",
+          "#A36D8E",
+          "#E0A9B4",
         ];
         const paletteSize = paletteHex.length;
         const paletteRgb = new Float32Array(
@@ -702,7 +724,7 @@
         const asciiFragment = `#version 300 es
           precision highp float;
 
-          const int MAX_PALETTE = 16;
+          const int MAX_PALETTE = 32;
 
           uniform sampler2D uGrid;
           uniform sampler2D uGlyphAtlas;
@@ -744,7 +766,7 @@
 
           vec3 nearestPaletteColor(vec3 rgb, float toneLuma) {
             // Fixed-palette quantization: compare the adjusted cell color against
-            // all 16 editable ANSI/VGA-style colors. The saturation slider
+            // all 32 editable ANSI/VGA-style colors. The saturation slider
             // desaturates both the target and palette candidates, so at 0.0 the
             // result is true grayscale quantization, not forced blue/teal.
             vec3 target = mix(vec3(toneLuma), rgb, clamp(uSaturation, 0.0, 1.0));
@@ -906,7 +928,7 @@
             // quantized color as the visible glyph/block. This reduces the
             // washed-out white gaps around narrow glyph strokes while keeping
             // glyphs, solid blocks, and halftone marks crisp at full strength.
-            vec3 cellBackground = mix(backgroundColor, cellColor, 0.50);
+            vec3 cellBackground = mix(backgroundColor, cellColor, 0.30);
             outColor = vec4(
               mix(cellBackground, cellColor, clamp(coverage, 0.0, 1.0)),
               1.0
