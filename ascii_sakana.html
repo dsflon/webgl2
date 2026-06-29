@@ -1454,6 +1454,7 @@
           flipCameraBtn.addEventListener("click", () => {
             state.facingMode = state.facingMode === "user" ? "environment" : "user";
             flipCameraBtn.textContent = state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+            ui.mirror.checked = state.facingMode === "user";
             requestCamera();
           });
 

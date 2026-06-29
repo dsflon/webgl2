@@ -702,6 +702,10 @@
   flipCameraEl.addEventListener("click", ()=>{
     S.facingMode = S.facingMode === "user" ? "environment" : "user";
     flipCameraEl.textContent = S.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+    S.mirror = S.facingMode === "user";
+    const mirrorBtn = $("mirror");
+    mirrorBtn.setAttribute("aria-pressed", String(S.mirror));
+    mirrorBtn.querySelector("i").textContent = S.mirror ? "[X]" : "[ ]";
     startCamera();
   });
 
