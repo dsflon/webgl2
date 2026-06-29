@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<!--
+  TEXTMODE CAM — real-time webcam → mixed ASCII / block / halftone mosaic. WebGL2, no build step, no libraries.
+
+  HOW TO RUN
+    Camera access needs a secure context, so serve over localhost or https.
+      python3 -m http.server 8000
+      → open http://localhost:8000/ascii_opus4_8.html
+    Opening via file:// will block the camera in most browsers.
+
+  ARCHITECTURE
+    Pass 1 (downsample): webcam → low-res RGBA grid. RGB = average cell color, A = luminance.
+    Pass 2 (main): per cell, choose a MODE (SOLID BLOCK / GLYPH / HALFTONE) based on
+    luminance band + per-cell hash, then quantize cell color to the nearest of 16 palette entries.
+
+    Palette: 16-color EGA/ANSI-inspired set defined in JS as PALETTE_HEX[]. Edit those hex
+    values to swap palettes; they are uploaded as uPalette[16] to the shader each frame.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TEXTMODE · CAM</title>
+<style>
+  :root{
+    --paper:#EEF1F3;
+    --navy:#101A2A;
+    --navy-deep:#0A1119;
+    --pale:#BCC7CD;
+    --teal:#22B0BE;
+    --teal-dim:#0A6E7A;
+    --line:rgba(34,176,190,0.30);
+    --mono: "Courier New", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ height:100%; margin:0; }
+  body{
+    background:var(--navy-deep);
+    color:var(--pale);
+    font-family:var(--mono);
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  #gl{ position:fixed; inset:0; width:100vw; height:100vh; display:block; }
+
+  #vignette{
+    position:fixed; inset:0; pointer-events:none;
+    box-shadow: inset 0 0 220px rgba(10,17,25,0.55);
+    mix-blend-mode:multiply;
+  }
+
+  .panel{
+    position:fixed; top:16px; left:16px; z-index:10;
+    width:268px; max-width:calc(100vw - 32px);
+    background:rgba(10,17,25,0.72);
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    border:1px solid var(--line);
+    color:var(--pale);
+    user-select:none;
+  }
+  .panel__bar{
+    width:100%; display:flex; align-items:center; justify-content:space-between;
+    gap:10px; padding:10px 12px; cursor:pointer;
+    background:transparent; border:0; color:var(--teal);
+    font:inherit; letter-spacing:0.14em; font-size:12px; text-transform:uppercase;
+    border-bottom:1px solid var(--line);
+  }
+  .panel__bar:focus-visible{ outline:2px solid var(--teal); outline-offset:-2px; }
+  .panel__title{ display:flex; align-items:center; gap:8px; }
+  .cursor{ width:7px; height:13px; background:var(--teal); display:inline-block;
+           animation:blink 1.05s steps(1) infinite; }
+  @keyframes blink{ 50%{ opacity:0; } }
+  .panel__chev{ transition:transform .18s ease; }
+  .panel.collapsed .panel__chev{ transform:rotate(-90deg); }
+  .panel.collapsed .panel__body{ display:none; }
+
+  .panel__body{ padding:12px 12px 13px; display:flex; flex-direction:column; gap:13px; }
+
+  .ctrl label{
+    display:flex; justify-content:space-between; align-items:baseline;
+    font-size:10.5px; letter-spacing:0.13em; text-transform:uppercase;
+    color:var(--pale); margin-bottom:7px;
+  }
+  .ctrl .val{ color:var(--teal); font-size:11px; letter-spacing:0.06em; }
+
+  input[type=range]{
+    -webkit-appearance:none; appearance:none; width:100%; height:14px;
+    background:transparent; cursor:pointer; margin:0;
+  }
+  input[type=range]:focus-visible{ outline:2px solid var(--teal); outline-offset:4px; }
+  input[type=range]::-webkit-slider-runnable-track{
+    height:2px; background:linear-gradient(90deg,var(--teal-dim),rgba(188,199,205,0.25));
+  }
+  input[type=range]::-moz-range-track{
+    height:2px; background:linear-gradient(90deg,var(--teal-dim),rgba(188,199,205,0.25));
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; appearance:none; width:11px; height:14px; margin-top:-6px;
+    background:var(--teal); border:0; border-radius:0;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:11px; height:14px; background:var(--teal); border:0; border-radius:0;
+  }
+
+  .toggles{ display:flex; gap:8px; }
+  .tog, .save{
+    flex:1; display:flex; align-items:center; justify-content:space-between; gap:8px;
+    background:transparent; border:1px solid var(--line); color:var(--pale);
+    font:inherit; font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase;
+    padding:8px 10px; cursor:pointer;
+  }
+  .tog i{ font-style:normal; color:var(--teal-dim); letter-spacing:0; }
+  .tog[aria-pressed=true] i{ color:var(--teal); }
+  .tog:focus-visible, .save:focus-visible{ outline:2px solid var(--teal); outline-offset:2px; }
+  .save{ justify-content:center; gap:6px; color:var(--teal); }
+  .save:hover, .tog:hover{ border-color:var(--teal); }
+
+  .readout{
+    font-size:10px; letter-spacing:0.08em; color:var(--pale);
+    border-top:1px solid var(--line); padding-top:10px; line-height:1.6;
+    opacity:0.85; white-space:pre-wrap;
+  }
+  .readout b{ color:var(--teal); font-weight:normal; }
+
+  #state{
+    position:fixed; inset:0; z-index:20; display:none;
+    align-items:center; justify-content:center; text-align:center; padding:24px;
+    background:rgba(10,17,25,0.86); color:var(--pale);
+  }
+  #state.show{ display:flex; }
+  #state .box{ max-width:440px; }
+  #state h1{
+    color:var(--teal); font-size:13px; letter-spacing:0.22em; text-transform:uppercase;
+    margin:0 0 14px;
+  }
+  #state p{ font-size:12.5px; line-height:1.75; letter-spacing:0.03em; margin:0 0 14px; }
+  #state code{ color:var(--teal); background:rgba(34,176,190,0.10); padding:2px 6px; }
+  #state button{
+    background:transparent; border:1px solid var(--teal); color:var(--teal);
+    font:inherit; font-size:11px; letter-spacing:0.16em; text-transform:uppercase;
+    padding:10px 18px; cursor:pointer;
+  }
+  #state button:hover{ background:rgba(34,176,190,0.12); }
+  .sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  .dots::after{ content:""; animation:dots 1.4s steps(4) infinite; }
+  @keyframes dots{ 0%{content:"";}25%{content:"·";}50%{content:"··";}75%{content:"···";} }
+
+  @media (prefers-reduced-motion: reduce){
+    .cursor{ animation:none; }
+    .dots::after{ animation:none; content:"…"; }
+  }
+  @media (max-width:520px){
+    .panel{ width:calc(100vw - 24px); top:12px; left:12px; }
+  }
+</style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <div id="vignette"></div>
+
+  <aside class="panel" id="panel" aria-label="Render controls">
+    <button class="panel__bar" id="toggle" aria-expanded="true">
+      <span class="panel__title">TEXTMODE · CAM <span class="cursor" aria-hidden="true"></span></span>
+      <span class="panel__chev" aria-hidden="true">▾</span>
+    </button>
+    <div class="panel__body" id="body">
+      <div class="ctrl">
+        <label for="cols">Granularity <span class="val"><span id="vCols">48</span> cols</span></label>
+        <input id="cols" type="range" min="16" max="120" step="1" value="48">
+      </div>
+      <div class="ctrl">
+        <label for="contrast">Contrast <span class="val" id="vContrast">1.25</span></label>
+        <input id="contrast" type="range" min="0.6" max="2.4" step="0.01" value="1.25">
+      </div>
+      <div class="ctrl">
+        <label for="gamma">Gamma <span class="val" id="vGamma">0.90</span></label>
+        <input id="gamma" type="range" min="0.4" max="1.8" step="0.01" value="0.90">
+      </div>
+      <div class="ctrl">
+        <label for="blockiness">Blockiness <span class="val" id="vBlockiness">0.50</span></label>
+        <input id="blockiness" type="range" min="0" max="1" step="0.01" value="0.50">
+      </div>
+      <div class="ctrl">
+        <label for="paletteSat">Palette <span class="val" id="vPaletteSat">0.85</span></label>
+        <input id="paletteSat" type="range" min="0" max="1" step="0.01" value="0.85">
+      </div>
+      <div class="ctrl">
+        <label for="halftoneScale">Halftone Scale <span class="val" id="vHalftoneScale">3</span></label>
+        <input id="halftoneScale" type="range" min="2" max="6" step="1" value="3">
+      </div>
+      <div class="ctrl">
+        <label for="glitch">Glitch <span class="val" id="vGlitch">0.12</span></label>
+        <input id="glitch" type="range" min="0" max="1" step="0.01" value="0.12">
+      </div>
+      <div class="ctrl">
+        <label for="dither">Dither <span class="val" id="vDither">0.30</span></label>
+        <input id="dither" type="range" min="0" max="1" step="0.01" value="0.30">
+      </div>
+      <div class="toggles">
+        <button class="tog" id="mirror" aria-pressed="true">Mirror <i>[X]</i></button>
+        <button class="tog" id="invert" aria-pressed="false">Invert <i>[ ]</i></button>
+      </div>
+      <button class="save" id="save">Save PNG ▏</button>
+      <div class="readout" id="readout">grid <b>—</b> · <b>—</b> cells · <b>—</b> glyphs · <b>—</b> colors · <b>—</b> fps</div>
+    </div>
+  </aside>
+
+  <h1 class="sr-only">TEXTMODE CAM</h1>
+  <div id="state" role="alertdialog" aria-live="assertive" aria-label="Camera status">
+    <div class="box" id="stateBox"></div>
+  </div>
+
+<script>
+"use strict";
+(function(){
+  // ── character ramp (real ASCII only; order refined by measured ink coverage) ──
+  const CANDIDATES = "@#8&WMB%NQ0OZ$Xqphmwdkb2956gaoUJCLYtfjzxnuvcr/|()1{}[]?+=~<>i!lI;:-,. ";
+
+  // atlas tile geometry (px)
+  const FONT_PX = 46, TILE_W = 30, TILE_H = 55;
+  const TILE_ASPECT = TILE_W / TILE_H;
+
+  // ── 16-color EGA/ANSI-inspired palette (slightly muted for a tasteful retro BBS look) ──
+  // Edit these hex values to swap palettes; they are uploaded as uPalette[16] in the shader.
+  // #0A0A0A #802020 #1E6B3A #7A5E14 #1A2880 #7A1A70 #186878 #AAAAAA
+  // #444444 #C83C3C #3AAA5E #C8A820 #2E4EC8 #B83CA0 #28AABB #E8E8E4
+  const PALETTE_HEX = [
+    "#0A0A0A", "#802020", "#1E6B3A", "#7A5E14",
+    "#1A2880", "#7A1A70", "#186878", "#AAAAAA",
+    "#444444", "#C83C3C", "#3AAA5E", "#C8A820",
+    "#2E4EC8", "#B83CA0", "#28AABB", "#E8E8E4"
+  ];
+  function hexToRGB(h){ return [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255]; }
+  const PALETTE_DATA = new Float32Array(PALETTE_HEX.flatMap(hexToRGB));  // 48 floats for uniform3fv
+
+  // ── state ──
+  const S = {
+    cols:48, contrast:1.25, gamma:0.90,
+    blockiness:0.50, paletteSat:0.85, halftoneScale:3,
+    glitch:0.12, dither:0.30,
+    mirror:true, invert:false
+  };
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion) S.glitch = 0;
+
+  const canvas = document.getElementById("gl");
+  const gl = canvas.getContext("webgl2", {
+    antialias:false, preserveDrawingBuffer:true, alpha:false
+  });
+  if (!gl){ showState(stateNoWebGL()); return; }
+
+  // ── shaders ──
+  const VS = `#version 300 es
+  precision highp float;
+  const vec2 P[3] = vec2[3](vec2(-1.,-1.), vec2(3.,-1.), vec2(-1.,3.));
+  out vec2 v_uv;
+  void main(){
+    vec2 p = P[gl_VertexID];
+    v_uv = p*0.5 + 0.5;
+    gl_Position = vec4(p, 0., 1.);
+  }`;
+
+  // Pass 1: webcam → low-res color+luminance grid
+  // Output: rgb = average cell color, a = luminance (rec.601)
+  const FS_DS = `#version 300 es
+  precision highp float;
+  in vec2 v_uv; out vec4 outColor;
+  uniform sampler2D uVideo;
+  uniform float uLod, uVideoAspect, uViewAspect;
+  uniform bool uMirror;
+  void main(){
+    vec2 uv = v_uv;
+    if (uViewAspect > uVideoAspect) uv.y = (uv.y-0.5)*(uVideoAspect/uViewAspect)+0.5;
+    else                           uv.x = (uv.x-0.5)*(uViewAspect/uVideoAspect)+0.5;
+    if (uMirror) uv.x = 1.0 - uv.x;
+    vec3 c = textureLod(uVideo, uv, uLod).rgb;
+    float l = dot(c, vec3(0.299, 0.587, 0.114));
+    outColor = vec4(c, l);  // rgb=avg color, a=luminance
+  }`;
+
+  // Pass 2: grid → mixed mosaic (SOLID BLOCK / GLYPH / HALFTONE per cell)
+  const FS_MAIN = `#version 300 es
+  precision highp float;
+  in vec2 v_uv; out vec4 outColor;
+  uniform sampler2D uGrid, uAtlas;
+  uniform vec2  uGridSize;
+  uniform float uNumGlyphs, uContrast, uGamma;
+  uniform float uBlockiness, uPaletteSat, uHalftoneScale;
+  uniform float uGlitch, uDither, uTime;
+  uniform vec3  uPalette[16];
+  uniform bool  uInvert;
+
+  float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3,289.1)))*43758.5453); }
+
+  void main(){
+    vec2 g = v_uv * uGridSize;
+    ivec2 cell = ivec2(floor(g));
+    vec2 cellUV = fract(g);
+    int cols = int(uGridSize.x), rows = int(uGridSize.y);
+
+    // Glitch: row-level horizontal shift
+    if (uGlitch > 0.0){
+      float t = floor(uTime * 8.0);
+      if (hash(vec2(float(cell.y), t)) < uGlitch * 0.25){
+        float a = hash(vec2(float(cell.y) * 1.7, t)) * 2.0 - 1.0;
+        cell.x += int(a * uGlitch * 6.0);
+      }
+    }
+    cell.x = clamp(cell.x, 0, cols - 1);
+    cell.y = clamp(cell.y, 0, rows - 1);
+
+    // Grid sample: rgb = avg cell color, a = luminance
+    vec4 gs = texelFetch(uGrid, cell, 0);
+    vec3 avgRGB = gs.rgb;
+    float l = gs.a;
+
+    // Ordered dither on luminance for softer tone transitions
+    if (uDither > 0.0){
+      float checker = mod(float(cell.x + cell.y), 2.0) * 2.0 - 1.0;
+      float mid = 1.0 - abs(l - 0.5) * 2.0;
+      l += checker * 0.05 * uDither * mid;
+    }
+
+    // Gamma + contrast + optional invert on luminance
+    l = pow(clamp(l, 0.0, 1.0), uGamma);
+    l = clamp((l - 0.5) * uContrast + 0.5, 0.0, 1.0);
+    if (uInvert) l = 1.0 - l;
+
+    // ── Palette quantization ──────────────────────────────────────────────────
+    // uPaletteSat=0: pure grayscale input → nearest gray in palette.
+    // uPaletteSat=1: use real average cell color → nearest palette entry by RGB dist.
+    vec3 quantInput = mix(vec3(l), avgRGB, uPaletteSat);
+    float bestDist = 1e9;
+    vec3 glyphCol = uPalette[0];
+    for (int i = 0; i < 16; i++){
+      vec3 d = quantInput - uPalette[i];
+      float dist = dot(d, d);
+      if (dist < bestDist){ bestDist = dist; glyphCol = uPalette[i]; }
+    }
+
+    // ── Mode selection ────────────────────────────────────────────────────────
+    // MODE 0 = SOLID BLOCK  — whole cell filled with palette color, no glyph
+    // MODE 1 = GLYPH        — real atlas character (default, current behavior)
+    // MODE 2 = HALFTONE     — procedural tiled dot pattern
+    //
+    // Selection is driven by luminance band + a per-cell deterministic hash so
+    // the distribution is stable frame-to-frame but looks organic (not striped).
+    // uBlockiness=0: nearly all GLYPH; uBlockiness=1: maximum SOLID + HALFTONE.
+    float blk = uBlockiness;
+    // Use a different hash seed than the glitch check to keep them independent
+    float h = hash(vec2(float(cell.x) * 1.3 + 17.0, float(cell.y) * 1.7 + 31.0));
+    int mode = 1;  // default: GLYPH
+
+    if (l < 0.10){
+      // Very dark: solid blocks fill in with blockiness
+      mode = (h < blk * 0.90) ? 0 : 1;
+    } else if (l < 0.30){
+      // Dark: glyph base; solid blocks + halftone added at higher blockiness
+      if      (h < blk * 0.45)              mode = 0;  // SOLID
+      else if (h < blk * 0.45 + blk * 0.22) mode = 2;  // HALFTONE
+      else                                   mode = 1;  // GLYPH
+    } else if (l < 0.65){
+      // Midtone: halftone texture mixes in heavily, some solid accents
+      if      (h < blk * 0.18)              mode = 0;  // SOLID
+      else if (h < blk * 0.18 + blk * 0.48) mode = 2;  // HALFTONE
+      else                                   mode = 1;  // GLYPH
+    } else if (l < 0.90){
+      // Bright: mostly paper/glyphs, sparse halftone + rare solid accents
+      if      (h < blk * 0.08)              mode = 0;  // SOLID accent
+      else if (h < blk * 0.08 + blk * 0.28) mode = 2;  // HALFTONE
+      else                                   mode = 1;  // GLYPH
+    } else {
+      // Near-white: nearly all glyphs/paper, rare solid spot
+      if (h < blk * 0.05) mode = 0;
+    }
+
+    // ── Rendering ─────────────────────────────────────────────────────────────
+    vec3 paper = vec3(0.933, 0.945, 0.953);
+    vec3 color;
+
+    if (mode == 0){
+      // SOLID BLOCK: fill entire cell with quantized palette color
+      color = glyphCol;
+
+    } else if (mode == 2){
+      // HALFTONE: tiled circular dot pattern
+      // uHalftoneScale sub-tiles per cell dimension (2=coarse, 6=fine)
+      vec2 htUV = fract(cellUV * uHalftoneScale);
+      float r = length(htUV - 0.5);
+      // Dot radius scales with darkness: darker cells get larger dots (more ink)
+      float dotR = 0.46 * (0.20 + (1.0 - l) * 0.80);
+      float ink = step(r, dotR);  // crisp edge for retro pixel-art feel
+      color = mix(paper, glyphCol, ink);
+
+    } else {
+      // GLYPH: stamp real atlas character chosen by luminance
+      int idx = int((1.0 - l) * (uNumGlyphs - 1.0) + 0.5);
+      float ax = (float(idx) + cellUV.x) / uNumGlyphs;
+      float coverage = texture(uAtlas, vec2(ax, cellUV.y)).a;
+      color = mix(paper, glyphCol, coverage);
+    }
+
+    outColor = vec4(color, 1.0);
+  }`;
+
+  function compile(type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  function program(vs, fs){
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+      throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  }
+
+  let dsProg, mainProg;
+  try { dsProg = program(VS, FS_DS); mainProg = program(VS, FS_MAIN); }
+  catch(e){ showState(stateNoWebGL(e.message)); return; }
+
+  const U = {
+    ds:{ video:gl.getUniformLocation(dsProg,"uVideo"), lod:gl.getUniformLocation(dsProg,"uLod"),
+         va:gl.getUniformLocation(dsProg,"uVideoAspect"), vw:gl.getUniformLocation(dsProg,"uViewAspect"),
+         mirror:gl.getUniformLocation(dsProg,"uMirror") },
+    m:{ grid:gl.getUniformLocation(mainProg,"uGrid"), atlas:gl.getUniformLocation(mainProg,"uAtlas"),
+        gridSize:gl.getUniformLocation(mainProg,"uGridSize"), num:gl.getUniformLocation(mainProg,"uNumGlyphs"),
+        contrast:gl.getUniformLocation(mainProg,"uContrast"), gamma:gl.getUniformLocation(mainProg,"uGamma"),
+        blockiness:gl.getUniformLocation(mainProg,"uBlockiness"),
+        paletteSat:gl.getUniformLocation(mainProg,"uPaletteSat"),
+        halftoneScale:gl.getUniformLocation(mainProg,"uHalftoneScale"),
+        palette:gl.getUniformLocation(mainProg,"uPalette[0]"),
+        glitch:gl.getUniformLocation(mainProg,"uGlitch"),
+        dither:gl.getUniformLocation(mainProg,"uDither"), time:gl.getUniformLocation(mainProg,"uTime"),
+        invert:gl.getUniformLocation(mainProg,"uInvert") }
+  };
+
+  const vao = gl.createVertexArray();
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+  // ── glyph atlas (built once at startup) ──
+  let NUM_GLYPHS = 0;
+  function buildAtlas(){
+    const probe = document.createElement("canvas");
+    probe.width = TILE_W; probe.height = TILE_H;
+    const pc = probe.getContext("2d");
+    const chars = [...new Set(CANDIDATES.split(""))];
+    const scored = chars.map(ch=>{
+      pc.clearRect(0,0,TILE_W,TILE_H);
+      pc.fillStyle="#fff"; pc.font=`${FONT_PX}px ${"'Courier New', monospace"}`;
+      pc.textAlign="center"; pc.textBaseline="middle";
+      pc.fillText(ch, TILE_W/2, TILE_H/2);
+      const d = pc.getImageData(0,0,TILE_W,TILE_H).data;
+      let ink=0; for (let i=3;i<d.length;i+=4) ink+=d[i];
+      return {ch, ink};
+    }).sort((a,b)=> b.ink - a.ink);
+    if (scored[scored.length-1].ch !== " ") scored.push({ch:" ", ink:0});
+
+    NUM_GLYPHS = scored.length;
+    const atlas = document.createElement("canvas");
+    atlas.width = TILE_W*NUM_GLYPHS; atlas.height = TILE_H;
+    const ac = atlas.getContext("2d");
+    ac.clearRect(0,0,atlas.width,atlas.height);
+    ac.fillStyle="#fff"; ac.font=`${FONT_PX}px ${"'Courier New', monospace"}`;
+    ac.textAlign="center"; ac.textBaseline="middle";
+    scored.forEach((s,i)=> ac.fillText(s.ch, i*TILE_W + TILE_W/2, TILE_H/2));
+
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,atlas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+  const atlasTex = buildAtlas();
+
+  // ── video texture ──
+  const videoTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, videoTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // ── low-res grid FBO (RGBA: rgb=avg color, a=luminance) ──
+  let gridTex=null, gridFBO=null, GCOLS=0, GROWS=0;
+  function ensureGrid(){
+    const cols = S.cols;
+    const cellWdev = canvas.width / cols;
+    const cellHdev = cellWdev / TILE_ASPECT;
+    const rows = Math.max(1, Math.round(canvas.height / cellHdev));
+    if (cols===GCOLS && rows===GROWS && gridTex) return;
+    GCOLS=cols; GROWS=rows;
+    if (gridTex) gl.deleteTexture(gridTex);
+    if (gridFBO) gl.deleteFramebuffer(gridFBO);
+    gridTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, gridTex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,cols,rows,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gridFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, gridFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gridTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  function resize(){
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    canvas.width  = Math.max(1, Math.round(innerWidth*dpr));
+    canvas.height = Math.max(1, Math.round(innerHeight*dpr));
+    GCOLS = 0;
+  }
+  addEventListener("resize", resize);
+  resize();
+
+  // ── camera ──
+  const video = document.createElement("video");
+  video.playsInline = true; video.muted = true; video.autoplay = true;
+  let videoReady = false;
+
+  async function startCamera(){
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      showState(stateInsecure()); return;
+    }
+    showState(stateRequesting());
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:"user" }, audio:false
+      });
+      video.srcObject = stream;
+      await video.play();
+      video.addEventListener("loadedmetadata", ()=>{ videoReady = true; });
+      if (video.videoWidth) videoReady = true;
+      hideState();
+    }catch(err){
+      if (err && (err.name==="NotAllowedError"||err.name==="SecurityError")) showState(stateDenied());
+      else if (err && err.name==="NotFoundError") showState(stateNoCam());
+      else showState(stateDenied(err && err.message));
+    }
+  }
+
+  // ── render loop ──
+  let last=performance.now(), fps=0, fpsAccum=0, fpsCount=0;
+  const t0 = performance.now();
+
+  function frame(now){
+    requestAnimationFrame(frame);
+    const dt = now-last; last=now;
+    fpsAccum += dt; fpsCount++;
+    if (fpsAccum>=500){ fps = Math.round(1000*fpsCount/fpsAccum); fpsAccum=0; fpsCount=0; updateReadout(); }
+
+    if (!videoReady || !video.videoWidth){ clearScreen(); return; }
+
+    gl.bindTexture(gl.TEXTURE_2D, videoTex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+    gl.generateMipmap(gl.TEXTURE_2D);
+
+    ensureGrid();
+
+    // Pass 1: webcam → color+luminance grid
+    gl.bindVertexArray(vao);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, gridFBO);
+    gl.viewport(0,0,GCOLS,GROWS);
+    gl.useProgram(dsProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, videoTex);
+    gl.uniform1i(U.ds.video, 0);
+    const lod = Math.max(0, Math.log2(Math.max(video.videoWidth/GCOLS, video.videoHeight/GROWS)));
+    gl.uniform1f(U.ds.lod, lod);
+    gl.uniform1f(U.ds.va, video.videoWidth/video.videoHeight);
+    gl.uniform1f(U.ds.vw, canvas.width/canvas.height);
+    gl.uniform1i(U.ds.mirror, S.mirror?1:0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // Pass 2: grid → mixed mosaic
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.useProgram(mainProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, gridTex); gl.uniform1i(U.m.grid, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, atlasTex); gl.uniform1i(U.m.atlas, 1);
+    gl.uniform2f(U.m.gridSize,       GCOLS, GROWS);
+    gl.uniform1f(U.m.num,            NUM_GLYPHS);
+    gl.uniform1f(U.m.contrast,       S.contrast);
+    gl.uniform1f(U.m.gamma,          S.gamma);
+    gl.uniform1f(U.m.blockiness,     S.blockiness);
+    gl.uniform1f(U.m.paletteSat,     S.paletteSat);
+    gl.uniform1f(U.m.halftoneScale,  S.halftoneScale);
+    gl.uniform3fv(U.m.palette,       PALETTE_DATA);
+    gl.uniform1f(U.m.glitch,         S.glitch);
+    gl.uniform1f(U.m.dither,         S.dither);
+    gl.uniform1f(U.m.time,           (now-t0)/1000);
+    gl.uniform1i(U.m.invert,         S.invert?1:0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  function clearScreen(){
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.clearColor(0.039,0.067,0.098,1.0); gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  requestAnimationFrame(frame);
+
+  // ── UI wiring ──
+  const $ = id=>document.getElementById(id);
+  function bindSlider(id, key, fmt){
+    const el=$(id), out=$("v"+id[0].toUpperCase()+id.slice(1));
+    const show=()=>{ if(out) out.textContent = fmt?fmt(S[key]):S[key]; };
+    el.value = S[key]; show();
+    el.addEventListener("input", ()=>{ S[key]=parseFloat(el.value); if(key==="cols") GCOLS=0; show(); });
+  }
+  bindSlider("cols",          "cols",          v=>v|0);
+  bindSlider("contrast",      "contrast",      v=>v.toFixed(2));
+  bindSlider("gamma",         "gamma",         v=>v.toFixed(2));
+  bindSlider("blockiness",    "blockiness",    v=>v.toFixed(2));
+  bindSlider("paletteSat",    "paletteSat",    v=>v.toFixed(2));
+  bindSlider("halftoneScale", "halftoneScale", v=>v|0);
+  bindSlider("glitch",        "glitch",        v=>v.toFixed(2));
+  bindSlider("dither",        "dither",        v=>v.toFixed(2));
+
+  function bindToggle(id, key){
+    const el=$(id);
+    const paint=()=>{ el.setAttribute("aria-pressed", String(S[key])); el.querySelector("i").textContent = S[key]?"[X]":"[ ]"; };
+    paint();
+    el.addEventListener("click", ()=>{ S[key]=!S[key]; paint(); });
+  }
+  bindToggle("mirror","mirror");
+  bindToggle("invert","invert");
+
+  $("toggle").addEventListener("click", ()=>{
+    const p=$("panel"); const c=p.classList.toggle("collapsed");
+    $("toggle").setAttribute("aria-expanded", String(!c));
+  });
+
+  $("save").addEventListener("click", ()=>{
+    canvas.toBlob(b=>{
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(b);
+      a.download=`textmode-cam_${Date.now()}.png`;
+      a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    }, "image/png");
+  });
+
+  function updateReadout(){
+    $("readout").innerHTML =
+      `grid <b>${GCOLS}×${GROWS}</b> · <b>${(GCOLS*GROWS).toLocaleString()}</b> cells · `+
+      `<b>${NUM_GLYPHS}</b> glyphs · <b>${PALETTE_HEX.length}</b> colors · <b>${fps}</b> fps`;
+  }
+
+  // ── camera-state overlays ──
+  const stateEl=$("state"), stateBox=$("stateBox");
+  function showState(html){ stateBox.innerHTML=html; stateEl.classList.add("show"); wireRetry(); }
+  function hideState(){ stateEl.classList.remove("show"); }
+  function wireRetry(){ const b=stateBox.querySelector("[data-retry]"); if(b) b.addEventListener("click", startCamera); }
+
+  const stateRequesting = ()=>`<div class="box"><h1>Requesting camera</h1>
+    <p class="dots">Allow camera access to start the live mosaic</p></div>`;
+  const stateDenied = (msg)=>`<div class="box"><h1>Camera blocked</h1>
+    <p>Access was denied. Allow the camera for this page in your browser's site settings, then retry.
+    ${msg?`<br><br>(${escapeHtml(msg)})`:""}</p>
+    <button data-retry>Retry</button></div>`;
+  const stateNoCam = ()=>`<div class="box"><h1>No camera found</h1>
+    <p>No video input device is available. Connect a camera and retry.</p>
+    <button data-retry>Retry</button></div>`;
+  const stateInsecure = ()=>`<div class="box"><h1>Secure context required</h1>
+    <p>The camera API is unavailable here. Serve this file over <code>localhost</code> or
+    <code>https</code> — for example <code>python3 -m http.server</code> then open
+    <code>http://localhost:8000</code>.</p>
+    <button data-retry>Retry</button></div>`;
+  const stateNoWebGL = (msg)=>`<div class="box"><h1>WebGL2 unavailable</h1>
+    <p>This browser could not start WebGL2.${msg?`<br><br>(${escapeHtml(msg)})`:""}</p></div>`;
+  function escapeHtml(s){ return String(s).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+  updateReadout();
+  startCamera();
+})();
+</script>
+</body>
+</html>
