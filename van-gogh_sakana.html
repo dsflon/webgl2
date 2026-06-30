@@ -1,0 +1,1412 @@
+<!doctype html>
+<!--
+  vangogh-cam.html — self-contained WebGL2 webcam Van Gogh filter
+
+  How to run:
+    1. Serve this directory from a secure context. Localhost is accepted by browsers:
+         python3 -m http.server 8000
+    2. Open:
+         http://localhost:8000/vangogh-cam.html
+    3. Allow camera access.
+
+  Controls:
+    Swirl strength    — amount of procedural Starry-Night flow in low-detail/flat regions.
+    Stroke length     — length of directional brush dabs; high-gradient facial details stay shorter.
+    Stroke density    — number/tightness of neighboring dabs; higher values make finer marks.
+    Brush scale       — size of the per-stroke color/noise cell and dab width.
+    Impasto           — strength of fake raised-paint normal/specular lighting.
+    Palette strength  — blend toward the editable Van Gogh palette without hard posterization.
+    Saturation        — color saturation boost before palette mapping.
+    Canvas texture    — linen/canvas weave overlay strength.
+    Mirror            — horizontally mirror the webcam, ON by default.
+    Pause swirl       — freezes vortex animation; defaults ON when prefers-reduced-motion is set.
+    Save PNG          — downloads the current rendered canvas frame.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Van Gogh Webcam Impasto — WebGL2</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #081123;
+        --ink: #f4e7bd;
+        --muted: rgba(244, 231, 189, 0.68);
+        --panel: rgba(7, 16, 35, 0.76);
+        --line: rgba(244, 231, 189, 0.16);
+        --gold: #e8b93c;
+        --blue: #173e83;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            circle at 70% 20%,
+            rgba(232, 185, 60, 0.18),
+            transparent 24%
+          ),
+          radial-gradient(
+            circle at 20% 80%,
+            rgba(36, 94, 174, 0.3),
+            transparent 34%
+          ),
+          linear-gradient(135deg, #071023, #111a37 54%, #221407);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+      }
+
+      video {
+        position: fixed;
+        width: 1px;
+        height: 1px;
+        left: -10px;
+        top: -10px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .panel {
+        position: fixed;
+        top: max(58px, calc(env(safe-area-inset-top) + 58px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(350px, calc(100vw - 28px));
+        max-height: calc(100vh - 72px);
+        overflow: auto;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background:
+          linear-gradient(
+            180deg,
+            rgba(17, 35, 70, 0.82),
+            rgba(7, 16, 35, 0.66)
+          ),
+          var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        box-shadow:
+          0 18px 50px rgba(0, 0, 0, 0.34),
+          inset 0 1px 0 rgba(255, 244, 198, 0.12);
+        backdrop-filter: blur(15px);
+        transition:
+          opacity 0.25s ease,
+          transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+
+      .panel.collapsed {
+        opacity: 0;
+        pointer-events: none;
+        transform: translateX(calc(-100% - 18px));
+      }
+
+      .panel h1 {
+        margin: 0 0 4px;
+        color: rgba(255, 237, 172, 0.96);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.22em;
+      }
+
+      .panel p {
+        margin: 0 0 10px;
+        font-size: 10px;
+        line-height: 1.55;
+        letter-spacing: 0.04em;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 64px;
+        gap: 7px 10px;
+        align-items: center;
+        padding: 8px 0;
+        border-top: 1px solid rgba(244, 231, 189, 0.1);
+      }
+
+      .row label {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        color: rgba(244, 231, 189, 0.82);
+        font-size: 10px;
+        letter-spacing: 0.07em;
+      }
+
+      .row label span {
+        color: rgba(244, 231, 189, 0.46);
+        font-size: 9px;
+        letter-spacing: 0.03em;
+      }
+
+      .row output {
+        color: rgba(255, 237, 172, 0.8);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      input[type="range"] {
+        grid-column: 1 / -1;
+        width: 100%;
+        accent-color: var(--gold);
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 9px 0;
+        border-top: 1px solid rgba(244, 231, 189, 0.1);
+        color: rgba(244, 231, 189, 0.82);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+
+      input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--gold);
+      }
+
+      .buttons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      button {
+        min-height: 36px;
+        padding: 9px 12px;
+        color: rgba(255, 237, 172, 0.92);
+        background: rgba(11, 30, 67, 0.64);
+        border: 1px solid rgba(244, 231, 189, 0.18);
+        border-radius: 999px;
+        font-family: inherit;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: rgba(31, 67, 128, 0.78);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.5;
+      }
+
+      #togglePanel {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 12;
+        min-width: 116px;
+        background: rgba(7, 16, 35, 0.78);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+        backdrop-filter: blur(15px);
+      }
+
+      .status {
+        margin-top: 10px;
+        padding-top: 9px;
+        border-top: 1px solid rgba(244, 231, 189, 0.1);
+        color: rgba(244, 231, 189, 0.58);
+        font-size: 9px;
+        line-height: 1.5;
+        letter-spacing: 0.05em;
+      }
+
+      .badge {
+        display: inline-block;
+        margin-top: 5px;
+        padding: 3px 7px;
+        color: rgba(255, 218, 92, 0.96);
+        background: rgba(232, 185, 60, 0.12);
+        border: 1px solid rgba(232, 185, 60, 0.22);
+        border-radius: 999px;
+      }
+
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 8;
+        display: grid;
+        place-items: center;
+        padding: 22px;
+        color: rgba(255, 237, 172, 0.92);
+        text-align: center;
+        pointer-events: none;
+        background:
+          radial-gradient(
+            circle at 50% 45%,
+            rgba(13, 34, 73, 0.44),
+            transparent 34%
+          ),
+          rgba(3, 8, 18, 0.42);
+        transition: opacity 0.25s ease;
+      }
+
+      #overlay.hidden {
+        opacity: 0;
+      }
+
+      .overlay-card {
+        width: min(520px, calc(100vw - 32px));
+        padding: 22px;
+        background: rgba(7, 16, 35, 0.78);
+        border: 1px solid rgba(244, 231, 189, 0.16);
+        border-radius: 20px;
+        box-shadow: 0 22px 70px rgba(0, 0, 0, 0.34);
+        backdrop-filter: blur(16px);
+        pointer-events: auto;
+      }
+
+      .overlay-card h2 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        letter-spacing: 0.18em;
+      }
+
+      .overlay-card p {
+        margin: 0 0 14px;
+        color: rgba(244, 231, 189, 0.66);
+        font-size: 11px;
+        line-height: 1.65;
+      }
+
+      @media (max-width: 720px) {
+        #togglePanel {
+          top: auto;
+          bottom: max(12px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          transition: bottom 0.3s ease;
+        }
+
+        #togglePanel.panel-open {
+          bottom: calc(56vh + 22px + max(12px, env(safe-area-inset-bottom)));
+        }
+
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 56vh;
+          padding: 12px;
+        }
+
+        .panel.collapsed {
+          transform: translateY(calc(100% + 18px));
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 Van Gogh webcam oil painting"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button
+      id="togglePanel"
+      type="button"
+      class="panel-open"
+      aria-expanded="true"
+    >
+      HIDE UI
+    </button>
+
+    <section
+      id="panel"
+      class="panel"
+      aria-label="Van Gogh webcam controls"
+    ></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const state = {
+          swirl: 1.05,
+          strokeLen: 26,
+          strokeDensity: 1.0,
+          brushScale: 1.25,
+          impasto: 0.78,
+          palette: 0.82,
+          saturation: 1.5,
+          canvas: 0.26,
+          mirror: true,
+          pauseSwirl: reducedMotion,
+          taps: 14,
+          iterations: 3,
+        };
+
+        /*
+          Editable Van Gogh-inspired palette passed to the final shader.
+          Keep this JS array as hex strings; the UI/shader conversion below
+          automatically uploads it as uPaletteColors.
+        */
+        const vanGoghPaletteHex = [
+          "#06183d", // deep ultramarine
+          "#103b82", // cobalt blue
+          "#1d63a6", // bright blue
+          "#f2c84b", // chrome yellow
+          "#f6df7e", // pale yellow light
+          "#b77924", // ochre
+          "#5c3a16", // burnt umber
+          "#2f6b3f", // sap green
+          "#0f7c75", // viridian
+          "#c36b43", // warm skin / orange
+          "#e7aa75", // flesh light
+          "#f4d3a0", // warm highlight
+        ];
+
+        const palette = vanGoghPaletteHex.map((hex) => {
+          const value = hex.replace("#", "");
+          return [
+            parseInt(value.slice(0, 2), 16) / 255,
+            parseInt(value.slice(2, 4), 16) / 255,
+            parseInt(value.slice(4, 6), 16) / 255,
+          ];
+        });
+
+        const uiRows = [
+          [
+            "swirl",
+            "Swirl strength",
+            "flat regions bend toward animated vortices",
+            0,
+            1.5,
+            0.01,
+          ],
+          [
+            "strokeLen",
+            "Stroke length",
+            "short edge-aware dabs, longer in low-gradient areas",
+            4,
+            58,
+            1,
+          ],
+          [
+            "strokeDensity",
+            "Stroke density",
+            "higher values create more compact neighboring marks",
+            0.45,
+            2.2,
+            0.01,
+          ],
+          [
+            "brushScale",
+            "Brush scale",
+            "overall dab/noise cell size",
+            0.45,
+            3.2,
+            0.01,
+          ],
+          [
+            "impasto",
+            "Impasto",
+            "fake raised-paint ridges and upper-left highlights",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "palette",
+            "Palette strength",
+            "blend toward cobalt, chrome yellow, ochre, viridian",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "saturation",
+            "Saturation",
+            "pre-palette color intensity",
+            0.65,
+            2.2,
+            0.01,
+          ],
+          [
+            "canvas",
+            "Canvas texture",
+            "procedural linen weave overlay",
+            0,
+            0.55,
+            0.01,
+          ],
+        ];
+
+        panel.innerHTML = `
+          <h1>VAN GOGH CAM</h1>
+          <p>
+            WebGL2 multi-pass webcam painting: Sobel edge flow, animated swirls,
+            directional impasto strokes, limited palette, dabbed bloom and linen.
+          </p>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input
+                    id="${key}"
+                    type="range"
+                    min="${min}"
+                    max="${max}"
+                    step="${step}"
+                    value="${state[key]}"
+                  />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>Mirror webcam</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>Pause swirl animation</span>
+            <input id="pauseSwirl" type="checkbox" ${
+              state.pauseSwirl ? "checked" : ""
+            } />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / RES --</div>
+            <span class="badge">WebGL2 / GLSL ES 3.00 / no libraries</span>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        document
+          .getElementById("mirror")
+          .addEventListener("change", (event) => {
+            state.mirror = event.currentTarget.checked;
+          });
+
+        document
+          .getElementById("pauseSwirl")
+          .addEventListener("change", (event) => {
+            state.pauseSwirl = event.currentTarget.checked;
+          });
+
+        document.getElementById("resetLook").addEventListener("click", () => {
+          const defaults = {
+            swirl: 1.05,
+            strokeLen: 26,
+            strokeDensity: 1.0,
+            brushScale: 1.25,
+            impasto: 0.78,
+            palette: 0.82,
+            saturation: 1.5,
+            canvas: 0.26,
+          };
+          Object.assign(state, defaults);
+          Object.keys(defaults).forEach((key) => {
+            document.getElementById(key).value = state[key];
+            document.getElementById(`${key}Out`).textContent = formatValue(
+              state[key],
+            );
+          });
+        });
+
+        togglePanel.addEventListener("click", () => {
+          const collapsed = panel.classList.toggle("collapsed");
+          togglePanel.textContent = collapsed ? "SHOW UI" : "HIDE UI";
+          togglePanel.classList.toggle("panel-open", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          // preserveDrawingBuffer is enabled, so the current default framebuffer can
+          // be exported directly without an extra render.
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `vangogh-cam-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        retryCamera.addEventListener("click", () => {
+          startCamera();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, showRetry = false) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !showRetry;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+            false,
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+        const vertexSource = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0),
+            vec2( 3.0, -1.0),
+            vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        const common = `#version 300 es
+          precision highp float;
+          precision highp int;
+          in vec2 vUv;
+          out vec4 fragColor;
+
+          float luma(vec3 c) {
+            return dot(c, vec3(0.299, 0.587, 0.114));
+          }
+
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+
+          float noise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+
+          float fbm(vec2 p) {
+            float v = 0.0;
+            float a = 0.5;
+            mat2 r = mat2(0.8, -0.6, 0.6, 0.8);
+            for (int i = 0; i < 4; i++) {
+              v += a * noise(p);
+              p = r * p * 2.03 + 17.1;
+              a *= 0.5;
+            }
+            return v;
+          }
+        `;
+
+        const baseFragment = `${common}
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform bool uMirror;
+
+          // Cover-fit camera frame to canvas aspect without stretching. Mirroring is
+          // applied in video UV space so the rest of the pipeline sees a normal image.
+          vec2 coverUv(vec2 uv) {
+            float canvasAspect = uResolution.x / max(uResolution.y, 1.0);
+            float videoAspect = uVideoSize.x / max(uVideoSize.y, 1.0);
+            vec2 st = uv;
+            if (canvasAspect > videoAspect) {
+              float scale = canvasAspect / videoAspect;
+              st.y = (uv.y - 0.5) / scale + 0.5;
+            } else {
+              float scale = videoAspect / canvasAspect;
+              st.x = (uv.x - 0.5) / scale + 0.5;
+            }
+            if (uMirror) st.x = 1.0 - st.x;
+            return st;
+          }
+
+          void main() {
+            vec2 st = clamp(coverUv(vUv), 0.001, 0.999);
+            vec3 color = texture(uVideo, st).rgb;
+            fragColor = vec4(color, 1.0);
+          }
+        `;
+
+        const flowFragment = `${common}
+          uniform sampler2D uScene;
+          uniform vec2 uResolution;
+          uniform float uTime;
+          uniform float uSwirl;
+
+          vec3 sampleScene(vec2 uv) {
+            return texture(uScene, clamp(uv, 0.001, 0.999)).rgb;
+          }
+
+          // A few slow drifting vortices make flat skies/walls curl like Starry Night.
+          vec2 vortexField(vec2 uv) {
+            vec2 aspect = vec2(uResolution.x / max(uResolution.y, 1.0), 1.0);
+            vec2 p = (uv - 0.5) * aspect;
+            vec2 field = vec2(0.0);
+
+            for (int i = 0; i < 4; i++) {
+              float fi = float(i);
+              vec2 c = vec2(
+                sin(uTime * (0.13 + fi * 0.021) + fi * 2.11) * 0.34,
+                cos(uTime * (0.11 + fi * 0.017) + fi * 1.37) * 0.25
+              );
+              vec2 d = p - c;
+              float r2 = dot(d, d) + 0.018 + 0.012 * fi;
+              float spin = mix(-1.0, 1.0, step(0.5, fract(fi * 0.5)));
+              // Tangential vector around the center, decaying softly by distance.
+              field += spin * vec2(-d.y, d.x) / r2;
+            }
+
+            // Curl-like contribution from value noise adds painterly turbulence.
+            vec2 e = vec2(0.012, 0.0);
+            float nx1 = fbm(uv * 4.0 + vec2(0.0, uTime * 0.025) + e.xy);
+            float nx0 = fbm(uv * 4.0 + vec2(0.0, uTime * 0.025) - e.xy);
+            float ny1 = fbm(uv * 4.0 + vec2(uTime * 0.02, 0.0) + e.yx);
+            float ny0 = fbm(uv * 4.0 + vec2(uTime * 0.02, 0.0) - e.yx);
+            field += vec2(ny1 - ny0, -(nx1 - nx0)) * 20.0;
+
+            return normalize(field + vec2(0.0001, 0.0));
+          }
+
+          void main() {
+            vec2 texel = 1.0 / uResolution;
+
+            // 3x3 Sobel luminance gradient. The gradient points ACROSS an edge.
+            float tl = luma(sampleScene(vUv + texel * vec2(-1.0,  1.0)));
+            float tc = luma(sampleScene(vUv + texel * vec2( 0.0,  1.0)));
+            float tr = luma(sampleScene(vUv + texel * vec2( 1.0,  1.0)));
+            float ml = luma(sampleScene(vUv + texel * vec2(-1.0,  0.0)));
+            float mr = luma(sampleScene(vUv + texel * vec2( 1.0,  0.0)));
+            float bl = luma(sampleScene(vUv + texel * vec2(-1.0, -1.0)));
+            float bc = luma(sampleScene(vUv + texel * vec2( 0.0, -1.0)));
+            float br = luma(sampleScene(vUv + texel * vec2( 1.0, -1.0)));
+
+            float gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
+            float gy = -bl - 2.0 * bc - br + tl + 2.0 * tc + tr;
+            vec2 grad = vec2(gx, gy);
+            float mag = length(grad);
+
+            // Rotate gradient by 90 degrees so brushstrokes run ALONG contours.
+            vec2 edgeTangent = normalize(vec2(-grad.y, grad.x) + vec2(0.0001, 0.0));
+            vec2 swirlDir = vortexField(vUv);
+
+            // Subject preservation: strong gradients imply facial/features/contours.
+            // There, keep edge tangent and reduce the procedural swirl influence.
+            float edge = smoothstep(0.055, 0.26, mag);
+            float flatness = 1.0 - edge;
+            vec2 dir = normalize(mix(edgeTangent, swirlDir, flatness * clamp(uSwirl, 0.0, 1.5)));
+
+            fragColor = vec4(dir * 0.5 + 0.5, edge, clamp(mag * 2.5, 0.0, 1.0));
+          }
+        `;
+
+        const strokeFragment = `${common}
+          uniform sampler2D uSource;
+          uniform sampler2D uFlow;
+          uniform vec2 uResolution;
+          uniform float uStrokeLen;
+          uniform float uStrokeDensity;
+          uniform float uBrushScale;
+          uniform int uTaps;
+          uniform float uPassIndex;
+
+          vec3 sampleSrc(vec2 uv) {
+            return texture(uSource, clamp(uv, 0.001, 0.999)).rgb;
+          }
+
+          void main() {
+            vec4 flow = texture(uFlow, vUv);
+            vec2 dir = normalize(flow.xy * 2.0 - 1.0 + vec2(0.0001));
+            float edge = flow.z;
+            float flatness = 1.0 - edge;
+
+            // Shorten strokes on high-gradient areas to keep faces recognizable,
+            // but keep them visibly chunky and loaded with paint everywhere.
+            float lenPx = uStrokeLen * mix(0.54, 1.72, flatness);
+            float density = max(uStrokeDensity, 0.1);
+            float brushPx = max(3.0, uBrushScale * 15.0 / density);
+
+            vec2 cell = floor(vUv * uResolution / brushPx);
+            float h = hash12(cell + uPassIndex * 19.17);
+            float h2 = hash12(cell.yx + 41.3 + uPassIndex * 7.0);
+            float side = (h2 - 0.5) * brushPx * 0.52;
+            vec2 nrm = vec2(-dir.y, dir.x);
+            float phase = (h - 0.5) * lenPx * 0.34;
+            vec2 origin = vUv + (nrm * side + dir * phase) / uResolution;
+
+            vec3 accum = vec3(0.0);
+            float wsum = 0.0;
+
+            // Loaded-brush short dab kernel: many taps near center, not a long blur.
+            const int MAX_TAPS = 18;
+            for (int i = 0; i < MAX_TAPS; i++) {
+              if (i >= uTaps) break;
+              float denom = max(float(uTaps - 1), 1.0);
+              float t = (float(i) / denom - 0.5) * 2.0;
+              float localJitter = (hash12(cell + vec2(float(i), uPassIndex)) - 0.5) * 0.34;
+              float dab = t + localJitter;
+              float bristle = sin(dab * 8.4 + h * 6.28318) * brushPx * 0.12;
+              float w = exp(-dab * dab * 3.05) * (0.72 + 0.28 * hash12(cell + float(i)));
+              vec2 uv = origin + (dir * dab * lenPx + nrm * bristle) / uResolution;
+              accum += sampleSrc(uv) * w;
+              wsum += w;
+            }
+
+            vec3 color = accum / max(wsum, 0.0001);
+
+            // Strong per-stroke pigment jitter, tint bias and posterization make each
+            // mark read as an individual loaded oil stroke rather than a smoothed photo.
+            vec3 jitter = vec3(
+              hash12(cell + 1.3),
+              hash12(cell + 8.7),
+              hash12(cell + 15.1)
+            ) - 0.5;
+            vec3 warmTint = vec3(1.12, 1.02, 0.82);
+            vec3 coolTint = vec3(0.78, 0.94, 1.18);
+            vec3 strokeTint = mix(warmTint, coolTint, step(0.5, h));
+            color *= 1.0 + jitter * (0.22 + 0.08 * flatness);
+            color *= mix(vec3(1.0), strokeTint, 0.11 + 0.08 * flatness);
+
+            float levels = mix(6.2, 3.9, clamp(uBrushScale - 0.5, 0.0, 1.0));
+            vec3 quant = floor(color * levels + h * 0.58) / levels;
+            color = mix(color, quant, 0.50 + 0.18 * flatness);
+
+            // Preserve detail at edges by retaining some input there, but still paint
+            // boldly enough that facial features become Van-Gogh-like strokes.
+            vec3 original = sampleSrc(vUv);
+            float paintAmount = mix(0.95, 0.80, edge);
+            fragColor = vec4(mix(original, color, paintAmount), 1.0);
+          }
+        `;
+
+        const impastoFragment = `${common}
+          uniform sampler2D uPaint;
+          uniform sampler2D uFlow;
+          uniform vec2 uResolution;
+          uniform float uImpasto;
+          uniform float uBrushScale;
+
+          vec3 paint(vec2 uv) {
+            return texture(uPaint, clamp(uv, 0.001, 0.999)).rgb;
+          }
+
+          float heightAt(vec2 uv) {
+            vec3 c = paint(uv);
+            vec4 flow = texture(uFlow, clamp(uv, 0.001, 0.999));
+            vec2 dir = normalize(flow.xy * 2.0 - 1.0 + vec2(0.0001));
+            vec2 nrm = vec2(-dir.y, dir.x);
+
+            // Flow-aligned high-frequency ridges: sin along stroke, roughness across it.
+            vec2 p = uv * uResolution / max(4.0, uBrushScale * 6.6);
+            float along = dot(p, dir);
+            float across = dot(p, nrm);
+            float fibers = sin(along * 3.14159 + fbm(vec2(across * 0.85, along * 0.14)) * 4.4);
+            float ridge = pow(0.5 + 0.5 * fibers, 1.45);
+            float grain = fbm(p * vec2(1.15, 2.2) + dir * 4.0);
+            float thick = smoothstep(0.16, 0.88, luma(c));
+            return luma(c) * 0.46 + ridge * 0.36 + grain * 0.18 + thick * 0.12;
+          }
+
+          void main() {
+            vec2 texel = 1.0 / uResolution;
+            vec3 base = paint(vUv);
+
+            // Derive a normal from the procedural height field.
+            float hL = heightAt(vUv - vec2(texel.x, 0.0));
+            float hR = heightAt(vUv + vec2(texel.x, 0.0));
+            float hD = heightAt(vUv - vec2(0.0, texel.y));
+            float hU = heightAt(vUv + vec2(0.0, texel.y));
+            vec3 normal = normalize(vec3(
+              (hL - hR) * uImpasto * 5.8,
+              (hD - hU) * uImpasto * 5.8,
+              1.0
+            ));
+
+            vec3 lightDir = normalize(vec3(-0.55, 0.66, 0.74)); // upper-left
+            float diffuse = dot(normal, lightDir) * 0.5 + 0.5;
+            vec3 viewDir = vec3(0.0, 0.0, 1.0);
+            vec3 halfDir = normalize(lightDir + viewDir);
+            float spec = pow(max(dot(normal, halfDir), 0.0), 24.0) * uImpasto;
+            float ridgeContrast = smoothstep(0.03, 0.22, abs(hR - hL) + abs(hU - hD));
+
+            float shade = mix(1.0, 0.68 + 0.58 * diffuse, uImpasto);
+            vec3 color = base * shade;
+            color += vec3(1.0, 0.84, 0.42) * spec * 0.42;
+            color += vec3(1.0, 0.72, 0.28) * ridgeContrast * uImpasto * 0.08;
+            color *= 1.0 - ridgeContrast * uImpasto * 0.055;
+            fragColor = vec4(color, 1.0);
+          }
+        `;
+
+        const finalFragment = `${common}
+          uniform sampler2D uPaint;
+          uniform vec2 uResolution;
+          uniform float uTime;
+          uniform float uPaletteStrength;
+          uniform float uSaturation;
+          uniform float uCanvas;
+          uniform vec3 uPaletteColors[16];
+          uniform int uPaletteCount;
+
+          vec3 saturateColor(vec3 c, float sat) {
+            float y = luma(c);
+            return mix(vec3(y), c, sat);
+          }
+
+          vec3 nearestPalette(vec3 c) {
+            vec3 best = uPaletteColors[0];
+            float bestD = 1e9;
+            for (int i = 0; i < 16; i++) {
+              if (i >= uPaletteCount) break;
+              vec3 p = uPaletteColors[i];
+              // Slightly luminance-aware distance preserves scene relationships.
+              vec3 d = c - p;
+              float ld = luma(c) - luma(p);
+              float dist = dot(d, d) + ld * ld * 0.35;
+              if (dist < bestD) {
+                bestD = dist;
+                best = p;
+              }
+            }
+            return best;
+          }
+
+          vec3 dabBloom(vec2 uv) {
+            vec3 bloom = vec3(0.0);
+            float total = 0.0;
+
+            // Bright stars/lamps bloom into soft dabbed halos.
+            for (int i = 0; i < 16; i++) {
+              float fi = float(i);
+              float a = fi * 2.399963 + noise(uv * 9.0 + fi) * 0.35;
+              float r = (0.006 + 0.0035 * fi) * (1.0 + 0.35 * noise(vec2(fi, uTime * 0.03)));
+              vec2 off = vec2(cos(a), sin(a)) * r;
+              vec3 s = texture(uPaint, clamp(uv + off, 0.001, 0.999)).rgb;
+              float b = smoothstep(0.68, 0.98, luma(s));
+              float w = exp(-fi * 0.18) * b;
+              bloom += s * w;
+              total += w;
+            }
+
+            if (total > 0.0) bloom /= total;
+            return bloom * smoothstep(0.02, 0.4, total) * 0.42;
+          }
+
+          void main() {
+            vec2 uv = vUv;
+            vec3 color = texture(uPaint, uv).rgb;
+
+            color = saturateColor(color, uSaturation);
+            color = (color - 0.5) * 1.13 + 0.5;
+
+            // Van Gogh limited-palette pull with soft blending, not hard posterization.
+            vec3 pal = nearestPalette(color);
+            pal = saturateColor(pal, 1.18);
+            float warm = smoothstep(0.42, 0.95, pal.r + pal.g - pal.b);
+            vec3 complementPush = mix(vec3(0.88, 0.98, 1.18), vec3(1.18, 1.06, 0.76), warm);
+            color = mix(color, pal * complementPush, uPaletteStrength);
+
+            color += dabBloom(uv) * mix(vec3(0.58, 0.72, 1.08), vec3(1.18, 0.84, 0.24), 0.48);
+
+            // Faint procedural linen/canvas: crossed threads plus irregular fiber noise.
+            vec2 p = uv * uResolution;
+            float weaveX = sin(p.x * 1.65 + fbm(uv * 42.0) * 2.0);
+            float weaveY = sin(p.y * 1.38 + fbm(uv.yx * 37.0) * 2.0);
+            float linen = (weaveX * 0.5 + weaveY * 0.5) * 0.5 + fbm(p * 0.055) - 0.5;
+            color *= 1.0 + linen * uCanvas * 0.30;
+            color += vec3(0.9, 0.76, 0.45) * uCanvas * 0.04;
+
+            // Gentle vignette keeps the scene painterly and centered.
+            vec2 d = uv - 0.5;
+            float vig = smoothstep(0.88, 0.24, dot(d, d) * 1.35);
+            color *= mix(0.78, 1.04, vig);
+
+            fragColor = vec4(pow(max(color, 0.0), vec3(0.98)), 1.0);
+          }
+        `;
+
+        const programs = {
+          base: makeProgram(vertexSource, baseFragment),
+          flow: makeProgram(vertexSource, flowFragment),
+          stroke: makeProgram(vertexSource, strokeFragment),
+          impasto: makeProgram(vertexSource, impastoFragment),
+          final: makeProgram(vertexSource, finalFragment),
+        };
+
+        const locations = {};
+        for (const [name, program] of Object.entries(programs)) {
+          locations[name] = collectUniforms(program);
+        }
+
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          2,
+          2,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          new Uint8Array([
+            8, 18, 42, 255, 20, 42, 88, 255, 26, 58, 128, 255, 232, 185, 60,
+            255,
+          ]),
+        );
+
+        let fbos = null;
+        let stream = null;
+        let cameraReady = false;
+        let animationTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let fps = 0;
+
+        const readout = document.getElementById("readout");
+
+        function makeProgram(vsSource, fsSource) {
+          const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+          const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+          const program = gl.createProgram();
+          gl.attachShader(program, vs);
+          gl.attachShader(program, fs);
+          gl.linkProgram(program);
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            const info = gl.getProgramInfoLog(program) || "unknown link error";
+            gl.deleteProgram(program);
+            throw new Error(info);
+          }
+          return program;
+        }
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            const info = gl.getShaderInfoLog(shader) || "unknown shader error";
+            gl.deleteShader(shader);
+            throw new Error(info);
+          }
+          return shader;
+        }
+
+        function collectUniforms(program) {
+          const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
+          const map = {};
+          for (let i = 0; i < count; i++) {
+            const info = gl.getActiveUniform(program, i);
+            if (!info) continue;
+            const name = info.name.replace(/\[0\]$/, "");
+            map[name] = gl.getUniformLocation(program, name);
+          }
+          return map;
+        }
+
+        function makeTarget(width, height) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA8,
+            width,
+            height,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            null,
+          );
+
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0,
+          );
+          const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+          if (status !== gl.FRAMEBUFFER_COMPLETE) {
+            throw new Error(`Framebuffer incomplete: ${status}`);
+          }
+          return { tex, fbo, width, height };
+        }
+
+        function deleteTarget(target) {
+          if (!target) return;
+          gl.deleteFramebuffer(target.fbo);
+          gl.deleteTexture(target.tex);
+        }
+
+        function rebuildTargets(width, height) {
+          if (fbos) {
+            Object.values(fbos).forEach(deleteTarget);
+          }
+          fbos = {
+            scene: makeTarget(width, height),
+            flow: makeTarget(width, height),
+            ping: makeTarget(width, height),
+            pong: makeTarget(width, height),
+            impasto: makeTarget(width, height),
+          };
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !fbos) {
+            canvas.width = width;
+            canvas.height = height;
+            gl.viewport(0, 0, width, height);
+            rebuildTargets(width, height);
+          }
+        }
+
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+
+        function renderTo(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        function setVec2(location, x, y) {
+          gl.uniform2f(location, x, y);
+        }
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 &&
+            video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              video,
+            );
+          }
+        }
+
+        function frame(now) {
+          resize();
+
+          const dt = Math.min(0.05, Math.max(0.0, (now - lastNow) / 1000));
+          lastNow = now;
+          if (!state.pauseSwirl) animationTime += dt;
+
+          uploadVideoFrame();
+
+          const w = canvas.width;
+          const h = canvas.height;
+          const vw = Math.max(1, video.videoWidth || 1280);
+          const vh = Math.max(1, video.videoHeight || 720);
+
+          // Pass 0: cover-fit webcam into canvas-resolution scene texture.
+          renderTo(fbos.scene, programs.base, () => {
+            const u = locations.base;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            setVec2(u.uResolution, w, h);
+            setVec2(u.uVideoSize, vw, vh);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // Pass 1: FLOW FIELD. Sobel gradients become 90°-rotated edge tangents;
+          // low-gradient pixels blend toward animated procedural curl/vortices.
+          renderTo(fbos.flow, programs.flow, () => {
+            const u = locations.flow;
+            bindTexture(0, fbos.scene.tex);
+            gl.uniform1i(u.uScene, 0);
+            setVec2(u.uResolution, w, h);
+            gl.uniform1f(u.uTime, animationTime);
+            gl.uniform1f(u.uSwirl, state.swirl);
+          });
+
+          // Pass 2: STROKE PASS iterated through ping-pong FBOs for layered dabs.
+          let source = fbos.scene.tex;
+          let target = fbos.ping;
+          const iterations = Math.max(1, Math.min(3, state.iterations));
+          for (let i = 0; i < iterations; i++) {
+            target = i % 2 === 0 ? fbos.ping : fbos.pong;
+            renderTo(target, programs.stroke, () => {
+              const u = locations.stroke;
+              bindTexture(0, source);
+              bindTexture(1, fbos.flow.tex);
+              gl.uniform1i(u.uSource, 0);
+              gl.uniform1i(u.uFlow, 1);
+              setVec2(u.uResolution, w, h);
+              gl.uniform1f(u.uStrokeLen, state.strokeLen);
+              gl.uniform1f(u.uStrokeDensity, state.strokeDensity);
+              gl.uniform1f(u.uBrushScale, state.brushScale);
+              gl.uniform1i(u.uTaps, state.taps);
+              gl.uniform1f(u.uPassIndex, i);
+            });
+            source = target.tex;
+          }
+
+          // Pass 3: IMPASTO LIGHTING. Build height from paint intensity and
+          // flow-aligned fiber noise; derive normal and light from upper-left.
+          renderTo(fbos.impasto, programs.impasto, () => {
+            const u = locations.impasto;
+            bindTexture(0, source);
+            bindTexture(1, fbos.flow.tex);
+            gl.uniform1i(u.uPaint, 0);
+            gl.uniform1i(u.uFlow, 1);
+            setVec2(u.uResolution, w, h);
+            gl.uniform1f(u.uImpasto, state.impasto);
+            gl.uniform1f(u.uBrushScale, state.brushScale);
+          });
+
+          // Pass 4: PALETTE + CANVAS to default framebuffer. Palette is supplied from
+          // editable JS hex array; bright points bloom into dabbed halos.
+          renderTo(null, programs.final, () => {
+            const u = locations.final;
+            bindTexture(0, fbos.impasto.tex);
+            gl.uniform1i(u.uPaint, 0);
+            setVec2(u.uResolution, w, h);
+            gl.uniform1f(u.uTime, animationTime);
+            gl.uniform1f(u.uPaletteStrength, state.palette);
+            gl.uniform1f(u.uSaturation, state.saturation);
+            gl.uniform1f(u.uCanvas, state.canvas);
+            gl.uniform1i(u.uPaletteCount, palette.length);
+            gl.uniform3fv(u.uPaletteColors, new Float32Array(palette.flat()));
+          });
+
+          fpsFrames++;
+          if (now - fpsLast > 500) {
+            fps = (fpsFrames * 1000) / (now - fpsLast);
+            fpsLast = now;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / RES ${w}×${h}`;
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay(
+            "requesting",
+            "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.",
+            false,
+          );
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay(
+              "error",
+              "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8000) or HTTPS, then reload.",
+              false,
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay(
+              "error",
+              "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.",
+              false,
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: "user",
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+
+            cameraReady = true;
+            retryCamera.disabled = false;
+            setOverlay("hidden", "", "", false);
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay(
+                "error",
+                "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                true,
+              );
+            } else if (
+              name === "NotFoundError" ||
+              name === "OverconstrainedError"
+            ) {
+              setOverlay(
+                "error",
+                "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                true,
+              );
+            } else {
+              setOverlay(
+                "error",
+                "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                true,
+              );
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        window.addEventListener("beforeunload", stopCamera);
+
+        try {
+          resize();
+          startCamera();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay(
+            "error",
+            "WEBGL SETUP ERROR",
+            error && error.message
+              ? error.message
+              : "Could not initialize the renderer.",
+            false,
+          );
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
