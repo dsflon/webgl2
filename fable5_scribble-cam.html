@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<!--
+==============================================================================
+ scribble-cam.html — webcam → one-line "scribble drawing" renderer (WebGL2)
+==============================================================================
+
+ HOW TO RUN
+ ----------
+ Camera access + ES-module imports require a secure context, so serve this
+ file over localhost (or https). From the folder containing this file:
+
+     python3 -m http.server 8000
+
+ then open  http://localhost:8000/scribble-cam.html  and allow the camera.
+
+ DEPENDENCIES (the ONLY external dependency is MediaPipe Tasks-Vision)
+ ---------------------------------------------------------------------
+   JS bundle : https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs
+   WASM      : https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm
+   Model     : https://storage.googleapis.com/mediapipe-models/image_segmenter/
+               selfie_segmenter/float16/latest/selfie_segmenter.tflite
+ Everything else is hand-rolled WebGL2 / GLSL ES 3.00. No build step.
+
+ PIPELINE (ping-pong FBOs, all RGBA8)
+ ------------------------------------
+   camera+mask ─▶ [LUM]  luminance + mask, mirrored & cover-fit
+               ─▶ [BLUR] 3×3 gaussian (denoise + mask feathering)
+               ─▶ [PREP] Sobel gradient → edge tangent (gradient rotated 90°),
+                         blended toward curl noise in flat regions,
+                         orientation stored as doubled-angle (cos2θ, sin2θ)
+               ─▶ [SCRIBBLE] domain-warped directional line noise, 3 octaves,
+                         luminance→density gating, mask gating + stray lines
+               ─▶ [FINAL] black bg, bloom, grain (or luminance / mask debug)
+
+ SLIDERS
+ -------
+   Line density    global probability that a line segment is drawn
+   Line width      stroke half-width in pixels
+   Scribble scale  spatial frequency (lines per screen height, roughly)
+   Flow strength   how strongly lines snap to image edges vs. curl noise
+   Tangle/curl     amount of orientation wobble + domain warping (loopiness)
+   Contrast        luminance contrast before density mapping
+   Bright thresh   luminance at which density saturates (dense white)
+   Dark thresh     luminance below which nothing is drawn (empty black)
+   Bloom           soft glow on dense line clusters
+   Grain           per-pixel film grain
+
+ TOGGLES:  Mirror · Pause · Show mask (debug) · Animate lines · Invert mask
+ BUTTON :  Save PNG      READOUT: FPS · resolution · mask on/off
+==============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scribble-cam</title>
+<style>
+  :root{
+    --hud-bg: rgba(8,8,8,.82);
+    --hud-fg: #e6e6e6;
+    --hud-dim:#8a8a8a;
+    --hud-line:#2e2e2e;
+    --accent:#ffffff;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:#000; overflow:hidden; }
+  canvas#gl{ position:fixed; inset:0; width:100%; height:100%; display:block; background:#000; }
+
+  /* ---------- terminal / HUD panel (top-left, collapsible) ---------- */
+  #hud{
+    position:fixed; top:10px; left:10px; z-index:10;
+    width:264px; max-height:calc(100vh - 20px); overflow-y:auto;
+    font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:var(--hud-fg);
+    background:var(--hud-bg);
+    border:1px solid var(--hud-line);
+    border-radius:4px;
+    backdrop-filter: blur(4px);
+    user-select:none;
+  }
+  #hud summary{
+    list-style:none; cursor:pointer; padding:7px 10px;
+    letter-spacing:.08em; color:var(--accent);
+    border-bottom:1px solid var(--hud-line);
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  #hud summary::-webkit-details-marker{ display:none; }
+  #hud summary::after{ content:"[–]"; color:var(--hud-dim); }
+  #hud:not([open]) summary::after{ content:"[+]"; }
+  #hud:not([open]) summary{ border-bottom:none; }
+  .hud-body{ padding:8px 10px 10px; }
+  .row{ display:flex; align-items:center; gap:8px; margin:5px 0; }
+  .row label{ flex:0 0 108px; color:var(--hud-dim); white-space:nowrap; overflow:hidden; }
+  .row .val{ flex:0 0 38px; text-align:right; color:var(--hud-fg); font-variant-numeric:tabular-nums; }
+  input[type=range]{
+    flex:1; -webkit-appearance:none; appearance:none; height:2px;
+    background:#3a3a3a; outline:none; border-radius:1px; margin:0; cursor:ew-resize;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:9px; height:9px; border-radius:50%;
+    background:var(--accent); border:none; cursor:ew-resize;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:9px; height:9px; border-radius:50%; background:var(--accent); border:none;
+  }
+  input[type=range]:focus-visible{ outline:1px solid var(--accent); outline-offset:3px; }
+  .toggles{ display:grid; grid-template-columns:1fr 1fr; gap:2px 10px; margin:8px 0 4px; }
+  .toggles label{ display:flex; align-items:center; gap:6px; color:var(--hud-dim); cursor:pointer; }
+  .toggles input{ accent-color:#fff; margin:0; }
+  .hud-sep{ border:none; border-top:1px solid var(--hud-line); margin:8px -10px; }
+  button.hud-btn{
+    width:100%; padding:5px 0; margin-top:2px;
+    font:inherit; letter-spacing:.06em;
+    color:#000; background:var(--accent); border:none; border-radius:3px; cursor:pointer;
+  }
+  button.hud-btn:hover{ background:#cfcfcf; }
+  #readout{ margin-top:8px; color:var(--hud-dim); white-space:pre; font-variant-numeric:tabular-nums; }
+
+  /* ---------- fullscreen status / error overlay ---------- */
+  #status{
+    position:fixed; inset:0; z-index:20;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    font:13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:#ddd; background:rgba(0,0,0,.72); text-align:center; padding:20px;
+  }
+  #status.hidden{ display:none; }
+  #status .msg{ max-width:520px; white-space:pre-wrap; }
+  #status button{
+    font:inherit; padding:7px 18px; color:#000; background:#fff;
+    border:none; border-radius:3px; cursor:pointer;
+  }
+  /* small non-blocking banner (e.g. model failed but camera still works) */
+  #banner{
+    position:fixed; top:10px; right:10px; z-index:15; max-width:320px;
+    font:11px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    color:#ffd7d7; background:rgba(40,0,0,.85); border:1px solid #5a2a2a;
+    border-radius:4px; padding:8px 10px; display:none; white-space:pre-wrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<details id="hud" open>
+  <summary>SCRIBBLE-CAM</summary>
+  <div class="hud-body">
+    <div id="sliders"></div>
+    <hr class="hud-sep">
+    <div class="toggles" id="toggles"></div>
+    <hr class="hud-sep">
+    <button class="hud-btn" id="saveBtn">SAVE PNG</button>
+    <div id="readout">fps --  ·  --×--  ·  mask: off</div>
+  </div>
+</details>
+
+<div id="banner"></div>
+<div id="status"><div class="msg" id="statusMsg">starting…</div></div>
+
+<script type="module">
+import { ImageSegmenter, FilesetResolver } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs";
+
+/* ========================================================================
+ *  Parameters, UI wiring
+ * ===================================================================== */
+const prefersReducedMotion =
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const params = {
+  density : 1.00,  lineWidth: 0.65,  scale: 64,   flow  : 1.30,
+  tangle  : 1.00,  contrast : 1.35,  brightTh: 0.85, darkTh: 0.16,
+  bloom   : 0.25,  grain    : 0.05,
+  mirror  : true,  pause: false, showMask: false,
+  animate : !prefersReducedMotion,          // reduced-motion ⇒ no drift
+  invertMask: false,
+};
+
+const SLIDERS = [
+  // key         label              min   max   step   fmt
+  ["density",   "Line density",     0,    2,    0.01 ],
+  ["lineWidth", "Line width",       0.2,  2.5,  0.01 ],
+  ["scale",     "Scribble scale",   20,   160,  1    ],
+  ["flow",      "Flow strength",    0,    3,    0.01 ],
+  ["tangle",    "Tangle / curl",    0,    2.5,  0.01 ],
+  ["contrast",  "Contrast",         0.4,  3,    0.01 ],
+  ["brightTh",  "Bright thresh",    0,    1,    0.01 ],
+  ["darkTh",    "Dark thresh",      0,    1,    0.01 ],
+  ["bloom",     "Bloom",            0,    1,    0.01 ],
+  ["grain",     "Grain",            0,    0.3,  0.005],
+];
+const TOGGLES = [
+  ["mirror",     "Mirror"],
+  ["pause",      "Pause"],
+  ["showMask",   "Show mask"],
+  ["animate",    "Animate"],
+  ["invertMask", "Invert mask"],
+];
+
+const $ = (id) => document.getElementById(id);
+{
+  const box = $("sliders");
+  for (const [key, label, min, max, step] of SLIDERS) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const digits = step >= 1 ? 0 : 2;
+    row.innerHTML =
+      `<label for="s_${key}">${label}</label>` +
+      `<input id="s_${key}" type="range" min="${min}" max="${max}" step="${step}" value="${params[key]}">` +
+      `<span class="val" id="v_${key}">${params[key].toFixed(digits)}</span>`;
+    box.appendChild(row);
+    row.querySelector("input").addEventListener("input", (e) => {
+      params[key] = parseFloat(e.target.value);
+      $("v_" + key).textContent = params[key].toFixed(digits);
+    });
+  }
+  const tbox = $("toggles");
+  for (const [key, label] of TOGGLES) {
+    const l = document.createElement("label");
+    l.innerHTML = `<input id="t_${key}" type="checkbox" ${params[key] ? "checked" : ""}> ${label}`;
+    tbox.appendChild(l);
+    l.querySelector("input").addEventListener("change", (e) => {
+      params[key] = e.target.checked;
+    });
+  }
+}
+
+/* ---------- status helpers ---------- */
+const statusEl = $("status"), statusMsg = $("statusMsg");
+function showStatus(text, retryFn = null) {
+  statusEl.classList.remove("hidden");
+  statusMsg.textContent = text;
+  statusEl.querySelectorAll("button").forEach(b => b.remove());
+  if (retryFn) {
+    const b = document.createElement("button");
+    b.textContent = "retry";
+    b.onclick = retryFn;
+    statusEl.appendChild(b);
+  }
+}
+function hideStatus(){ statusEl.classList.add("hidden"); }
+function showBanner(text){ const b = $("banner"); b.textContent = text; b.style.display = "block"; }
+
+/* ========================================================================
+ *  WebGL2 setup
+ * ===================================================================== */
+const canvas = $("gl");
+// preserveDrawingBuffer so "Save PNG" can read the last presented frame
+const gl = canvas.getContext("webgl2", {
+  antialias: false, preserveDrawingBuffer: true, powerPreference: "high-performance",
+});
+if (!gl) {
+  showStatus("WebGL2 is not available in this browser.\nscribble-cam requires WebGL2.");
+  throw new Error("no webgl2");
+}
+
+/* ---------- tiny GL helpers ---------- */
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error("shader: " + gl.getShaderInfoLog(s) + "\n" + src);
+  return s;
+}
+function program(fsSrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("link: " + gl.getProgramInfoLog(p));
+  return p;
+}
+function makeTex(w, h) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function makeFBO(w, h) {
+  const tex = makeTex(w, h);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { fbo, tex, w, h };
+}
+// uniform setter cache
+function uniforms(prog) {
+  const cache = {};
+  return (name) => {
+    if (!(name in cache)) cache[name] = gl.getUniformLocation(prog, name);
+    return cache[name];
+  };
+}
+
+/* ========================================================================
+ *  Shaders (GLSL ES 3.00)
+ * ===================================================================== */
+const VERT = `#version 300 es
+// fullscreen "big triangle" — no vertex buffers needed
+out vec2 v_uv;
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+// shared noise toolbox, injected into several fragment shaders
+const NOISE = `
+float hash12(vec2 p){
+  p = fract(p * vec2(123.34, 345.45));
+  p += dot(p, p + 34.345);
+  return fract(p.x * p.y);
+}
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);                       // smoothstep fade
+  float a = hash12(i);
+  float b = hash12(i + vec2(1.0, 0.0));
+  float c = hash12(i + vec2(0.0, 1.0));
+  float d = hash12(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm(vec2 p){
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++){ v += a * vnoise(p); p = p * 2.03 + 11.7; a *= 0.5; }
+  return v;
+}`;
+
+/* --------------------------------------------------------------------
+ * PASS 1 — LUM: camera → luminance (R) + person mask (A-ish, stored in G)
+ *  · applies mirror + cover-fit UV transform once, so every later pass
+ *    works in plain canvas space
+ * ------------------------------------------------------------------ */
+const FS_LUM = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uCam;      // webcam frame
+uniform sampler2D uMask;     // MediaPipe person confidence (R8)
+uniform vec2  uUVScale;      // cover-fit crop
+uniform vec2  uUVOffset;
+uniform float uMirror;       // 1 = mirrored (selfie view)
+uniform float uMaskReady;    // 0 until the model produced its first mask
+uniform float uInvert;       // debug: flip mask polarity
+void main(){
+  vec2 uv = v_uv;
+  uv.x = mix(uv.x, 1.0 - uv.x, uMirror);
+  vec2 tuv = uv * uUVScale + uUVOffset;              // cover-fit crop into video
+  vec3 rgb = texture(uCam, tuv).rgb;
+  float lum = dot(rgb, vec3(0.299, 0.587, 0.114));   // Rec.601 luminance
+  float m = texture(uMask, tuv).r;
+  m = mix(m, 1.0 - m, uInvert);
+  m = mix(1.0, m, uMaskReady);                       // no mask yet → pass-through
+  outColor = vec4(lum, m, 0.0, 1.0);
+}`;
+
+/* --------------------------------------------------------------------
+ * PASS 2 — BLUR: 3×3 gaussian. Denoises luminance for the Sobel pass and
+ * feathers the hard segmentation mask edge in one go.
+ * ------------------------------------------------------------------ */
+const FS_BLUR = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+void main(){
+  vec2 acc = vec2(0.0);
+  // 3×3 gaussian  1 2 1 / 2 4 2 / 1 2 1  (÷16), built from separable
+  // weights w(x)·w(y) with w = (2 − |x|) → avoids dynamic array indexing
+  for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++){
+      float w = (2.0 - abs(float(x))) * (2.0 - abs(float(y)));
+      acc += texture(uTex, v_uv + vec2(float(x), float(y)) * uTexel * 1.5).rg * w;
+    }
+  outColor = vec4(acc / 16.0, 0.0, 1.0);
+}`;
+
+/* --------------------------------------------------------------------
+ * PASS 3 — PREP: build the flow field.
+ *  · Sobel gradient of luminance → edge magnitude + direction
+ *  · rotate gradient 90°  (gx,gy) → (-gy,gx)  so lines run ALONG edges
+ *    (tangent to iso-brightness contours) instead of across them
+ *  · in flat regions blend toward a curl-noise field
+ *    ψ = fbm,  curl = (∂ψ/∂y, −∂ψ/∂x)  — divergence-free ⇒ organic meander
+ *  · orientation is stored as the DOUBLED angle (cos2θ, sin2θ): a line
+ *    direction is the same at θ and θ+π, and the doubled-angle vector is
+ *    continuous under that flip, so linear texture filtering never
+ *    averages two equivalent-but-opposite vectors to zero.
+ * Output: R = luminance, G = cos2θ*0.5+0.5, B = sin2θ*0.5+0.5, A = mask
+ * ------------------------------------------------------------------ */
+const FS_PREP = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uTex;      // blurred (lum, mask)
+uniform vec2  uTexel;
+uniform float uFlow;         // edge-follow strength slider
+${NOISE}
+float L(vec2 o){ return texture(uTex, v_uv + o * uTexel).r; }
+vec2 curlNoise(vec2 p){
+  // curl of an fbm potential via central differences
+  float e = 0.02;
+  float dpdy = fbm(p + vec2(0.0, e)) - fbm(p - vec2(0.0, e));
+  float dpdx = fbm(p + vec2(e, 0.0)) - fbm(p - vec2(e, 0.0));
+  return vec2(dpdy, -dpdx);
+}
+void main(){
+  // --- Sobel ---
+  float tl=L(vec2(-1., 1.)), t=L(vec2(0., 1.)), tr=L(vec2(1., 1.));
+  float ml=L(vec2(-1., 0.)),                     mr=L(vec2(1., 0.));
+  float bl=L(vec2(-1.,-1.)), b=L(vec2(0.,-1.)), br=L(vec2(1.,-1.));
+  float gx = (tr + 2.0*mr + br) - (tl + 2.0*ml + bl);
+  float gy = (tl + 2.0*t  + tr) - (bl + 2.0*b  + br);
+  float mag = length(vec2(gx, gy));
+  // --- 90° rotation: gradient → edge tangent ---
+  vec2 tang = normalize(vec2(-gy, gx) + 1e-6);
+  // --- curl-noise meander for flat regions ---
+  vec2 curl = normalize(curlNoise(v_uv * 3.0) + 1e-6);
+  // --- blend: strong edges follow the form, flats wander ---
+  float w = clamp(smoothstep(0.02, 0.22, mag) * uFlow, 0.0, 1.0);
+  vec2 dir = normalize(mix(curl, tang, w) + 1e-6);
+  // --- doubled-angle encoding ---
+  float th = atan(dir.y, dir.x);
+  vec4 src = texture(uTex, v_uv);
+  outColor = vec4(src.r, cos(2.0*th)*0.5+0.5, sin(2.0*th)*0.5+0.5, src.g);
+}`;
+
+/* --------------------------------------------------------------------
+ * PASS 4 — SCRIBBLE (the core look).
+ * For each of 3 octaves:
+ *  · take the local flow angle θ, wobble it with fbm × Tangle so strokes
+ *    tilt and cross like hand scribbling
+ *  · build a stripe phase  = ⟨position, normal(θ)⟩ · scale  and DOMAIN-WARP
+ *    it with fbm — this bends the parallel stripes into loops and hooks,
+ *    which is what makes it read as scribble instead of straight hatching
+ *  · a thin anti-aliased line lives at every integer phase; fwidth() gives
+ *    pixel-exact AA and lets "Line width" be specified in pixels
+ *  · LUMINANCE → DENSITY: each line SEGMENT (cell in phase × along-line
+ *    coords) rolls a hash; it is drawn only if hash < density(luminance).
+ *    smoothstep(darkTh, brightTh, L) ⇒ shadows empty black, highlights a
+ *    dense white tangle — brightness is encoded purely by line density.
+ *  · MASK GATING: strokes only where person-confidence is high; a thin
+ *    feathered band at the silhouette lets a random few lines overshoot
+ *    for the hand-drawn stray-line feel.
+ * ------------------------------------------------------------------ */
+const FS_SCRIBBLE = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uPrep;
+uniform vec2  uRes;
+uniform float uTime, uAnimate;
+uniform float uDensity, uLineWidth, uScale, uTangle;
+uniform float uContrast, uBrightTh, uDarkTh, uMaskOn;
+${NOISE}
+void main(){
+  vec4 P = texture(uPrep, v_uv);
+  float lum  = P.r;
+  float mask = P.a;
+  // decode doubled-angle orientation
+  float theta = 0.5 * atan(P.b * 2.0 - 1.0, P.g * 2.0 - 1.0);
+
+  // ---- luminance → density mapping ----
+  float Lc   = clamp((lum - 0.5) * uContrast + 0.5, 0.0, 1.0);
+  float dens = smoothstep(uDarkTh, uBrightTh, Lc);
+  // edge boost: keep brows / nose / lips legible even at mid luminance
+  vec2  g    = vec2(dFdx(lum), dFdy(lum));
+  float edge = smoothstep(0.008, 0.05, length(g));
+  dens = max(dens, edge * 0.8 * smoothstep(0.04, 0.18, Lc));
+
+  // aspect-corrected coordinates so line spacing is isotropic
+  vec2 auv = v_uv * vec2(uRes.x / uRes.y, 1.0);
+  float t = uTime * uAnimate;          // subtle drift when "Animate" is on
+
+  float acc = 0.0;
+  for (int i = 0; i < 3; i++){
+    float fi = float(i);
+    float sc = uScale * (1.0 + fi * 0.8);                 // octave scale
+
+    // per-octave orientation wobble (tangle) + slight fixed rotation offset
+    float wob = (fbm(auv * sc * 0.30 + fi * 17.1 + t * 0.15) - 0.5) * uTangle * 2.2;
+    float a   = theta + wob + fi * 0.35;
+    vec2 dirO = vec2(cos(a), sin(a));                     // along the line
+    vec2 nrm  = vec2(-dirO.y, dirO.x);                    // across the line
+
+    // domain warp: advect the stripe phase through fbm → loops, not hatching
+    float warp  = (fbm(auv * sc * 0.09 + fi * 7.7 + t * 0.23) - 0.5)
+                  * (2.0 + uTangle * 5.0);
+    float phase = dot(auv, nrm) * sc + warp + fi * 0.618;
+
+    // along-line coordinate → break lines into segments for density gating
+    float s   = dot(auv, dirO) * sc * 0.35
+              + (fbm(auv * sc * 0.20 + fi * 3.3) - 0.5) * 2.0;
+    vec2 cell = vec2(floor(phase), floor(s));
+    float r1 = hash12(cell + fi * 31.7);        // does this segment exist?
+    float r2 = hash12(cell + fi * 57.3 + 11.0); // its opacity variation
+
+    float p  = dens * uDensity * (1.0 - fi * 0.18);
+    float on = step(r1, p);
+
+    // thin AA line centered on each integer phase
+    float f  = abs(fract(phase) - 0.5);
+    float wpx = fwidth(phase);                  // phase change per pixel
+    float lw  = uLineWidth * wpx;               // half-width in pixels
+    float line = (1.0 - smoothstep(lw, lw + wpx, f)) * on * (0.55 + 0.45 * r2);
+
+    // mask gating: solid inside; stray segments allowed in the rim band
+    float gate = smoothstep(0.50, 0.65, mask);
+    float rim  = smoothstep(0.12, 0.40, mask) - gate;
+    float stray = rim * step(0.72, hash12(cell + fi * 91.3 + 5.0));
+    line *= mix(1.0, clamp(gate + stray, 0.0, 1.0), uMaskOn);
+
+    acc = acc + line * (1.0 - acc);             // screen blend, stays ≤ 1
+  }
+  outColor = vec4(vec3(acc), 1.0);
+}`;
+
+/* --------------------------------------------------------------------
+ * PASS 5 — FINAL: composite over pure black; optional bloom + grain.
+ *  mode 0 = plain luminance (model still loading)
+ *  mode 1 = scribble
+ *  mode 2 = mask debug
+ * ------------------------------------------------------------------ */
+const FS_FINAL = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uScrib;
+uniform sampler2D uPrep;
+uniform vec2  uTexel;
+uniform float uBloom, uGrain, uTime;
+uniform int   uMode;
+${NOISE}
+void main(){
+  float c = texture(uScrib, v_uv).r;
+  // cheap bloom: 8-tap ring blur, squared so only dense clusters glow
+  if (uBloom > 0.001){
+    float b = 0.0;
+    for (int i = 0; i < 8; i++){
+      float a = 6.2831853 * float(i) / 8.0;
+      b += texture(uScrib, v_uv + vec2(cos(a), sin(a)) * uTexel * 2.5).r;
+    }
+    b /= 8.0;
+    c += b * b * uBloom;
+  }
+  if (uMode == 0) c = texture(uPrep, v_uv).r;   // luminance preview
+  if (uMode == 2) c = texture(uPrep, v_uv).a;   // mask debug
+  // subtle grain
+  c += (hash12(v_uv * 931.7 + fract(uTime * 0.61) * 71.3) - 0.5) * uGrain;
+  outColor = vec4(vec3(clamp(c, 0.0, 1.0)), 1.0);
+}`;
+
+/* ---------- build programs ---------- */
+let progLum, progBlur, progPrep, progScrib, progFinal;
+let uLum, uBlur, uPrep, uScrib, uFinal;
+try {
+  progLum   = program(FS_LUM);      uLum   = uniforms(progLum);
+  progBlur  = program(FS_BLUR);     uBlur  = uniforms(progBlur);
+  progPrep  = program(FS_PREP);     uPrep  = uniforms(progPrep);
+  progScrib = program(FS_SCRIBBLE); uScrib = uniforms(progScrib);
+  progFinal = program(FS_FINAL);    uFinal = uniforms(progFinal);
+} catch (e) {
+  showStatus("Shader compile/link failed:\n" + e.message.slice(0, 400));
+  throw e;
+}
+const vao = gl.createVertexArray(); // empty VAO for the vertex-less triangle
+
+/* ---------- textures for camera + mask ---------- */
+const camTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, camTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+const maskTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, maskTex);
+// start with a 1×1 "all person" texel so sampling is always defined
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE,
+              new Uint8Array([255]));
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+/* ---------- FBOs (rebuilt on resize) ---------- */
+let fboLum, fboBlur, fboPrep, fboScrib;
+function rebuildFBOs() {
+  for (const f of [fboLum, fboBlur, fboPrep, fboScrib])
+    if (f) { gl.deleteFramebuffer(f.fbo); gl.deleteTexture(f.tex); }
+  const w = canvas.width, h = canvas.height;
+  fboLum   = makeFBO(w, h);
+  fboBlur  = makeFBO(w, h);
+  fboPrep  = makeFBO(w, h);
+  fboScrib = makeFBO(w, h);
+}
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);   // cap at 2
+  const w = Math.max(2, Math.round(canvas.clientWidth  * dpr));
+  const h = Math.max(2, Math.round(canvas.clientHeight * dpr));
+  if (w !== canvas.width || h !== canvas.height) {
+    canvas.width = w; canvas.height = h;
+    rebuildFBOs();
+  }
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ========================================================================
+ *  Camera
+ * ===================================================================== */
+const video = document.createElement("video");
+video.playsInline = true; video.muted = true;
+let stream = null, camReady = false;
+
+async function startCamera() {
+  showStatus("requesting camera…");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    camReady = true;
+    hideStatus();
+    if (!segmenter && !modelFailed) showStatus("loading model…");
+    startSegLoop();
+  } catch (err) {
+    camReady = false;
+    if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
+      showStatus("camera permission denied.\nAllow camera access, then retry.", startCamera);
+    } else if (err && (err.name === "NotFoundError" || err.name === "OverconstrainedError")) {
+      showStatus("no camera found on this device.", startCamera);
+    } else {
+      showStatus("camera error: " + (err && err.message || err), startCamera);
+    }
+  }
+}
+// clean teardown
+window.addEventListener("pagehide", () => {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (segmenter) try { segmenter.close(); } catch (_) {}
+});
+
+/* ========================================================================
+ *  MediaPipe person segmentation (VIDEO mode)
+ * ===================================================================== */
+let segmenter = null, modelFailed = false, maskReady = false;
+let lastSegTs = -1;
+
+async function loadModel() {
+  try {
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
+    segmenter = await ImageSegmenter.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      outputConfidenceMasks: true,
+      outputCategoryMask: false,
+    });
+    if (camReady) hideStatus();
+  } catch (err) {
+    modelFailed = true;
+    hideStatus();
+    showBanner("segmentation model failed to load:\n" +
+      (err && err.message || err) +
+      "\nrendering ungated scribble (mask: off).");
+  }
+}
+
+function uploadMask(data, w, h) {
+  gl.bindTexture(gl.TEXTURE_2D, maskTex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);   // MediaPipe rows are top-first
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+  maskReady = true;
+}
+
+function runSegmentation() {
+  if (!segmenter || !camReady || video.readyState < 2) return;
+  // timestamps must be strictly increasing for VIDEO mode
+  let ts = performance.now();
+  if (ts <= lastSegTs) ts = lastSegTs + 0.1;
+  lastSegTs = ts;
+  try {
+    // callback form: masks are only valid inside the callback and are
+    // freed automatically afterwards — copy out what we need.
+    segmenter.segmentForVideo(video, ts, (result) => {
+      const masks = result.confidenceMasks;
+      if (!masks || !masks.length) return;
+      // selfie_segmenter: with 2 confidence masks, index 1 = "person";
+      // with 1 mask, it is the foreground confidence directly.
+      const mask = masks.length > 1 ? masks[1] : masks[0];
+      uploadMask(mask.getAsUint8Array(), mask.width, mask.height);
+    });
+  } catch (_) { /* if a frame fails, keep reusing the latest mask */ }
+}
+
+// Segment on real video frames (decoupled from the render loop). If the
+// mask lags, the render loop simply keeps reusing the latest uploaded mask.
+function startSegLoop() {
+  if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+    const tick = () => {
+      if (!params.pause) runSegmentation();
+      video.requestVideoFrameCallback(tick);
+    };
+    video.requestVideoFrameCallback(tick);
+  } else {
+    let lastT = -1;
+    const tick = () => {
+      if (!params.pause && video.currentTime !== lastT) {
+        lastT = video.currentTime;
+        runSegmentation();
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+}
+
+/* ========================================================================
+ *  Render loop
+ * ===================================================================== */
+let timeMs = 0, lastNow = performance.now();
+let fpsEMA = 0, lastReadout = 0;
+
+// cover-fit crop: scale/offset that crops the video to the canvas aspect
+function coverFit() {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const va = vw / vh, ca = canvas.width / canvas.height;
+  let sx = 1, sy = 1;
+  if (va > ca) sx = ca / va;      // video wider  → crop left/right
+  else         sy = va / ca;      // video taller → crop top/bottom
+  return [sx, sy, (1 - sx) / 2, (1 - sy) / 2];
+}
+
+function drawPass(prog, fbo, bind) {
+  gl.useProgram(prog);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo ? fbo.fbo : null);
+  gl.viewport(0, 0, fbo ? fbo.w : canvas.width, fbo ? fbo.h : canvas.height);
+  bind();
+  gl.bindVertexArray(vao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+function bindTexUnit(unit, tex, loc) {
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(loc, unit);
+}
+
+function frame(now) {
+  const dt = now - lastNow; lastNow = now;
+  if (!params.pause) timeMs += dt;
+  fpsEMA = fpsEMA ? fpsEMA * 0.9 + (1000 / Math.max(dt, 1)) * 0.1 : 1000 / Math.max(dt, 1);
+
+  resize();
+
+  if (camReady && video.readyState >= 2) {
+    // upload the newest camera frame (skip while paused → frozen image)
+    if (!params.pause) {
+      gl.bindTexture(gl.TEXTURE_2D, camTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    }
+
+    const [sx, sy, ox, oy] = coverFit();
+    const texel = [1 / canvas.width, 1 / canvas.height];
+    const t = timeMs / 1000;
+    const maskUsable = maskReady && !modelFailed;
+
+    // ---- 1. LUM ----
+    drawPass(progLum, fboLum, () => {
+      bindTexUnit(0, camTex,  uLum("uCam"));
+      bindTexUnit(1, maskTex, uLum("uMask"));
+      gl.uniform2f(uLum("uUVScale"), sx, sy);
+      gl.uniform2f(uLum("uUVOffset"), ox, oy);
+      gl.uniform1f(uLum("uMirror"), params.mirror ? 1 : 0);
+      gl.uniform1f(uLum("uMaskReady"), maskUsable ? 1 : 0);
+      gl.uniform1f(uLum("uInvert"), params.invertMask ? 1 : 0);
+    });
+    // ---- 2. BLUR ----
+    drawPass(progBlur, fboBlur, () => {
+      bindTexUnit(0, fboLum.tex, uBlur("uTex"));
+      gl.uniform2f(uBlur("uTexel"), texel[0], texel[1]);
+    });
+    // ---- 3. PREP (Sobel + flow field) ----
+    drawPass(progPrep, fboPrep, () => {
+      bindTexUnit(0, fboBlur.tex, uPrep("uTex"));
+      gl.uniform2f(uPrep("uTexel"), texel[0], texel[1]);
+      gl.uniform1f(uPrep("uFlow"), params.flow);
+    });
+    // ---- 4. SCRIBBLE ----
+    drawPass(progScrib, fboScrib, () => {
+      bindTexUnit(0, fboPrep.tex, uScrib("uPrep"));
+      gl.uniform2f(uScrib("uRes"), canvas.width, canvas.height);
+      gl.uniform1f(uScrib("uTime"), t);
+      gl.uniform1f(uScrib("uAnimate"), params.animate ? 1 : 0);
+      gl.uniform1f(uScrib("uDensity"), params.density);
+      gl.uniform1f(uScrib("uLineWidth"), params.lineWidth);
+      gl.uniform1f(uScrib("uScale"), params.scale);
+      gl.uniform1f(uScrib("uTangle"), params.tangle);
+      gl.uniform1f(uScrib("uContrast"), params.contrast);
+      gl.uniform1f(uScrib("uBrightTh"), params.brightTh);
+      gl.uniform1f(uScrib("uDarkTh"), params.darkTh);
+      gl.uniform1f(uScrib("uMaskOn"), maskUsable ? 1 : 0);
+    });
+    // ---- 5. FINAL → screen ----
+    // mode 0 = luminance preview while the model loads, 1 = scribble, 2 = mask
+    const mode = params.showMask ? 2 : ((maskUsable || modelFailed) ? 1 : 0);
+    drawPass(progFinal, null, () => {
+      bindTexUnit(0, fboScrib.tex, uFinal("uScrib"));
+      bindTexUnit(1, fboPrep.tex,  uFinal("uPrep"));
+      gl.uniform2f(uFinal("uTexel"), texel[0], texel[1]);
+      gl.uniform1f(uFinal("uBloom"), params.bloom);
+      gl.uniform1f(uFinal("uGrain"), params.grain);
+      gl.uniform1f(uFinal("uTime"), params.animate ? t : 0);
+      gl.uniform1i(uFinal("uMode"), mode);
+    });
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+
+  // readout ~2 Hz
+  if (now - lastReadout > 500) {
+    lastReadout = now;
+    $("readout").textContent =
+      `fps ${fpsEMA.toFixed(0).padStart(3)}  ·  ${canvas.width}×${canvas.height}` +
+      `  ·  mask: ${maskReady && !modelFailed ? "on" : "off"}`;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- Save PNG (preserveDrawingBuffer keeps the last frame) ---------- */
+$("saveBtn").addEventListener("click", () => {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `scribble-cam-${Date.now()}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, "image/png");
+});
+
+/* ---------- go ---------- */
+startCamera();
+loadModel();
+</script>
+</body>
+</html>
