@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<!--
+==============================================================================
+ oneline-cam.html — webcam → TRUE continuous-line drawing (WebGL2)
+==============================================================================
+
+ HOW TO RUN
+ ----------
+ Camera + ES-module imports need a secure context. From this folder:
+
+     python3 -m http.server 8000
+
+ then open  http://localhost:8000/oneline-cam.html  and allow the camera.
+
+ DEPENDENCIES (the ONLY external dependency is MediaPipe Tasks-Vision)
+ ---------------------------------------------------------------------
+   JS bundle : https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs
+   WASM      : https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm
+   Model     : https://storage.googleapis.com/mediapipe-models/image_segmenter/
+               selfie_segmenter/float16/latest/selfie_segmenter.tflite
+ Everything else is plain WebGL2 + JS. No build step. Renders REAL polylines
+ (gl.LINE_STRIP) — not a shader texture that merely looks like lines.
+
+ ALGORITHM OUTLINE (per frame)
+ -----------------------------
+ 1. IMPORTANCE FIELD (CPU): video → ~160-wide offscreen 2D canvas →
+    getImageData luminance; combined with the MediaPipe person mask:
+        importance = pow(luma, Gamma) * mask,   0 below Dark threshold
+    plus a gradient-magnitude field for edge attraction. Preallocated
+    typed arrays, zero per-frame allocation.
+ 2. PERSISTENT PARTICLES: a FIXED pool of P points. Each frame every point
+    does a stochastic hill-climb (sample a few random offsets, move toward
+    the best importance, clamped step + tiny jitter). Points stuck in
+    near-zero importance respawn at a random bright cell. The cloud evolves
+    smoothly — it is never resampled from scratch, so no strobing.
+ 3. PATH LINKING: all points are chained into K polylines by GREEDY
+    NEAREST-NEIGHBOR over a uniform spatial grid (expanding ring search,
+    ~O(P)). Points are visited in Morton (Z-curve) cell order so relinks are
+    deterministic. Runs every "Relink rate" frames; in between, the SAME
+    visit order is re-evaluated at the particles' new positions, so the
+    stroke deforms continuously instead of reshuffling.
+ 4. SMOOTHING: 0–3 iterations of Chaikin corner cutting turn the jagged NN
+    zigzag into loopy hand-drawn curls.
+ 5. DRAW: vertices streamed into one dynamic VBO (bufferSubData), each strip
+    drawn twice as LINE_STRIP with a sub-pixel offset (soft ~1px ink),
+    additively into a PERSISTENCE FBO that fades a few % per frame — the
+    moving line leaves an afterimage that builds the dense tangled portrait.
+    Final composite adds an optional cheap glow. Pure black background.
+
+ SLIDERS
+ -------
+   Points          size of the particle pool (500–6000)
+   Line count      number of unbroken polylines K (1 = one single stroke)
+   Smoothing       Chaikin iterations (0–3)
+   Dark thresh     luminance below which importance = 0 (shadows stay empty)
+   Gamma           density curve: higher ⇒ lines concentrate in highlights
+   Step size       hill-climb step per frame (field pixels)
+   Jitter          random wander (also lets loops stray past the silhouette)
+   Persistence     afterimage keep-factor per frame (0 = none, 0.98 = long)
+   Glow            soft bloom of the accumulated line buffer
+   Relink rate     rebuild the path every N frames (reuse order in between)
+
+ TOGGLES: Mirror · Pause · Show mask (debug) · Show points (debug dots)
+ BUTTON : Save PNG    READOUT: FPS · points · path length (px) · model status
+==============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oneline-cam</title>
+<style>
+  :root{
+    --hud-bg: rgba(8,8,8,.82);
+    --hud-fg: #e6e6e6;
+    --hud-dim:#8a8a8a;
+    --hud-line:#2e2e2e;
+    --accent:#ffffff;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:#000; overflow:hidden; }
+  canvas#gl{ position:fixed; inset:0; width:100%; height:100%; display:block; background:#000; }
+
+  /* ---------- terminal / HUD panel (top-left, collapsible) ---------- */
+  #hud{
+    position:fixed; top:10px; left:10px; z-index:10;
+    width:268px; max-height:calc(100vh - 20px); overflow-y:auto;
+    font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:var(--hud-fg); background:var(--hud-bg);
+    border:1px solid var(--hud-line); border-radius:4px;
+    backdrop-filter: blur(4px); user-select:none;
+  }
+  #hud summary{
+    list-style:none; cursor:pointer; padding:7px 10px; letter-spacing:.08em;
+    color:var(--accent); border-bottom:1px solid var(--hud-line);
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  #hud summary::-webkit-details-marker{ display:none; }
+  #hud summary::after{ content:"[–]"; color:var(--hud-dim); }
+  #hud:not([open]) summary::after{ content:"[+]"; }
+  #hud:not([open]) summary{ border-bottom:none; }
+  .hud-body{ padding:8px 10px 10px; }
+  .row{ display:flex; align-items:center; gap:8px; margin:5px 0; }
+  .row label{ flex:0 0 104px; color:var(--hud-dim); white-space:nowrap; overflow:hidden; }
+  .row .val{ flex:0 0 40px; text-align:right; color:var(--hud-fg); font-variant-numeric:tabular-nums; }
+  input[type=range]{
+    flex:1; -webkit-appearance:none; appearance:none; height:2px;
+    background:#3a3a3a; outline:none; border-radius:1px; margin:0; cursor:ew-resize;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:9px; height:9px; border-radius:50%;
+    background:var(--accent); border:none; cursor:ew-resize;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:9px; height:9px; border-radius:50%; background:var(--accent); border:none;
+  }
+  input[type=range]:focus-visible{ outline:1px solid var(--accent); outline-offset:3px; }
+  .toggles{ display:grid; grid-template-columns:1fr 1fr; gap:2px 10px; margin:8px 0 4px; }
+  .toggles label{ display:flex; align-items:center; gap:6px; color:var(--hud-dim); cursor:pointer; }
+  .toggles input{ accent-color:#fff; margin:0; }
+  .hud-sep{ border:none; border-top:1px solid var(--hud-line); margin:8px -10px; }
+  button.hud-btn{
+    width:100%; padding:5px 0; margin-top:2px; font:inherit; letter-spacing:.06em;
+    color:#000; background:var(--accent); border:none; border-radius:3px; cursor:pointer;
+  }
+  button.hud-btn:hover{ background:#cfcfcf; }
+  #readout{ margin-top:8px; color:var(--hud-dim); white-space:pre; font-variant-numeric:tabular-nums; }
+
+  /* ---------- fullscreen status / error overlay ---------- */
+  #status{
+    position:fixed; inset:0; z-index:20;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    font:13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:#ddd; background:rgba(0,0,0,.72); text-align:center; padding:20px;
+  }
+  #status.hidden{ display:none; }
+  #status .msg{ max-width:520px; white-space:pre-wrap; }
+  #status button{
+    font:inherit; padding:7px 18px; color:#000; background:#fff;
+    border:none; border-radius:3px; cursor:pointer;
+  }
+  #banner{
+    position:fixed; top:10px; right:10px; z-index:15; max-width:320px;
+    font:11px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    color:#ffd7d7; background:rgba(40,0,0,.85); border:1px solid #5a2a2a;
+    border-radius:4px; padding:8px 10px; display:none; white-space:pre-wrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<details id="hud" open>
+  <summary>ONELINE-CAM</summary>
+  <div class="hud-body">
+    <div id="sliders"></div>
+    <hr class="hud-sep">
+    <div class="toggles" id="toggles"></div>
+    <hr class="hud-sep">
+    <button class="hud-btn" id="saveBtn">SAVE PNG</button>
+    <div id="readout">fps --  pts --
+path -- px  ·  model: --</div>
+  </div>
+</details>
+
+<div id="banner"></div>
+<div id="status"><div class="msg" id="statusMsg">starting…</div></div>
+
+<script type="module">
+import { ImageSegmenter, FilesetResolver } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs";
+
+/* ========================================================================
+ *  Parameters + UI
+ * ===================================================================== */
+const prefersReducedMotion =
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const params = {
+  points: 2500, lineCount: 1, smoothing: 2,
+  darkTh: 0.12, gamma: 1.8, step: 1.0, jitter: 0.35,
+  persistence: 0.90, glow: 0.25, relink: 2,
+  mirror: true,
+  pause: prefersReducedMotion,     // reduced-motion ⇒ particle motion paused
+  showMask: false, showPoints: false,
+};
+
+const SLIDERS = [
+  // key          label            min   max   step
+  ["points",     "Points",         500,  6000, 50  ],
+  ["lineCount",  "Line count",     1,    5,    1   ],
+  ["smoothing",  "Smoothing",      0,    3,    1   ],
+  ["darkTh",     "Dark thresh",    0,    0.6,  0.01],
+  ["gamma",      "Gamma",          0.5,  4,    0.05],
+  ["step",       "Step size",      0.2,  3,    0.05],
+  ["jitter",     "Jitter",         0,    2,    0.05],
+  ["persistence","Persistence",    0,    0.98, 0.01],
+  ["glow",       "Glow",           0,    1,    0.01],
+  ["relink",     "Relink rate",    1,    10,   1   ],
+];
+const TOGGLES = [
+  ["mirror",    "Mirror"],
+  ["pause",     "Pause"],
+  ["showMask",  "Show mask"],
+  ["showPoints","Show points"],
+];
+
+const $ = (id) => document.getElementById(id);
+{
+  const box = $("sliders");
+  for (const [key, label, min, max, step] of SLIDERS) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const digits = step >= 1 ? 0 : 2;
+    row.innerHTML =
+      `<label for="s_${key}">${label}</label>` +
+      `<input id="s_${key}" type="range" min="${min}" max="${max}" step="${step}" value="${params[key]}">` +
+      `<span class="val" id="v_${key}">${params[key].toFixed(digits)}</span>`;
+    box.appendChild(row);
+    row.querySelector("input").addEventListener("input", (e) => {
+      params[key] = parseFloat(e.target.value);
+      $("v_" + key).textContent = params[key].toFixed(digits);
+      if (key === "points" || key === "lineCount") onPoolChanged();
+      if (key === "gamma") rebuildGammaLUT();
+    });
+  }
+  const tbox = $("toggles");
+  for (const [key, label] of TOGGLES) {
+    const l = document.createElement("label");
+    l.innerHTML = `<input id="t_${key}" type="checkbox" ${params[key] ? "checked" : ""}> ${label}`;
+    tbox.appendChild(l);
+    l.querySelector("input").addEventListener("change", (e) => { params[key] = e.target.checked; });
+  }
+}
+
+/* ---------- status helpers ---------- */
+const statusEl = $("status"), statusMsg = $("statusMsg");
+function showStatus(text, retryFn = null) {
+  statusEl.classList.remove("hidden");
+  statusMsg.textContent = text;
+  statusEl.querySelectorAll("button").forEach(b => b.remove());
+  if (retryFn) {
+    const b = document.createElement("button");
+    b.textContent = "retry"; b.onclick = retryFn;
+    statusEl.appendChild(b);
+  }
+}
+function hideStatus(){ statusEl.classList.add("hidden"); }
+function showBanner(t){ const b = $("banner"); b.textContent = t; b.style.display = "block"; }
+
+/* ========================================================================
+ *  WebGL2 setup
+ * ===================================================================== */
+const canvas = $("gl");
+const gl = canvas.getContext("webgl2", {
+  antialias: false, preserveDrawingBuffer: true, powerPreference: "high-performance",
+});
+if (!gl) {
+  showStatus("WebGL2 is not available in this browser.\noneline-cam requires WebGL2.");
+  throw new Error("no webgl2");
+}
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error("shader: " + gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("link: " + gl.getProgramInfoLog(p));
+  return p;
+}
+function uniforms(prog) {
+  const cache = {};
+  return (n) => (n in cache ? cache[n] : (cache[n] = gl.getUniformLocation(prog, n)));
+}
+
+/* ---------- shaders ---------- */
+// fullscreen "big triangle" — no vertex buffers
+const VERT_QUAD = `#version 300 es
+out vec2 v_uv;
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+// solid color quad — used for the persistence fade (multiplicative via alpha
+// blending, then a tiny constant subtract so 8-bit residue reaches true black)
+const FS_FADE = `#version 300 es
+precision highp float;
+uniform vec4 uColor; out vec4 outColor;
+void main(){ outColor = uColor; }`;
+
+// polyline / point renderer. Positions arrive normalized to [0,1]² in field
+// space (y down). Per-vertex hash from gl_VertexID varies alpha slightly so
+// strokes feel inked rather than vector-perfect.
+const VS_LINE = `#version 300 es
+layout(location = 0) in vec2 aPos;
+uniform vec2  uRes;
+uniform vec2  uOffsetPx;   // sub-pixel offset for the soft double-draw
+uniform float uPointSize;
+out float v_h;
+void main(){
+  v_h = fract(sin(float(gl_VertexID) * 12.9898) * 43758.5453);
+  vec2 clip = vec2(aPos.x, 1.0 - aPos.y) * 2.0 - 1.0;
+  clip += uOffsetPx / uRes * 2.0;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  gl_PointSize = uPointSize;
+}`;
+const FS_LINE = `#version 300 es
+precision highp float;
+in float v_h;
+uniform vec4 uColor;
+out vec4 outColor;
+void main(){
+  outColor = vec4(uColor.rgb, uColor.a * (0.65 + 0.35 * v_h));
+}`;
+
+// final composite: trail buffer + glow, or camera passthrough / mask debug
+const FS_FINAL = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uTrail;   // accumulated line buffer
+uniform sampler2D uCam;     // webcam (passthrough while model loads)
+uniform sampler2D uMask;    // downsampled person mask (debug)
+uniform vec2  uTexel;
+uniform vec2  uUVScale, uUVOffset;   // cover-fit crop for the camera
+uniform float uMirror, uGlow;
+uniform int   uMode;        // 0 = camera, 1 = lines, 2 = mask
+void main(){
+  if (uMode == 0){
+    vec2 uv = v_uv; uv.x = mix(uv.x, 1.0 - uv.x, uMirror);
+    vec3 rgb = texture(uCam, uv * uUVScale + uUVOffset).rgb;
+    outColor = vec4(rgb, 1.0); return;
+  }
+  if (uMode == 2){
+    // mask is stored y-down at field resolution
+    float m = texture(uMask, vec2(v_uv.x, 1.0 - v_uv.y)).r;
+    outColor = vec4(vec3(m), 1.0); return;
+  }
+  float c = texture(uTrail, v_uv).r;
+  if (uGlow > 0.001){
+    float b = 0.0;
+    for (int i = 0; i < 8; i++){
+      float a = 6.2831853 * float(i) / 8.0;
+      b += texture(uTrail, v_uv + vec2(cos(a), sin(a)) * uTexel * 3.0).r;
+    }
+    b /= 8.0;
+    c += b * b * uGlow;
+  }
+  outColor = vec4(vec3(clamp(c, 0.0, 1.0)), 1.0);
+}`;
+
+let progFade, progLine, progFinal, uFade, uLine, uFinal;
+try {
+  progFade  = program(VERT_QUAD, FS_FADE);  uFade  = uniforms(progFade);
+  progLine  = program(VS_LINE,   FS_LINE);  uLine  = uniforms(progLine);
+  progFinal = program(VERT_QUAD, FS_FINAL); uFinal = uniforms(progFinal);
+} catch (e) {
+  showStatus("Shader compile/link failed:\n" + e.message.slice(0, 400));
+  throw e;
+}
+const quadVAO = gl.createVertexArray();
+
+/* ---------- geometry buffers ---------- */
+const MAXP = 6000;
+const MAXV = MAXP * 8 + 128;                 // Chaikin ×2³ worst case
+const vboData = new Float32Array(MAXV * 2);
+const lineVAO = gl.createVertexArray();
+const lineVBO = gl.createBuffer();
+gl.bindVertexArray(lineVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER, lineVBO);
+gl.bufferData(gl.ARRAY_BUFFER, vboData.byteLength, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+gl.bindVertexArray(null);
+
+const ptsData = new Float32Array(MAXP * 2);  // debug point cloud
+const ptsVAO = gl.createVertexArray();
+const ptsVBO = gl.createBuffer();
+gl.bindVertexArray(ptsVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER, ptsVBO);
+gl.bufferData(gl.ARRAY_BUFFER, ptsData.byteLength, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+gl.bindVertexArray(null);
+
+/* ---------- camera + mask textures ---------- */
+function texParams(){
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+const camTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, camTex); texParams();
+const maskDebugTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, maskDebugTex); texParams();
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE,
+              new Uint8Array([0]));
+
+/* ---------- persistence FBO (single buffer: fade-in-place, no feedback) ---- */
+let trail = null;
+function rebuildTrail() {
+  if (trail) { gl.deleteFramebuffer(trail.fbo); gl.deleteTexture(trail.tex); }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, canvas.width, canvas.height, 0,
+                gl.RGBA, gl.UNSIGNED_BYTE, null);
+  texParams();
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  trail = { fbo, tex };
+}
+
+/* ========================================================================
+ *  Importance field (CPU)
+ * ===================================================================== */
+const FW = 160;                       // field width (fixed); height = aspect
+let FH = 120;
+let imp, gm, luma8, maskField;        // Float32 / Uint8 field buffers
+let brightList, brightCount = 0;      // respawn candidates
+const BRIGHT_CAP = 8192;
+const off = document.createElement("canvas");
+const octx = off.getContext("2d", { willReadFrequently: true });
+
+function allocField() {
+  const n = FW * FH;
+  imp = new Float32Array(n);
+  gm = new Float32Array(n);
+  maskField = new Uint8Array(n);
+  brightList = new Int32Array(BRIGHT_CAP);
+  off.width = FW; off.height = FH;
+}
+
+// pow(luma, gamma) as a 256-entry LUT — rebuilt only when Gamma changes
+const gammaLUT = new Float32Array(256);
+function rebuildGammaLUT() {
+  for (let i = 0; i < 256; i++) gammaLUT[i] = Math.pow(i / 255, params.gamma);
+}
+rebuildGammaLUT();
+
+// cover-fit crop of the video to the canvas aspect (source rect, normalized)
+function coverFit() {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const va = vw / vh, ca = canvas.width / canvas.height;
+  let sx = 1, sy = 1;
+  if (va > ca) sx = ca / va; else sy = va / ca;
+  return [sx, sy, (1 - sx) / 2, (1 - sy) / 2];
+}
+
+/* Rebuild luminance + importance + gradient fields (runs at video rate).
+ * importance = gammaLUT[luma] * maskConfidence, zeroed below Dark threshold
+ * so shadows stay EMPTY black. maskConfidence is the raw soft confidence,
+ * slightly boosted, deliberately NOT binarized — the feathered rim plus
+ * particle jitter is what lets a few loops stray past the silhouette.     */
+function updateField() {
+  if (!camReady || video.readyState < 2) return;
+  const [sx, sy, ox, oy] = coverFit();
+  const vw = video.videoWidth, vh = video.videoHeight;
+
+  // draw the cover-cropped (and mirrored) video into the small canvas
+  octx.save();
+  if (params.mirror) { octx.translate(FW, 0); octx.scale(-1, 1); }
+  octx.drawImage(video, ox * vw, oy * vh, sx * vw, sy * vh, 0, 0, FW, FH);
+  octx.restore();
+  const rgba = octx.getImageData(0, 0, FW, FH).data;
+
+  const darkTh = params.darkTh;
+  const useMask = maskReady && !modelFailed;
+  const mArr = maskArr, mW = maskW, mH = maskH;
+  brightCount = 0;
+  let bi = 0;
+
+  for (let y = 0; y < FH; y++) {
+    const v = (y + 0.5) / FH;
+    for (let x = 0; x < FW; x++, bi++) {
+      const p = bi * 4;
+      const l8 = (rgba[p] * 299 + rgba[p + 1] * 587 + rgba[p + 2] * 114) / 1000 | 0;
+      let m = 1;
+      if (useMask) {
+        // map field pixel → video frame → mask texel (undo the mirror,
+        // reapply the same cover crop; mask spans the full video frame)
+        let u = (x + 0.5) / FW;
+        if (params.mirror) u = 1 - u;
+        const mx = Math.min(mW - 1, (ox + u * sx) * mW | 0);
+        const my = Math.min(mH - 1, (oy + v * sy) * mH | 0);
+        m = Math.min(1, (mArr[my * mW + mx] / 255) * 1.4);   // soft, feathered
+      }
+      maskField[bi] = m * 255;
+      const iv = (l8 / 255) < darkTh ? 0 : gammaLUT[l8] * m;
+      imp[bi] = iv;
+      if (iv > 0.3) {          // reservoir of respawn candidates
+        if (brightCount < BRIGHT_CAP) brightList[brightCount++] = bi;
+        else if (Math.random() < BRIGHT_CAP / (brightCount++)) 
+          brightList[(Math.random() * BRIGHT_CAP) | 0] = bi;
+      }
+    }
+  }
+  // gradient magnitude (central differences) — cheap edge-attraction field
+  // so the line hugs facial contours and the likeness sharpens
+  for (let y = 1; y < FH - 1; y++) {
+    const r = y * FW;
+    for (let x = 1; x < FW - 1; x++) {
+      const i = r + x;
+      gm[i] = Math.abs(imp[i + 1] - imp[i - 1]) + Math.abs(imp[i + FW] - imp[i - FW]);
+    }
+  }
+  fieldReady = true;
+}
+
+// bilinear sample of a field (x, y in field-pixel units)
+function sampleF(f, x, y) {
+  x = x < 0 ? 0 : (x > FW - 1.001 ? FW - 1.001 : x);
+  y = y < 0 ? 0 : (y > FH - 1.001 ? FH - 1.001 : y);
+  const xi = x | 0, yi = y | 0, fx = x - xi, fy = y - yi;
+  const i = yi * FW + xi;
+  const a = f[i], b = f[i + 1], c = f[i + FW], d = f[i + FW + 1];
+  return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+}
+
+/* ========================================================================
+ *  Persistent particle pool (temporal coherence)
+ * ===================================================================== */
+const px = new Float32Array(MAXP), py = new Float32Array(MAXP);
+const stuck = new Uint8Array(MAXP);
+let activeP = params.points;          // may drop below the slider (auto-reduce)
+let fieldReady = false;
+
+function respawn(i) {
+  const nb = Math.min(brightCount, BRIGHT_CAP);   // reservoir holds ≤ CAP entries
+  if (nb > 0) {
+    const cell = brightList[(Math.random() * nb) | 0];
+    px[i] = (cell % FW) + Math.random();
+    py[i] = (cell / FW | 0) + Math.random();
+  } else {
+    px[i] = Math.random() * FW;
+    py[i] = Math.random() * FH;
+  }
+  stuck[i] = 0;
+}
+for (let i = 0; i < MAXP; i++) { px[i] = Math.random() * FW; py[i] = Math.random() * FH; }
+
+/* Stochastic hill-climb: each particle scores its current spot and a few
+ * random nearby offsets with  score = importance + 0.5·|∇importance|
+ * (the gradient term attracts points to contours), then takes a clamped
+ * step toward the best. Tiny jitter keeps the tangle alive and lets loops
+ * overshoot the mask edge. Stuck-in-darkness points respawn somewhere
+ * bright. The pool is NEVER resampled wholesale ⇒ no strobing.           */
+function stepParticles() {
+  if (!fieldReady) return;
+  const step = params.step, jit = params.jitter;
+  const EDGE_W = 0.5, CAND = 4;
+  for (let i = 0; i < activeP; i++) {
+    let x = px[i], y = py[i];
+    let best = sampleF(imp, x, y) + EDGE_W * sampleF(gm, x, y);
+    const here = best;
+    let bx = x, by = y;
+    for (let c = 0; c < CAND; c++) {
+      const a = Math.random() * 6.2831853;
+      const r = step * (0.5 + Math.random() * 2.5);
+      const cx = x + Math.cos(a) * r, cy = y + Math.sin(a) * r;
+      const s = sampleF(imp, cx, cy) + EDGE_W * sampleF(gm, cx, cy);
+      if (s > best * 1.02) { best = s; bx = cx; by = cy; }
+    }
+    // clamped move toward the best candidate (smooth, no teleporting)
+    let dx = bx - x, dy = by - y;
+    const d = Math.hypot(dx, dy);
+    if (d > step) { dx *= step / d; dy *= step / d; }
+    x += dx + (Math.random() - 0.5) * 2 * jit;
+    y += dy + (Math.random() - 0.5) * 2 * jit;
+    x = x < 0 ? 0 : (x > FW - 1 ? FW - 1 : x);
+    y = y < 0 ? 0 : (y > FH - 1 ? FH - 1 : y);
+    px[i] = x; py[i] = y;
+    // respawn if parked in near-zero importance for a while
+    if (here < 0.02) { if (++stuck[i] > 12) respawn(i); }
+    else stuck[i] = 0;
+  }
+}
+
+/* ========================================================================
+ *  Path linking: grid-bucketed greedy nearest-neighbor (~O(P))
+ * ===================================================================== */
+const GW = 64; let GH = 48;
+let mortonCells;                        // cell indices in Z-curve order
+const cellCount = new Int32Array(64 * 128);
+const cellStart = new Int32Array(64 * 128 + 1);
+const cellCursor = new Int32Array(64 * 128);
+const cellItems = new Int32Array(MAXP);
+const cellOfPt = new Int32Array(MAXP);
+const mortonPts = new Int32Array(MAXP);
+const used = new Uint8Array(MAXP);
+const order = new Int32Array(MAXP);     // path visit order (persists!)
+const stripFirst = new Int32Array(8), stripLen = new Int32Array(8);
+let numStrips = 0, relinkDirty = true;
+
+function morton(x, y) {                 // interleave 7 bits of x and y
+  let m = 0;
+  for (let b = 0; b < 7; b++) m |= ((x >> b & 1) << (2 * b)) | ((y >> b & 1) << (2 * b + 1));
+  return m;
+}
+function rebuildMorton() {
+  GH = Math.max(8, Math.min(128, Math.round(GW * FH / FW)));
+  const cells = [];
+  for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) cells.push(y * GW + x);
+  cells.sort((a, b) => morton(a % GW, a / GW | 0) - morton(b % GW, b / GW | 0));
+  mortonCells = Int32Array.from(cells);
+}
+
+function buildGrid() {
+  const nc = GW * GH;
+  cellCount.fill(0, 0, nc);
+  const kx = GW / FW, ky = GH / FH;
+  for (let i = 0; i < activeP; i++) {
+    let cx = px[i] * kx | 0; if (cx >= GW) cx = GW - 1;
+    let cy = py[i] * ky | 0; if (cy >= GH) cy = GH - 1;
+    const c = cy * GW + cx;
+    cellOfPt[i] = c; cellCount[c]++;
+  }
+  let acc = 0;
+  for (let c = 0; c < nc; c++) { cellStart[c] = acc; cellCursor[c] = acc; acc += cellCount[c]; }
+  cellStart[nc] = acc;
+  for (let i = 0; i < activeP; i++) cellItems[cellCursor[cellOfPt[i]]++] = i;
+}
+
+// nearest UNUSED point to point i: expand square rings of grid cells around
+// its cell; once a candidate is found, scan one extra ring (a nearer point
+// can hide diagonally in ring r+1), then accept. Practically O(1) per call.
+function nearestUnused(i) {
+  const c = cellOfPt[i], cx0 = c % GW, cy0 = c / GW | 0;
+  const x0 = px[i], y0 = py[i];
+  let best = -1, bd = Infinity;
+  const scanCell = (cx, cy) => {
+    if (cx < 0 || cy < 0 || cx >= GW || cy >= GH) return;
+    const cc = cy * GW + cx, e = cellStart[cc] + cellCount[cc];
+    for (let k = cellStart[cc]; k < e; k++) {
+      const j = cellItems[k];
+      if (used[j]) continue;
+      const dx = px[j] - x0, dy = py[j] - y0, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = j; }
+    }
+  };
+  const scanRing = (r) => {
+    if (r === 0) { scanCell(cx0, cy0); return; }
+    for (let x = cx0 - r; x <= cx0 + r; x++) { scanCell(x, cy0 - r); scanCell(x, cy0 + r); }
+    for (let y = cy0 - r + 1; y <= cy0 + r - 1; y++) { scanCell(cx0 - r, y); scanCell(cx0 + r, y); }
+  };
+  const maxR = Math.max(GW, GH);
+  for (let r = 0; r <= maxR; r++) {
+    scanRing(r);
+    if (best >= 0) { scanRing(r + 1); return best; }
+  }
+  return -1;
+}
+
+/* Relink: chain every active point into K polylines. Points are consumed in
+ * Morton (Z-curve) cell order for the strip starts, which keeps the result
+ * deterministic frame-to-frame; between relinks the SAME `order` array is
+ * re-read at fresh particle positions, so the stroke deforms smoothly.    */
+function relink() {
+  buildGrid();
+  // points sorted by Morton order of their cell
+  let n = 0;
+  for (let m = 0; m < mortonCells.length; m++) {
+    const c = mortonCells[m], e = cellStart[c] + cellCount[c];
+    for (let k = cellStart[c]; k < e; k++) mortonPts[n++] = cellItems[k];
+  }
+  used.fill(0, 0, activeP);
+  const K = params.lineCount | 0;
+  let mp = 0, out = 0, remaining = activeP;
+  numStrips = 0;
+  for (let s = 0; s < K && remaining > 0; s++) {
+    const target = Math.ceil(remaining / (K - s));
+    while (mp < n && used[mortonPts[mp]]) mp++;
+    if (mp >= n) break;
+    let cur = mortonPts[mp];
+    used[cur] = 1;
+    stripFirst[s] = out; order[out++] = cur;
+    let len = 1;
+    while (len < target) {
+      const nxt = nearestUnused(cur);
+      if (nxt < 0) break;
+      used[nxt] = 1; order[out++] = nxt; cur = nxt; len++;
+    }
+    stripLen[s] = len; remaining -= len; numStrips++;
+  }
+  relinkDirty = false;
+}
+
+/* ========================================================================
+ *  Chaikin corner cutting — turns the NN zigzag into loopy curls.
+ *  Each pass replaces every segment with its 1/4 and 3/4 points (endpoints
+ *  preserved), roughly doubling the vertex count and rounding every corner.
+ * ===================================================================== */
+const chaikA = new Float32Array(MAXV * 2);
+const chaikB = new Float32Array(MAXV * 2);
+function chaikin(buf, n, iters) {
+  let src = buf, dst = (buf === chaikA ? chaikB : chaikA), cnt = n;
+  for (let it = 0; it < iters && cnt >= 3; it++) {
+    let m = 0;
+    dst[0] = src[0]; dst[1] = src[1]; m = 1;                 // keep first
+    for (let i = 0; i < cnt - 1; i++) {
+      const ax = src[i * 2], ay = src[i * 2 + 1];
+      const bx = src[i * 2 + 2], by = src[i * 2 + 3];
+      dst[m * 2]     = ax * 0.75 + bx * 0.25;
+      dst[m * 2 + 1] = ay * 0.75 + by * 0.25; m++;
+      dst[m * 2]     = ax * 0.25 + bx * 0.75;
+      dst[m * 2 + 1] = ay * 0.25 + by * 0.75; m++;
+    }
+    dst[m * 2] = src[(cnt - 1) * 2]; dst[m * 2 + 1] = src[(cnt - 1) * 2 + 1]; m++; // keep last
+    const t = src; src = dst; dst = t;                       // ping-pong
+    cnt = m;
+  }
+  return { buf: src, n: cnt };
+}
+
+/* ---- fill the VBO from the current order + particle positions ---- */
+const drawFirst = new Int32Array(8), drawCount = new Int32Array(8);
+let totalVerts = 0, pathLenPx = 0;
+function fillVertices() {
+  const iters = params.smoothing | 0;
+  let v = 0; pathLenPx = 0;
+  const cw = canvas.width, ch = canvas.height;
+  for (let s = 0; s < numStrips; s++) {
+    const n = stripLen[s], f = stripFirst[s];
+    for (let j = 0; j < n; j++) {
+      const idx = order[f + j];
+      chaikA[j * 2] = px[idx]; chaikA[j * 2 + 1] = py[idx];
+    }
+    const r = chaikin(chaikA, n, iters);
+    drawFirst[s] = v; drawCount[s] = r.n;
+    let lx = 0, ly = 0;
+    for (let j = 0; j < r.n; j++) {
+      const nx = r.buf[j * 2] / FW, ny = r.buf[j * 2 + 1] / FH;
+      vboData[v * 2] = nx; vboData[v * 2 + 1] = ny;
+      if (j > 0) pathLenPx += Math.hypot((nx - lx) * cw, (ny - ly) * ch);
+      lx = nx; ly = ny; v++;
+    }
+  }
+  totalVerts = v;
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineVBO);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, vboData.subarray(0, totalVerts * 2));
+}
+
+/* ========================================================================
+ *  Camera
+ * ===================================================================== */
+const video = document.createElement("video");
+video.playsInline = true; video.muted = true;
+let stream = null, camReady = false;
+
+async function startCamera() {
+  showStatus("requesting camera…");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    camReady = true;
+    hideStatus();
+    startVideoLoop();
+  } catch (err) {
+    camReady = false;
+    if (err && (err.name === "NotAllowedError" || err.name === "SecurityError"))
+      showStatus("camera permission denied.\nAllow camera access, then retry.", startCamera);
+    else if (err && (err.name === "NotFoundError" || err.name === "OverconstrainedError"))
+      showStatus("no camera found on this device.", startCamera);
+    else
+      showStatus("camera error: " + (err && err.message || err), startCamera);
+  }
+}
+window.addEventListener("pagehide", () => {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (segmenter) try { segmenter.close(); } catch (_) {}
+});
+
+/* ========================================================================
+ *  MediaPipe segmentation (VIDEO mode, throttled to ~30 Hz)
+ * ===================================================================== */
+let segmenter = null, modelFailed = false, maskReady = false;
+let modelStatus = "loading";
+let maskArr = null, maskW = 0, maskH = 0;
+let lastSegTs = -1, lastSegAt = 0;
+
+async function loadModel() {
+  modelStatus = "loading"; modelFailed = false;
+  try {
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
+    segmenter = await ImageSegmenter.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      outputConfidenceMasks: true,
+      outputCategoryMask: false,
+    });
+    modelStatus = "ok";
+    $("banner").style.display = "none";
+  } catch (err) {
+    modelFailed = true; modelStatus = "failed";
+    showBanner("segmentation model failed to load:\n" + (err && err.message || err) +
+               "\nrunning UNGATED (whole frame). ");
+    const b = document.createElement("button");
+    b.textContent = "retry model";
+    b.style.cssText = "margin-top:6px;font:inherit;padding:3px 10px;cursor:pointer;";
+    b.onclick = () => { $("banner").style.display = "none"; loadModel(); };
+    $("banner").appendChild(b);
+  }
+}
+
+function runSegmentation() {
+  if (!segmenter || !camReady || video.readyState < 2) return;
+  let ts = performance.now();
+  if (ts <= lastSegTs) ts = lastSegTs + 0.1;
+  lastSegTs = ts;
+  try {
+    // callback form: MPMask is only valid inside — getAsUint8Array() copies.
+    segmenter.segmentForVideo(video, ts, (result) => {
+      const masks = result.confidenceMasks;
+      if (!masks || !masks.length) return;
+      // selfie_segmenter: 2 masks ⇒ index 1 = "person"; 1 mask ⇒ foreground
+      const m = masks.length > 1 ? masks[1] : masks[0];
+      maskArr = m.getAsUint8Array(); maskW = m.width; maskH = m.height;
+      maskReady = true;
+    });
+  } catch (_) { /* reuse the latest mask */ }
+}
+
+// field update at video rate; segmentation throttled to ~30 Hz.
+// NOTE: this keeps running while "Pause" is on — pause only freezes the
+// PARTICLE MOTION (per prefers-reduced-motion), the drawing stays visible.
+function startVideoLoop() {
+  const onFrame = () => {
+    updateField();
+    const now = performance.now();
+    if (now - lastSegAt >= 33) { lastSegAt = now; runSegmentation(); }
+  };
+  if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+    const tick = () => { onFrame(); video.requestVideoFrameCallback(tick); };
+    video.requestVideoFrameCallback(tick);
+  } else {
+    let lastT = -1;
+    const tick = () => {
+      if (video.currentTime !== lastT) { lastT = video.currentTime; onFrame(); }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+}
+
+/* ========================================================================
+ *  Resize / pool changes
+ * ===================================================================== */
+function onPoolChanged() {
+  activeP = Math.min(params.points | 0, MAXP);
+  autoReduced = false;
+  relinkDirty = true;
+}
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(2, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(2, Math.round(canvas.clientHeight * dpr));
+  if (w !== canvas.width || h !== canvas.height) {
+    canvas.width = w; canvas.height = h;
+    const oldFH = FH;
+    FH = Math.max(48, Math.min(280, Math.round(FW * h / w)));
+    allocField();
+    rebuildMorton();
+    const k = FH / oldFH;
+    for (let i = 0; i < MAXP; i++) py[i] = Math.min(FH - 1, py[i] * k);
+    rebuildTrail();
+    fieldReady = false; relinkDirty = true;
+  }
+}
+window.addEventListener("resize", resize);
+allocField(); rebuildMorton(); resize();
+
+/* ========================================================================
+ *  Render loop (with 8 ms CPU budget + auto point reduction)
+ * ===================================================================== */
+let frameNo = 0, lastNow = performance.now();
+let fpsEMA = 0, cpuEMA = 0, lastReadout = 0, autoReduced = false;
+
+function frame(now) {
+  const dt = now - lastNow; lastNow = now;
+  fpsEMA = fpsEMA ? fpsEMA * 0.9 + (1000 / Math.max(dt, 1)) * 0.1 : 60;
+  resize();
+  frameNo++;
+
+  const t0 = performance.now();
+
+  if (camReady && fieldReady) {
+    if (!params.pause) stepParticles();          // pause freezes motion only
+    if (relinkDirty || numStrips === 0 ||
+        (!params.pause && frameNo % Math.max(1, params.relink | 0) === 0)) relink();
+    fillVertices();                              // re-read order at fresh positions
+  }
+  const cpuMs = performance.now() - t0;
+  cpuEMA = cpuEMA * 0.9 + cpuMs * 0.1;
+
+  // --- BUDGET: keep CPU work under ~8 ms; shrink the pool in 10% steps ---
+  if (camReady && fieldReady && !params.pause) {
+    if (cpuEMA > 8 && activeP > 500) {
+      activeP = Math.max(500, Math.round(activeP * 0.9));
+      autoReduced = true; relinkDirty = true; cpuEMA = 6; // settle
+    } else if (autoReduced && cpuEMA < 4.5 && activeP < (params.points | 0)) {
+      activeP = Math.min(params.points | 0, Math.round(activeP * 1.05) + 8);
+      relinkDirty = true;
+      if (activeP >= (params.points | 0)) autoReduced = false;
+    }
+  }
+
+  /* ---------- GL: persistence buffer ---------- */
+  const maskUsable = maskReady && !modelFailed;
+  const engaged = camReady && (maskUsable || modelFailed);  // scribble active
+  if (camReady && trail) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, trail.fbo);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    {
+      gl.enable(gl.BLEND);
+      // fade pass 1: multiply everything by `persistence` (black quad, alpha
+      // blend: dst ← dst·(1−a));  pass 2: subtract 1/255 so 8-bit residue
+      // actually reaches true black instead of plateauing at a dim gray.
+      gl.useProgram(progFade);
+      gl.bindVertexArray(quadVAO);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.uniform4f(uFade("uColor"), 0, 0, 0, 1 - params.persistence);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.uniform4f(uFade("uColor"), 1 / 255, 1 / 255, 1 / 255, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.blendEquation(gl.FUNC_ADD);
+
+      // draw the real polylines — additive so overlapping passes build density
+      if (engaged && totalVerts > 1) {
+        gl.useProgram(progLine);
+        gl.bindVertexArray(lineVAO);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+        gl.uniform2f(uLine("uRes"), canvas.width, canvas.height);
+        gl.uniform1f(uLine("uPointSize"), 1);
+        // soft ~1px ink: two passes with a sub-pixel offset
+        const passes = [[0, 0, 0.32], [0.45, 0.45, 0.18]];
+        for (const [oxp, oyp, a] of passes) {
+          gl.uniform2f(uLine("uOffsetPx"), oxp, oyp);
+          gl.uniform4f(uLine("uColor"), 1, 1, 1, a);
+          for (let s = 0; s < numStrips; s++)
+            gl.drawArrays(gl.LINE_STRIP, drawFirst[s], drawCount[s]);
+        }
+      }
+      gl.disable(gl.BLEND);
+    }
+  }
+
+  /* ---------- GL: composite to screen ---------- */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  if (camReady) {
+    // mode 0 = camera passthrough while the model loads,
+    // mode 1 = line drawing, mode 2 = mask debug
+    let mode = engaged ? 1 : 0;
+    if (params.showMask) mode = 2;
+
+    if (mode === 0 && video.readyState >= 2) {   // upload only when needed
+      gl.bindTexture(gl.TEXTURE_2D, camTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    }
+    if (mode === 2 && maskField) {               // tiny upload, debug only
+      gl.bindTexture(gl.TEXTURE_2D, maskDebugTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, FW, FH, 0, gl.RED, gl.UNSIGNED_BYTE, maskField);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    }
+
+    const [sx, sy, ox, oy] = coverFit();
+    gl.useProgram(progFinal);
+    gl.bindVertexArray(quadVAO);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, trail.tex);
+    gl.uniform1i(uFinal("uTrail"), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, camTex);
+    gl.uniform1i(uFinal("uCam"), 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskDebugTex);
+    gl.uniform1i(uFinal("uMask"), 2);
+    gl.uniform2f(uFinal("uTexel"), 1 / canvas.width, 1 / canvas.height);
+    gl.uniform2f(uFinal("uUVScale"), sx, sy);
+    gl.uniform2f(uFinal("uUVOffset"), ox, oy);
+    gl.uniform1f(uFinal("uMirror"), params.mirror ? 1 : 0);
+    gl.uniform1f(uFinal("uGlow"), params.glow);
+    gl.uniform1i(uFinal("uMode"), mode);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // debug: the actual vertices the stroke visits
+    if (params.showPoints && mode !== 0) {
+      for (let i = 0; i < activeP; i++) {
+        ptsData[i * 2] = px[i] / FW; ptsData[i * 2 + 1] = py[i] / FH;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, ptsVBO);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, ptsData.subarray(0, activeP * 2));
+      gl.useProgram(progLine);
+      gl.bindVertexArray(ptsVAO);
+      gl.uniform2f(uLine("uRes"), canvas.width, canvas.height);
+      gl.uniform2f(uLine("uOffsetPx"), 0, 0);
+      gl.uniform1f(uLine("uPointSize"), 3);
+      gl.uniform4f(uLine("uColor"), 1, 0.35, 0.35, 1);
+      gl.drawArrays(gl.POINTS, 0, activeP);
+    }
+  }
+
+  /* ---------- readout ~2 Hz ---------- */
+  if (now - lastReadout > 500) {
+    lastReadout = now;
+    const km = pathLenPx >= 10000 ? (pathLenPx / 1000).toFixed(1) + "k" : pathLenPx.toFixed(0);
+    $("readout").textContent =
+      `fps ${fpsEMA.toFixed(0).padStart(3)}  pts ${activeP}${autoReduced ? " (auto-reduced)" : ""}\n` +
+      `path ${km} px  ·  model: ${modelStatus}`;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- Save PNG (preserveDrawingBuffer keeps the last frame) ---------- */
+$("saveBtn").addEventListener("click", () => {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `oneline-cam-${Date.now()}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, "image/png");
+});
+
+/* ---------- go ---------- */
+startCamera();
+loadModel();
+</script>
+</body>
+</html>

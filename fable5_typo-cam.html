@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<!--
+==============================================================================
+ typo-cam.html — webcam → real-time TYPOGRAPHIC PORTRAIT / calligram (WebGL2)
+==============================================================================
+
+ HOW TO RUN
+ ----------
+ Camera + ES-module imports need a secure context. From this folder:
+
+     python3 -m http.server 8000
+
+ then open  http://localhost:8000/typo-cam.html  and allow the camera.
+
+ DEPENDENCIES (the ONLY external dependency is MediaPipe Tasks-Vision)
+ ---------------------------------------------------------------------
+   JS bundle : https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs
+   WASM      : https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm
+   Model     : https://storage.googleapis.com/mediapipe-models/image_segmenter/
+               selfie_segmenter/float16/latest/selfie_segmenter.tflite
+ Everything else is plain WebGL2 + JS. No build step.
+
+ ALGORITHM OUTLINE
+ -----------------
+ 1. IMPORTANCE + FLOW FIELDS (CPU, ~160-wide readback, preallocated buffers):
+      importance = personMask · pow(luma, Gamma), forced to 0 below the Dark
+      threshold so the darkest zones stay EMPTY navy (negative space).
+      Flow = Sobel gradient of luminance rotated 90° (words run ALONG contours:
+      hair curls, jawline, collar), relaxed toward horizontal in flat areas and
+      temporally lerped so angles never jitter.
+ 2. WORD ATLAS (built once, rebuilt only on Apply / Uppercase): every word from
+      the editable list is rasterized ONCE with Canvas 2D (bold condensed sans,
+      any script incl. Japanese), shelf-packed into a single texture with its
+      UV rect + aspect recorded. ZERO per-frame text rasterization — and zero
+      invented glyphs, everything on screen is a real word from the list.
+ 3. PERSISTENT WORD SLOTS: a FIXED pool in 3 tiers — HERO (few, very large),
+      BODY (medium), FILLER (tiny texture). Each frame a slot samples the
+      importance under it: target size = tier base × local brightness, target
+      angle = flow field; position/angle/size/alpha are LERPed (Drift slider),
+      never snapped. Slots parked in near-zero importance fade out and respawn
+      at a weighted-random bright location. Nothing is relaid out wholesale ⇒
+      the portrait evolves smoothly and settles when the subject holds still.
+ 4. OCCUPANCY GRID: a coarse screen-space grid; HERO claims cells first, then
+      BODY, then FILLER. A slot landing on a crowded cell shrinks one step
+      (or, for fillers, defers and respawns) — cheap and greedy; the
+      persistent pool amortizes layout quality over time.
+ 5. DRAW: ONE instanced WebGL2 draw of a unit quad (plus a 1.5 px offset
+      shadow pass for print depth). Per-instance: center, angle, size, atlas
+      UV rect, alpha, brightness jitter. Premultiplied-alpha blending, white
+      lettering (±3% per-word jitter) on deep navy (#16254E, hue slider).
+
+ SLIDERS
+ -------
+   Word count     size of the slot pool (100–1200)
+   Hero ratio     fraction of slots that are HERO-tier giants
+   Min size       smallest filler word height (CSS px)
+   Max size       largest hero word height (CSS px)
+   Dark thresh    luminance below which nothing is placed (negative space)
+   Gamma          density/size curve: higher ⇒ contrast concentrates in highlights
+   Flow strength  how strongly words align to contours vs. horizontal
+   Drift          motion damping — lerp speed of size/angle/alpha
+   Respawn rate   probability/frame that a faded slot re-enters somewhere bright
+   Letter bright  lettering brightness
+   Background hue hue of the deep navy background
+
+ TEXTAREA + Apply: edit the word list, rebuild the atlas live (no reload).
+ TOGGLES: Mirror · Pause · Show mask (debug) · Uppercase
+ BUTTON : Save PNG   READOUT: FPS · active words · atlas size · model status
+==============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>typo-cam</title>
+<style>
+  :root{
+    --hud-bg: rgba(8,10,16,.84);
+    --hud-fg: #e6e9f0;
+    --hud-dim:#8a90a0;
+    --hud-line:#2c3040;
+    --accent:#ffffff;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:#16254E; overflow:hidden; }
+  canvas#gl{ position:fixed; inset:0; width:100%; height:100%; display:block; background:#16254E; }
+
+  /* ---------- terminal / HUD panel (top-left, collapsible) ---------- */
+  #hud{
+    position:fixed; top:10px; left:10px; z-index:10;
+    width:272px; max-height:calc(100vh - 20px); overflow-y:auto;
+    font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:var(--hud-fg); background:var(--hud-bg);
+    border:1px solid var(--hud-line); border-radius:4px;
+    backdrop-filter: blur(4px); user-select:none;
+  }
+  #hud summary{
+    list-style:none; cursor:pointer; padding:7px 10px; letter-spacing:.08em;
+    color:var(--accent); border-bottom:1px solid var(--hud-line);
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  #hud summary::-webkit-details-marker{ display:none; }
+  #hud summary::after{ content:"[–]"; color:var(--hud-dim); }
+  #hud:not([open]) summary::after{ content:"[+]"; }
+  #hud:not([open]) summary{ border-bottom:none; }
+  .hud-body{ padding:8px 10px 10px; }
+  .row{ display:flex; align-items:center; gap:8px; margin:5px 0; }
+  .row label{ flex:0 0 104px; color:var(--hud-dim); white-space:nowrap; overflow:hidden; }
+  .row .val{ flex:0 0 40px; text-align:right; color:var(--hud-fg); font-variant-numeric:tabular-nums; }
+  input[type=range]{
+    flex:1; -webkit-appearance:none; appearance:none; height:2px;
+    background:#3a4054; outline:none; border-radius:1px; margin:0; cursor:ew-resize;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:9px; height:9px; border-radius:50%;
+    background:var(--accent); border:none; cursor:ew-resize;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:9px; height:9px; border-radius:50%; background:var(--accent); border:none;
+  }
+  input[type=range]:focus-visible{ outline:1px solid var(--accent); outline-offset:3px; }
+  textarea#wordbox{
+    width:100%; height:64px; resize:vertical; margin-top:2px;
+    font:11px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    color:var(--hud-fg); background:#0c0f18; border:1px solid var(--hud-line);
+    border-radius:3px; padding:5px;
+  }
+  .toggles{ display:grid; grid-template-columns:1fr 1fr; gap:2px 10px; margin:8px 0 4px; }
+  .toggles label{ display:flex; align-items:center; gap:6px; color:var(--hud-dim); cursor:pointer; }
+  .toggles input{ accent-color:#fff; margin:0; }
+  .hud-sep{ border:none; border-top:1px solid var(--hud-line); margin:8px -10px; }
+  button.hud-btn{
+    width:100%; padding:5px 0; margin-top:6px; font:inherit; letter-spacing:.06em;
+    color:#000; background:var(--accent); border:none; border-radius:3px; cursor:pointer;
+  }
+  button.hud-btn:hover{ background:#cfd3dc; }
+  #readout{ margin-top:8px; color:var(--hud-dim); white-space:pre; font-variant-numeric:tabular-nums; }
+
+  /* ---------- fullscreen status / error overlay ---------- */
+  #status{
+    position:fixed; inset:0; z-index:20;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    font:13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:#dde2ee; background:rgba(6,10,22,.78); text-align:center; padding:20px;
+  }
+  #status.hidden{ display:none; }
+  #status .msg{ max-width:520px; white-space:pre-wrap; }
+  #status button{
+    font:inherit; padding:7px 18px; color:#000; background:#fff;
+    border:none; border-radius:3px; cursor:pointer;
+  }
+  #banner{
+    position:fixed; top:10px; right:10px; z-index:15; max-width:320px;
+    font:11px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    color:#ffd7d7; background:rgba(40,0,0,.85); border:1px solid #5a2a2a;
+    border-radius:4px; padding:8px 10px; display:none; white-space:pre-wrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<details id="hud" open>
+  <summary>TYPO-CAM</summary>
+  <div class="hud-body">
+    <div id="sliders"></div>
+    <hr class="hud-sep">
+    <textarea id="wordbox" spellcheck="false"></textarea>
+    <button class="hud-btn" id="applyBtn">APPLY WORD LIST</button>
+    <hr class="hud-sep">
+    <div class="toggles" id="toggles"></div>
+    <hr class="hud-sep">
+    <button class="hud-btn" id="saveBtn">SAVE PNG</button>
+    <div id="readout">fps --  words --
+atlas --  ·  model: --</div>
+  </div>
+</details>
+
+<div id="banner"></div>
+<div id="status"><div class="msg" id="statusMsg">starting…</div></div>
+
+<script type="module">
+import { ImageSegmenter, FilesetResolver } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs";
+
+/* ========================================================================
+ *  Parameters + UI
+ * ===================================================================== */
+const prefersReducedMotion =
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const params = {
+  wordCount: 600, heroRatio: 0.05, minSize: 11, maxSize: 96,
+  darkTh: 0.14, gamma: 1.6, flow: 1.0, drift: 0.12, respawn: 0.18,
+  brightness: 1.0, bgHue: 224,
+  mirror: true,
+  pause: prefersReducedMotion,     // reduced-motion ⇒ slot motion paused
+  showMask: false, uppercase: true,
+};
+
+const DEFAULT_WORDS =
+  "HOPE DREAM VISION COURAGE PASSION WONDER SPARK IMAGINE BELIEVE FOCUS " +
+  "DRIVE LIGHT BOLD TRUTH SPIRIT ENERGY IDEA CREATE THINK BUILD RISE FLOW MUSE FORM";
+
+const SLIDERS = [
+  // key          label             min   max   step
+  ["wordCount",  "Word count",      100,  1200, 10  ],
+  ["heroRatio",  "Hero ratio",      0,    0.2,  0.005],
+  ["minSize",    "Min size",        6,    30,   1   ],
+  ["maxSize",    "Max size",        40,   200,  2   ],
+  ["darkTh",     "Dark thresh",     0,    0.6,  0.01],
+  ["gamma",      "Gamma",           0.5,  4,    0.05],
+  ["flow",       "Flow strength",   0,    2,    0.05],
+  ["drift",      "Drift",           0.02, 0.5,  0.01],
+  ["respawn",    "Respawn rate",    0,    1,    0.02],
+  ["brightness", "Letter bright",   0.6,  1.2,  0.01],
+  ["bgHue",      "Background hue",  0,    360,  1   ],
+];
+const TOGGLES = [
+  ["mirror",   "Mirror"],
+  ["pause",    "Pause"],
+  ["showMask", "Show mask"],
+  ["uppercase","Uppercase"],
+];
+
+const $ = (id) => document.getElementById(id);
+{
+  const box = $("sliders");
+  for (const [key, label, min, max, step] of SLIDERS) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const digits = step >= 1 ? 0 : (step >= 0.01 ? 2 : 3);
+    row.innerHTML =
+      `<label for="s_${key}">${label}</label>` +
+      `<input id="s_${key}" type="range" min="${min}" max="${max}" step="${step}" value="${params[key]}">` +
+      `<span class="val" id="v_${key}">${params[key].toFixed(digits)}</span>`;
+    box.appendChild(row);
+    row.querySelector("input").addEventListener("input", (e) => {
+      params[key] = parseFloat(e.target.value);
+      $("v_" + key).textContent = params[key].toFixed(digits);
+      if (key === "wordCount") onPoolChanged();
+      if (key === "gamma") rebuildGammaLUT();
+    });
+  }
+  const tbox = $("toggles");
+  for (const [key, label] of TOGGLES) {
+    const l = document.createElement("label");
+    l.innerHTML = `<input id="t_${key}" type="checkbox" ${params[key] ? "checked" : ""}> ${label}`;
+    tbox.appendChild(l);
+    l.querySelector("input").addEventListener("change", (e) => {
+      params[key] = e.target.checked;
+      if (key === "uppercase") buildAtlas();
+    });
+  }
+  $("wordbox").value = DEFAULT_WORDS;
+}
+
+/* ---------- status helpers ---------- */
+const statusEl = $("status"), statusMsg = $("statusMsg");
+function showStatus(text, retryFn = null) {
+  statusEl.classList.remove("hidden");
+  statusMsg.textContent = text;
+  statusEl.querySelectorAll("button").forEach(b => b.remove());
+  if (retryFn) {
+    const b = document.createElement("button");
+    b.textContent = "retry"; b.onclick = retryFn;
+    statusEl.appendChild(b);
+  }
+}
+function hideStatus(){ statusEl.classList.add("hidden"); }
+function showBanner(t){ const b = $("banner"); b.textContent = t; b.style.display = "block"; }
+
+/* ========================================================================
+ *  WebGL2 setup
+ * ===================================================================== */
+const canvas = $("gl");
+const gl = canvas.getContext("webgl2", {
+  antialias: false, preserveDrawingBuffer: true, powerPreference: "high-performance",
+});
+if (!gl) {
+  showStatus("WebGL2 is not available in this browser.\ntypo-cam requires WebGL2.");
+  throw new Error("no webgl2");
+}
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error("shader: " + gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("link: " + gl.getProgramInfoLog(p));
+  return p;
+}
+function uniforms(prog) {
+  const cache = {};
+  return (n) => (n in cache ? cache[n] : (cache[n] = gl.getUniformLocation(prog, n)));
+}
+
+/* ---------- shaders ---------- */
+// fullscreen big triangle — camera passthrough / mask debug only
+const VERT_QUAD = `#version 300 es
+out vec2 v_uv;
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const FS_PASS = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uCam, uMask;
+uniform vec2 uUVScale, uUVOffset;
+uniform float uMirror;
+uniform int uMode;                    // 0 = camera, 1 = mask debug
+void main(){
+  if (uMode == 1){
+    float m = texture(uMask, vec2(v_uv.x, 1.0 - v_uv.y)).r;
+    outColor = vec4(vec3(m), 1.0); return;
+  }
+  vec2 uv = v_uv; uv.x = mix(uv.x, 1.0 - uv.x, uMirror);
+  outColor = vec4(texture(uCam, uv * uUVScale + uUVOffset).rgb, 1.0);
+}`;
+
+/* Instanced word renderer. Per instance:
+ *   iPosAng = cx, cy   (center, normalized 0..1, y DOWN — matches the field)
+ *             angle    (radians, y-down convention — matches the Sobel flow)
+ *             hpx      (word height in device pixels)
+ *   iUV     = atlas rect u0 v0 u1 v1  (v0 = top of glyph)
+ *   iMisc   = aspect (w/h), alpha, brightness jitter
+ * The vertex shader builds the rotated quad in y-down pixel space and flips
+ * to clip space at the very end, so field angles map 1:1 to screen angles. */
+const VS_WORD = `#version 300 es
+layout(location = 0) in vec2 aCorner;   // unit quad, (-0.5..0.5)², y down
+layout(location = 1) in vec4 iPosAng;
+layout(location = 2) in vec4 iUV;
+layout(location = 3) in vec3 iMisc;
+uniform vec2 uRes;
+uniform vec2 uOffsetPx;                 // shadow-pass offset
+out vec2 v_uv;
+out float v_alpha, v_jit;
+void main(){
+  float c = cos(iPosAng.z), s = sin(iPosAng.z);
+  vec2 l = aCorner * vec2(iPosAng.w * iMisc.x, iPosAng.w);
+  vec2 r = vec2(l.x * c - l.y * s, l.x * s + l.y * c);
+  vec2 px = vec2(iPosAng.x, iPosAng.y) * uRes + r + uOffsetPx;
+  gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0,
+                     1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
+  v_uv = mix(iUV.xy, iUV.zw, aCorner + 0.5);
+  v_alpha = iMisc.y;
+  v_jit = iMisc.z;
+}`;
+const FS_WORD = `#version 300 es
+precision highp float;
+in vec2 v_uv; in float v_alpha, v_jit;
+uniform sampler2D uAtlas;               // premultiplied white glyphs
+uniform vec3 uColor;
+uniform float uAlphaScale;              // 1 = ink, ~0.45 = shadow pass
+out vec4 outColor;
+void main(){
+  float a = texture(uAtlas, v_uv).a * v_alpha * uAlphaScale;
+  outColor = vec4(uColor * v_jit * a, a);   // premultiplied output
+}`;
+
+let progPass, progWord, uPass, uWord;
+try {
+  progPass = program(VERT_QUAD, FS_PASS); uPass = uniforms(progPass);
+  progWord = program(VS_WORD, FS_WORD);   uWord = uniforms(progWord);
+} catch (e) {
+  showStatus("Shader compile/link failed:\n" + e.message.slice(0, 400));
+  throw e;
+}
+const quadVAO = gl.createVertexArray();
+
+/* ---------- instanced geometry ---------- */
+const MAXN = 1200;
+const STRIDE = 11;                         // floats per instance
+const instData = new Float32Array(MAXN * STRIDE);
+const wordVAO = gl.createVertexArray();
+gl.bindVertexArray(wordVAO);
+// unit quad (TRIANGLE_STRIP), y down: corner (-.5,-.5) is the glyph's top-left
+const cornerVBO = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, cornerVBO);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -0.5, -0.5,   0.5, -0.5,   -0.5, 0.5,   0.5, 0.5,
+]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const instVBO = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, instVBO);
+gl.bufferData(gl.ARRAY_BUFFER, instData.byteLength, gl.DYNAMIC_DRAW);
+const B = STRIDE * 4;
+gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.FLOAT, false, B, 0);
+gl.vertexAttribDivisor(1, 1);
+gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, B, 16);
+gl.vertexAttribDivisor(2, 1);
+gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 3, gl.FLOAT, false, B, 32);
+gl.vertexAttribDivisor(3, 1);
+gl.bindVertexArray(null);
+
+/* ---------- camera + mask-debug textures ---------- */
+function texParams(){
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+const camTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, camTex); texParams();
+const maskDebugTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, maskDebugTex); texParams();
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE,
+              new Uint8Array([0]));
+
+/* ========================================================================
+ *  WORD ATLAS — every word rasterized ONCE with Canvas 2D, shelf-packed
+ *  into a single texture. Any script works (the browser shapes the text);
+ *  the atlas guarantees zero invented glyphs on screen.
+ * ===================================================================== */
+const atlasCanvas = document.createElement("canvas");
+const actx = atlasCanvas.getContext("2d");
+const atlasTex = gl.createTexture();
+let words = [];                      // {u0,v0,u1,v1,aspect}
+let atlasW = 0, atlasH = 0;
+
+function parseWordList() {
+  let list = $("wordbox").value.split(/[\s,;、。]+/).filter(w => w.length);
+  if (params.uppercase) list = list.map(w => w.toUpperCase());
+  list = [...new Set(list)].slice(0, 256);
+  if (!list.length) list = ["WORD"];
+  return list;
+}
+
+function buildAtlas() {
+  const list = parseWordList();
+  const AW = 2048, PAD = 8;
+  let fontPx = 56;
+  // shrink the font until everything shelf-packs into ≤ 4096 rows
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const rowH = Math.ceil(fontPx * 1.3);
+    actx.font = `bold ${fontPx}px "Arial Narrow", "Helvetica Neue", Arial, sans-serif`;
+    let x = PAD, rows = 1;
+    const place = list.map(w => {
+      const tw = Math.min(AW - 2 * PAD,
+                          Math.ceil(actx.measureText(w).width) + PAD);
+      if (x + tw > AW - PAD) { rows++; x = PAD; }
+      const e = { w, x, row: rows - 1, tw };
+      x += tw + PAD;
+      return e;
+    });
+    const AH = rows * (rowH + PAD) + PAD;
+    if (AH > 4096 && attempt < 5) { fontPx = Math.floor(fontPx * 0.8); continue; }
+
+    atlasCanvas.width = AW; atlasCanvas.height = AH;
+    actx.clearRect(0, 0, AW, AH);
+    actx.font = `bold ${fontPx}px "Arial Narrow", "Helvetica Neue", Arial, sans-serif`;
+    actx.fillStyle = "#ffffff";
+    actx.textBaseline = "alphabetic";
+    words = place.map(e => {
+      const y0 = PAD + e.row * (rowH + PAD);
+      actx.fillText(e.w, e.x, y0 + fontPx * 1.0);      // baseline inside the row
+      return {
+        u0: e.x / AW,        v0: y0 / AH,
+        u1: (e.x + e.tw) / AW, v1: (y0 + rowH) / AH,
+        aspect: e.tw / rowH,
+      };
+    });
+    atlasW = AW; atlasH = AH;
+    break;
+  }
+  // upload premultiplied + mipmapped (filler words are heavily minified)
+  gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, atlasCanvas);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  // keep existing slots valid against the new list
+  for (let i = 0; i < MAXN; i++) sWord[i] = sWord[i] % words.length;
+}
+$("applyBtn").addEventListener("click", buildAtlas);
+
+/* ========================================================================
+ *  Importance + flow fields (CPU, preallocated)
+ * ===================================================================== */
+const FW = 160; let FH = 120;
+let imp, lumaF, flowAngle, maskField;
+let brightList, brightCount = 0;
+const BRIGHT_CAP = 8192;
+const off = document.createElement("canvas");
+const octx = off.getContext("2d", { willReadFrequently: true });
+let fieldReady = false, fieldMs = 0;
+
+function allocField() {
+  const n = FW * FH;
+  imp = new Float32Array(n);
+  lumaF = new Float32Array(n);
+  flowAngle = new Float32Array(n);
+  maskField = new Uint8Array(n);
+  brightList = new Int32Array(BRIGHT_CAP);
+  off.width = FW; off.height = FH;
+  fieldReady = false;
+}
+
+const gammaLUT = new Float32Array(256);
+function rebuildGammaLUT() {
+  for (let i = 0; i < 256; i++) gammaLUT[i] = Math.pow(i / 255, params.gamma);
+}
+rebuildGammaLUT();
+
+function coverFit() {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const va = vw / vh, ca = canvas.width / canvas.height;
+  let sx = 1, sy = 1;
+  if (va > ca) sx = ca / va; else sy = va / ca;
+  return [sx, sy, (1 - sx) / 2, (1 - sy) / 2];
+}
+
+// orientation angles live on a period of π; keep them in (-π/2, π/2] so text
+// is never upside down, and wrap deltas the same way before lerping
+function wrapHalfPi(a) {
+  while (a >  Math.PI / 2) a -= Math.PI;
+  while (a <= -Math.PI / 2) a += Math.PI;
+  return a;
+}
+
+/* importance = mask · pow(luma, Gamma), 0 below Dark threshold (empty navy).
+ * flow = Sobel gradient rotated 90° (words run ALONG contours), relaxed
+ * toward horizontal where the edge is weak, and temporally lerped per cell
+ * so word angles never jitter frame-to-frame.                             */
+function updateField() {
+  if (!camReady || video.readyState < 2) return;
+  const t0 = performance.now();
+  const [sx, sy, ox, oy] = coverFit();
+  const vw = video.videoWidth, vh = video.videoHeight;
+
+  octx.save();
+  if (params.mirror) { octx.translate(FW, 0); octx.scale(-1, 1); }
+  octx.drawImage(video, ox * vw, oy * vh, sx * vw, sy * vh, 0, 0, FW, FH);
+  octx.restore();
+  const rgba = octx.getImageData(0, 0, FW, FH).data;
+
+  const darkTh = params.darkTh;
+  const useMask = maskReady && !modelFailed;
+  const mArr = maskArr, mW = maskW, mH = maskH;
+  brightCount = 0;
+  let bi = 0;
+  for (let y = 0; y < FH; y++) {
+    const v = (y + 0.5) / FH;
+    for (let x = 0; x < FW; x++, bi++) {
+      const p = bi * 4;
+      const l8 = (rgba[p] * 299 + rgba[p + 1] * 587 + rgba[p + 2] * 114) / 1000 | 0;
+      lumaF[bi] = l8 / 255;
+      let m = 1;
+      if (useMask) {
+        let u = (x + 0.5) / FW;
+        if (params.mirror) u = 1 - u;                 // mask is unmirrored
+        const mx = Math.min(mW - 1, (ox + u * sx) * mW | 0);
+        const my = Math.min(mH - 1, (oy + v * sy) * mH | 0);
+        m = Math.min(1, (mArr[my * mW + mx] / 255) * 1.35);  // soft rim
+      }
+      maskField[bi] = m * 255;
+      const iv = (l8 / 255) < darkTh ? 0 : gammaLUT[l8] * m;
+      imp[bi] = iv;
+      if (iv > 0.30) {                                // respawn reservoir
+        if (brightCount < BRIGHT_CAP) brightList[brightCount++] = bi;
+        else { brightCount++;
+          if (Math.random() < BRIGHT_CAP / brightCount)
+            brightList[(Math.random() * BRIGHT_CAP) | 0] = bi;
+        }
+      }
+    }
+  }
+  // Sobel of luminance → tangent (gradient rotated 90°) → temporal lerp
+  const fk = params.flow;
+  for (let y = 1; y < FH - 1; y++) {
+    const r = y * FW;
+    for (let x = 1; x < FW - 1; x++) {
+      const i = r + x;
+      const gx = (lumaF[i - FW + 1] + 2 * lumaF[i + 1] + lumaF[i + FW + 1])
+               - (lumaF[i - FW - 1] + 2 * lumaF[i - 1] + lumaF[i + FW - 1]);
+      const gy = (lumaF[i + FW - 1] + 2 * lumaF[i + FW] + lumaF[i + FW + 1])
+               - (lumaF[i - FW - 1] + 2 * lumaF[i - FW] + lumaF[i - FW + 1]);
+      const mag = Math.hypot(gx, gy);
+      // tangent of gradient (rotate 90°): (gx,gy) → (-gy,gx); y-down space
+      let a = wrapHalfPi(Math.atan2(gx, -gy));
+      // relax toward horizontal (0) in flat areas; Flow slider scales it
+      let w = (mag - 0.06) / 0.30; w = w < 0 ? 0 : (w > 1 ? 1 : w);
+      w = Math.min(1, w * fk);
+      const target = a * w;
+      const d = wrapHalfPi(target - flowAngle[i]);
+      flowAngle[i] = wrapHalfPi(flowAngle[i] + d * 0.25);
+    }
+  }
+  fieldReady = true;
+  fieldMs = performance.now() - t0;
+}
+
+function sampleImp(x, y) {              // bilinear importance sample
+  x = x < 0 ? 0 : (x > FW - 1.001 ? FW - 1.001 : x);
+  y = y < 0 ? 0 : (y > FH - 1.001 ? FH - 1.001 : y);
+  const xi = x | 0, yi = y | 0, fx = x - xi, fy = y - yi;
+  const i = yi * FW + xi;
+  const a = imp[i], b = imp[i + 1], c = imp[i + FW], d = imp[i + FW + 1];
+  return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+}
+function sampleFlow(x, y) {             // nearest (angles interpolate badly)
+  const xi = Math.max(0, Math.min(FW - 1, x | 0));
+  const yi = Math.max(0, Math.min(FH - 1, y | 0));
+  return flowAngle[yi * FW + xi];
+}
+
+/* ========================================================================
+ *  PERSISTENT WORD SLOTS — 3 tiers, everything lerped, never relaid out
+ *  wholesale. Slot indices [0, heroN) are HERO, then BODY, then FILLER;
+ *  processing in index order gives HERO first claim on occupancy cells.
+ * ===================================================================== */
+const sX = new Float32Array(MAXN), sY = new Float32Array(MAXN);
+const sAngle = new Float32Array(MAXN);
+const sH = new Float32Array(MAXN);        // current height (CSS px)
+const sAlpha = new Float32Array(MAXN);
+const sWord = new Int32Array(MAXN);
+const sJit = new Float32Array(MAXN);      // ±3% printed-ink brightness jitter
+let activeN = params.wordCount, autoReduced = false;
+
+function tierOf(i) {
+  const heroN = Math.round(activeN * params.heroRatio);
+  const bodyN = Math.round(activeN * 0.30);
+  return i < heroN ? 0 : (i < heroN + bodyN ? 1 : 2);
+}
+function pickWord(tier) {
+  let idx = (Math.random() * words.length) | 0;
+  // heroes prefer compact words so giants fit on screen — one cheap re-roll
+  if (tier === 0 && words[idx].aspect > 5) idx = (Math.random() * words.length) | 0;
+  return idx;
+}
+function respawnSlot(i, tier) {
+  const nb = Math.min(brightCount, BRIGHT_CAP);
+  if (nb > 0) {
+    const cell = brightList[(Math.random() * nb) | 0];
+    sX[i] = (cell % FW) + Math.random();
+    sY[i] = (cell / FW | 0) + Math.random();
+  } else {
+    sX[i] = Math.random() * FW; sY[i] = Math.random() * FH;
+  }
+  sWord[i] = pickWord(tier);
+  sAngle[i] = sampleFlow(sX[i], sY[i]);
+  sH[i] = 2;                       // grows in
+  sAlpha[i] = 0;
+  sJit[i] = 0.97 + Math.random() * 0.06;
+}
+for (let i = 0; i < MAXN; i++) {
+  sX[i] = Math.random() * FW; sY[i] = Math.random() * FH;
+  sWord[i] = 0; sJit[i] = 0.97 + Math.random() * 0.06;
+  sH[i] = 2; sAlpha[i] = 0;
+}
+function onPoolChanged() {
+  activeN = Math.min(params.wordCount | 0, MAXN);
+  autoReduced = false;
+}
+
+/* ---- occupancy grid: coarse screen-space cells, greedy claims ---- */
+const OGW = 32; let OGH = 24;
+const occ = new Float32Array(32 * 64);
+function rebuildOccGrid() { OGH = Math.max(8, Math.min(64, Math.round(OGW * FH / FW))); }
+
+/* Slot lifecycle, per frame:
+ *  - sample importance under the slot; near-zero ⇒ fade out, then respawn
+ *    somewhere bright (probability = Respawn rate) — motion tracking works
+ *    by attrition, so nothing ever snaps.
+ *  - target height = tier base × local brightness (Gamma already applied
+ *    in the field); target angle = flow field; both LERPed by Drift.
+ *  - occupancy: crowded cell ⇒ shrink one step (hero/body) or defer
+ *    (filler fades and respawns elsewhere).                              */
+function updateSlots(dpr) {
+  occ.fill(0, 0, OGW * OGH);
+  const drift = params.drift;
+  const minS = params.minSize, maxS = params.maxSize;
+  const cssW = canvas.width / dpr, cssH = canvas.height / dpr;
+  const cellW = cssW / OGW, cellH = cssH / OGH;
+  const invCellArea = 1 / (cellW * cellH);
+  const kx = OGW / FW, ky = OGH / FH;
+  let visible = 0;
+
+  for (let i = 0; i < activeN; i++) {
+    const tier = tierOf(i);
+    const iv = fieldReady ? sampleImp(sX[i], sY[i]) : 0;
+    let aT = 0, hT = sH[i];
+
+    if (sAlpha[i] < 0.02 && iv < 0.03) {
+      // dead & still dark: maybe respawn somewhere bright
+      if (!params.pause && Math.random() < params.respawn) respawnSlot(i, tier);
+    }
+    if (iv >= 0.03) {
+      aT = 1;
+      // tier base × local brightness → word height (CSS px)
+      if (tier === 0)      hT = maxS * (0.55 + 0.45 * iv);
+      else if (tier === 1) hT = minS * 1.6 + (maxS * 0.45 - minS * 1.6) * iv;
+      else                 hT = minS * (0.8 + 1.2 * iv);
+      hT = Math.max(minS * 0.7, Math.min(maxS, hT));
+      // keep giants on screen: clamp width to ~45% of the canvas
+      const asp = words[sWord[i]].aspect;
+      hT = Math.min(hT, (cssW * 0.45) / asp);
+
+      // ---- occupancy (HERO processed first ⇒ claims cells first) ----
+      let cx = sX[i] * kx | 0; if (cx >= OGW) cx = OGW - 1;
+      let cy = sY[i] * ky | 0; if (cy >= OGH) cy = OGH - 1;
+      const c = cy * OGW + cx;
+      const wpx = hT * asp;
+      if (occ[c] > 1.6) {
+        if (tier === 2) aT = 0;                 // filler defers, respawns later
+        else hT *= 0.78;                        // hero/body shrink one step
+      }
+      if (aT > 0) {
+        const cover = Math.min(3, wpx * hT * invCellArea);
+        occ[c] += cover;
+        // wide words also stamp the two cells along their baseline
+        if (wpx > cellW * 1.6) {
+          const ca = sAngle[i], dx = Math.cos(ca), dy = Math.sin(ca);
+          for (const sgn of [-1, 1]) {
+            const nx = (sX[i] + sgn * dx * (wpx * 0.35) * (FW / cssW)) * kx | 0;
+            const ny = (sY[i] + sgn * dy * (wpx * 0.35) * (FH / cssH)) * ky | 0;
+            if (nx >= 0 && ny >= 0 && nx < OGW && ny < OGH)
+              occ[ny * OGW + nx] += cover * 0.5;
+          }
+        }
+      }
+    }
+
+    // ---- smooth everything (never snap). Pause gates the respawn churn
+    // above; the lerps keep running, so with a still subject every target
+    // is static and the layout converges to a fully still portrait. ----
+    const aTgt = fieldReady ? sampleFlow(sX[i], sY[i]) : 0;
+    sAngle[i] = wrapHalfPi(sAngle[i] + wrapHalfPi(aTgt - sAngle[i]) * drift);
+    sH[i] += (hT - sH[i]) * drift;
+    sAlpha[i] += (aT - sAlpha[i]) * Math.min(1, drift * 1.6);
+    if (sAlpha[i] > 0.02) visible++;
+  }
+  return visible;
+}
+
+/* ---- instance buffer fill: FILLER→BODY→HERO so heroes draw on top ---- */
+function fillInstances(dpr) {
+  let n = 0;
+  for (let i = activeN - 1; i >= 0; i--) {
+    const a = sAlpha[i];
+    if (a <= 0.02) continue;
+    const w = words[sWord[i]];
+    const o = n * STRIDE;
+    instData[o]     = sX[i] / FW;
+    instData[o + 1] = sY[i] / FH;
+    instData[o + 2] = sAngle[i];
+    instData[o + 3] = sH[i] * dpr;          // CSS px → device px
+    instData[o + 4] = w.u0; instData[o + 5] = w.v0;
+    instData[o + 6] = w.u1; instData[o + 7] = w.v1;
+    instData[o + 8] = w.aspect;
+    instData[o + 9] = a;
+    instData[o + 10] = sJit[i];
+    n++;
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, instVBO);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, instData.subarray(0, n * STRIDE));
+  return n;
+}
+
+/* ========================================================================
+ *  Camera
+ * ===================================================================== */
+const video = document.createElement("video");
+video.playsInline = true; video.muted = true;
+let stream = null, camReady = false;
+
+async function startCamera() {
+  showStatus("requesting camera…");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    camReady = true;
+    hideStatus();
+    startVideoLoop();
+  } catch (err) {
+    camReady = false;
+    if (err && (err.name === "NotAllowedError" || err.name === "SecurityError"))
+      showStatus("camera permission denied.\nAllow camera access, then retry.", startCamera);
+    else if (err && (err.name === "NotFoundError" || err.name === "OverconstrainedError"))
+      showStatus("no camera found on this device.", startCamera);
+    else
+      showStatus("camera error: " + (err && err.message || err), startCamera);
+  }
+}
+window.addEventListener("pagehide", () => {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (segmenter) try { segmenter.close(); } catch (_) {}
+});
+
+/* ========================================================================
+ *  MediaPipe segmentation (VIDEO mode, ~30 Hz, reuse latest mask)
+ * ===================================================================== */
+let segmenter = null, modelFailed = false, maskReady = false;
+let modelStatus = "loading";
+let maskArr = null, maskW = 0, maskH = 0;
+let lastSegTs = -1, lastSegAt = 0;
+
+async function loadModel() {
+  modelStatus = "loading"; modelFailed = false;
+  try {
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
+    segmenter = await ImageSegmenter.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      outputConfidenceMasks: true,
+      outputCategoryMask: false,
+    });
+    modelStatus = "ok";
+    $("banner").style.display = "none";
+  } catch (err) {
+    modelFailed = true; modelStatus = "failed";
+    showBanner("segmentation model failed to load:\n" + (err && err.message || err) +
+               "\nrunning UNGATED (whole frame). ");
+    const b = document.createElement("button");
+    b.textContent = "retry model";
+    b.style.cssText = "margin-top:6px;font:inherit;padding:3px 10px;cursor:pointer;";
+    b.onclick = () => { $("banner").style.display = "none"; loadModel(); };
+    $("banner").appendChild(b);
+  }
+}
+
+function runSegmentation() {
+  if (!segmenter || !camReady || video.readyState < 2) return;
+  let ts = performance.now();
+  if (ts <= lastSegTs) ts = lastSegTs + 0.1;
+  lastSegTs = ts;
+  try {
+    segmenter.segmentForVideo(video, ts, (result) => {
+      const masks = result.confidenceMasks;
+      if (!masks || !masks.length) return;
+      // selfie_segmenter: 2 masks ⇒ index 1 = "person"; 1 mask ⇒ foreground
+      const m = masks.length > 1 ? masks[1] : masks[0];
+      maskArr = m.getAsUint8Array(); maskW = m.width; maskH = m.height;
+      maskReady = true;
+    });
+  } catch (_) { /* reuse the latest mask */ }
+}
+
+// field at video rate (angles need continuity); segmentation ~30 Hz.
+// Keeps running while paused — Pause freezes SLOT MOTION only.
+function startVideoLoop() {
+  const onFrame = () => {
+    updateField();
+    const now = performance.now();
+    if (now - lastSegAt >= 33) { lastSegAt = now; runSegmentation(); }
+  };
+  if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+    const tick = () => { onFrame(); video.requestVideoFrameCallback(tick); };
+    video.requestVideoFrameCallback(tick);
+  } else {
+    let lastT = -1;
+    const tick = () => {
+      if (video.currentTime !== lastT) { lastT = video.currentTime; onFrame(); }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+}
+
+/* ========================================================================
+ *  Resize
+ * ===================================================================== */
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(2, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(2, Math.round(canvas.clientHeight * dpr));
+  if (w !== canvas.width || h !== canvas.height) {
+    canvas.width = w; canvas.height = h;
+    const oldFH = FH;
+    FH = Math.max(48, Math.min(280, Math.round(FW * h / w)));
+    allocField(); rebuildOccGrid();
+    const k = FH / oldFH;
+    for (let i = 0; i < MAXN; i++) sY[i] = Math.min(FH - 1, sY[i] * k);
+  }
+}
+window.addEventListener("resize", resize);
+allocField(); rebuildOccGrid(); resize();
+buildAtlas();
+
+/* ---------- background color from the hue slider (HSL → RGB) ---------- */
+function bgRGB() {
+  const h = params.bgHue / 360, s = 0.56, l = 0.20;   // #16254E at h=224°
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = (t) => {
+    t = ((t % 1) + 1) % 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return [f(h + 1 / 3), f(h), f(h - 1 / 3)];
+}
+
+/* ========================================================================
+ *  Render loop (with ~6 ms CPU budget + auto word-count reduction)
+ * ===================================================================== */
+let lastNow = performance.now();
+let fpsEMA = 0, cpuEMA = 0, lastReadout = 0, visibleWords = 0;
+
+function frame(now) {
+  const dt = now - lastNow; lastNow = now;
+  fpsEMA = fpsEMA ? fpsEMA * 0.9 + (1000 / Math.max(dt, 1)) * 0.1 : 60;
+  resize();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  const maskUsable = maskReady && !modelFailed;
+  const engaged = camReady && (maskUsable || modelFailed);
+
+  /* ---------- CPU: slots + occupancy (budgeted) ---------- */
+  const t0 = performance.now();
+  let instCount = 0;
+  if (camReady && fieldReady && engaged) {
+    visibleWords = updateSlots(dpr);
+    instCount = fillInstances(dpr);
+  }
+  const cpuMs = (performance.now() - t0) + fieldMs * 0.5;  // field runs at ~30 Hz
+  cpuEMA = cpuEMA * 0.9 + cpuMs * 0.1;
+  if (!params.pause && camReady && fieldReady) {
+    if (cpuEMA > 6 && activeN > 100) {
+      activeN = Math.max(100, Math.round(activeN * 0.9));
+      autoReduced = true; cpuEMA = 4.5;
+    } else if (autoReduced && cpuEMA < 3.5 && activeN < (params.wordCount | 0)) {
+      activeN = Math.min(params.wordCount | 0, Math.round(activeN * 1.05) + 4);
+      if (activeN >= (params.wordCount | 0)) autoReduced = false;
+    }
+  }
+
+  /* ---------- GL ---------- */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  const [br, bg2, bb] = bgRGB();
+  gl.clearColor(br, bg2, bb, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  if (camReady) {
+    let mode = engaged ? 2 : 0;     // 2 = words, 0 = camera passthrough
+    if (params.showMask) mode = 1;
+
+    if (mode === 0 && video.readyState >= 2) {
+      gl.bindTexture(gl.TEXTURE_2D, camTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    }
+    if (mode === 1 && maskField) {
+      gl.bindTexture(gl.TEXTURE_2D, maskDebugTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, FW, FH, 0, gl.RED, gl.UNSIGNED_BYTE, maskField);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    }
+
+    if (mode !== 2) {
+      const [sx, sy, ox, oy] = coverFit();
+      gl.useProgram(progPass);
+      gl.bindVertexArray(quadVAO);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, camTex);
+      gl.uniform1i(uPass("uCam"), 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskDebugTex);
+      gl.uniform1i(uPass("uMask"), 1);
+      gl.uniform2f(uPass("uUVScale"), sx, sy);
+      gl.uniform2f(uPass("uUVOffset"), ox, oy);
+      gl.uniform1f(uPass("uMirror"), params.mirror ? 1 : 0);
+      gl.uniform1i(uPass("uMode"), mode);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else if (instCount > 0) {
+      // instanced word draw: shadow pass (offset, dark) then ink pass
+      gl.useProgram(progWord);
+      gl.bindVertexArray(wordVAO);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // premultiplied alpha
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+      gl.uniform1i(uWord("uAtlas"), 0);
+      gl.uniform2f(uWord("uRes"), canvas.width, canvas.height);
+      // 1) subtle print-depth shadow (offset, dark, low alpha)
+      gl.uniform2f(uWord("uOffsetPx"), 1.5 * dpr, 1.5 * dpr);
+      gl.uniform3f(uWord("uColor"), br * 0.35, bg2 * 0.35, bb * 0.35);
+      gl.uniform1f(uWord("uAlphaScale"), 0.45);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
+      // 2) near-white lettering (#F2F4F8 · Letter brightness)
+      const lb = params.brightness;
+      gl.uniform2f(uWord("uOffsetPx"), 0, 0);
+      gl.uniform3f(uWord("uColor"), 0.949 * lb, 0.957 * lb, 0.973 * lb);
+      gl.uniform1f(uWord("uAlphaScale"), 1.0);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
+      gl.disable(gl.BLEND);
+    }
+  }
+
+  /* ---------- readout ~2 Hz ---------- */
+  if (now - lastReadout > 500) {
+    lastReadout = now;
+    $("readout").textContent =
+      `fps ${fpsEMA.toFixed(0).padStart(3)}  words ${visibleWords}/${activeN}` +
+      `${autoReduced ? " (auto-reduced)" : ""}\n` +
+      `atlas ${atlasW}×${atlasH}  ·  model: ${modelStatus}`;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- Save PNG (preserveDrawingBuffer keeps the last frame) ---------- */
+$("saveBtn").addEventListener("click", () => {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `typo-cam-${Date.now()}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, "image/png");
+});
+
+/* ---------- go ---------- */
+startCamera();
+loadModel();
+</script>
+</body>
+</html>

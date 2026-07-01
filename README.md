@@ -14,4 +14,6 @@
 [https://dsflon.github.io/webgl2/ascii_opus4_8.html](https://dsflon.github.io/webgl2/ascii_opus4_8.html)  
 [https://dsflon.github.io/webgl2/van-gogh_sakana.html](https://dsflon.github.io/webgl2/van-gogh_sakana.html)  
 [https://dsflon.github.io/webgl2/fable5_scribble-cam.html](https://dsflon.github.io/webgl2/fable5_scribble-cam.html)  
-[https://dsflon.github.io/webgl2/fable5_water-cam.html](https://dsflon.github.io/webgl2/fable5_water-cam.html)
+[https://dsflon.github.io/webgl2/fable5_water-cam.html](https://dsflon.github.io/webgl2/fable5_water-cam.html)  
+[https://dsflon.github.io/webgl2/fable5_oneline-cam.html](https://dsflon.github.io/webgl2/fable5_oneline-cam.html)  
+[https://dsflon.github.io/webgl2/fable5_typo-cam.html](https://dsflon.github.io/webgl2/fable5_typo-cam.html)
