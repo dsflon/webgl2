@@ -1,0 +1,1726 @@
+<!doctype html>
+<!--
+  fable5_van-gogh.html — WebGL2 webcam → 後期ゴッホ油彩レンダラー
+
+  ゴッホ様式(1888-1890 アルル/サン=レミ/オーヴェル期)の解析と、対応する実装:
+
+  1. 筆致(タッチ)が1本ずつ独立している
+       ゴッホの絵は「ぼかし」ではなく、絵の具を多く含ませた短い筆致を
+       1本ずつ並置して構成される。本実装はスクリーン空間のスミアを廃し、
+       インスタンシングした数万個の筆致クワッドを実際に1本ずつ描く。
+       各筆致は中心 1 点(ミップ平均)から採色した「ほぼ均一な 1 色」。
+
+  2. 筆致は形の輪郭に沿って流れる
+       構造テンソル(edge tangent flow)を平滑化した方向場に沿って筆致を
+       配向。空や壁などの平坦部は『星月夜』の渦(vortex + curl noise)へ
+       滑らかに遷移し、長くうねる筆致になる。被写体の細部は短い筆致。
+
+  3. 補色対比と分割筆触(broken color)
+       ウルトラマリン/コバルト × クロムイエローの対比。隣接する筆致間で
+       暖色/寒色・明度をわずかに振り、まれに補色のアクセント筆致を置く。
+
+  4. 厚塗り(インパスト)
+       MRT で筆致ごとに高さマップを同時に描き込み、法線を導出して
+       左上からの光で絵の具の隆起をライティング(拡散+鏡面)。
+
+  5. クロワゾニスム的な輪郭線
+       強いエッジに沿って暗いウルトラマリン/褐色の細い輪郭筆致レイヤーを
+       重ね、目鼻など形態の輪郭を「描き起こす」。
+
+  6. 代表作パレット(実作品の配色から採取した 4 プリセット)
+       - The Starry Night (1889)         : 群青の夜空 × クロムイエローの星
+       - Sunflowers (1888)               : ほぼ黄一色のトーン・オン・トーン
+       - Wheat Field with Cypresses (1889): 黄金の麦 × コバルトの空 × 糸杉の緑
+       - Self-Portrait (1889)            : 青緑の渦 × オレンジの髭の補色対比
+
+  実行方法:
+    python3 -m http.server 8888
+    → http://localhost:8888/fable5_van-gogh.html を開きカメラを許可
+    (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+
+  依存ライブラリなし。WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Van Gogh Cam — WebGL2 impasto strokes</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a1130;
+        --ink: #f3e6bb;
+        --muted: rgba(243, 230, 187, 0.68);
+        --panel: rgba(8, 14, 36, 0.78);
+        --line: rgba(243, 230, 187, 0.16);
+        --gold: #f2c230;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            circle at 76% 16%,
+            rgba(242, 194, 48, 0.16),
+            transparent 26%
+          ),
+          radial-gradient(
+            circle at 18% 82%,
+            rgba(42, 96, 176, 0.28),
+            transparent 36%
+          ),
+          linear-gradient(140deg, #070d26, #10193b 52%, #221607);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+      }
+
+      video {
+        position: fixed;
+        width: 1px;
+        height: 1px;
+        left: -10px;
+        top: -10px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .panel {
+        position: fixed;
+        top: max(58px, calc(env(safe-area-inset-top) + 58px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(352px, calc(100vw - 28px));
+        max-height: calc(100vh - 72px);
+        overflow: auto;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background:
+          linear-gradient(
+            180deg,
+            rgba(18, 34, 72, 0.82),
+            rgba(8, 14, 36, 0.68)
+          ),
+          var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        box-shadow:
+          0 18px 50px rgba(0, 0, 0, 0.36),
+          inset 0 1px 0 rgba(255, 244, 198, 0.12);
+        backdrop-filter: blur(15px);
+        transition:
+          opacity 0.25s ease,
+          transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+
+      .panel.collapsed {
+        opacity: 0;
+        pointer-events: none;
+        transform: translateX(calc(-100% - 18px));
+      }
+
+      .panel h1 {
+        margin: 0 0 4px;
+        color: rgba(255, 235, 168, 0.96);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.22em;
+      }
+
+      .panel p {
+        margin: 0 0 10px;
+        font-size: 10px;
+        line-height: 1.55;
+        letter-spacing: 0.04em;
+      }
+
+      .select-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 0;
+        border-top: 1px solid rgba(243, 230, 187, 0.1);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+
+      select {
+        min-height: 30px;
+        padding: 4px 8px;
+        color: rgba(255, 235, 168, 0.94);
+        background: rgba(12, 30, 66, 0.72);
+        border: 1px solid rgba(243, 230, 187, 0.2);
+        border-radius: 8px;
+        font-family: inherit;
+        font-size: 10px;
+        letter-spacing: 0.06em;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 64px;
+        gap: 7px 10px;
+        align-items: center;
+        padding: 8px 0;
+        border-top: 1px solid rgba(243, 230, 187, 0.1);
+      }
+
+      .row label {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        color: rgba(243, 230, 187, 0.82);
+        font-size: 10px;
+        letter-spacing: 0.07em;
+      }
+
+      .row label span {
+        color: rgba(243, 230, 187, 0.46);
+        font-size: 9px;
+        letter-spacing: 0.03em;
+      }
+
+      .row output {
+        color: rgba(255, 235, 168, 0.8);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      input[type="range"] {
+        grid-column: 1 / -1;
+        width: 100%;
+        accent-color: var(--gold);
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 9px 0;
+        border-top: 1px solid rgba(243, 230, 187, 0.1);
+        color: rgba(243, 230, 187, 0.82);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+
+      input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--gold);
+      }
+
+      .buttons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      button {
+        min-height: 36px;
+        padding: 9px 12px;
+        color: rgba(255, 235, 168, 0.92);
+        background: rgba(12, 30, 66, 0.64);
+        border: 1px solid rgba(243, 230, 187, 0.18);
+        border-radius: 999px;
+        font-family: inherit;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: rgba(32, 66, 126, 0.78);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.5;
+      }
+
+      #flipCamera {
+        display: none;
+      }
+
+      #togglePanel {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 12;
+        min-width: 116px;
+        background: rgba(8, 14, 36, 0.78);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+        backdrop-filter: blur(15px);
+      }
+
+      .status {
+        margin-top: 10px;
+        padding-top: 9px;
+        border-top: 1px solid rgba(243, 230, 187, 0.1);
+        color: rgba(243, 230, 187, 0.58);
+        font-size: 9px;
+        line-height: 1.5;
+        letter-spacing: 0.05em;
+      }
+
+      .badge {
+        display: inline-block;
+        margin-top: 5px;
+        padding: 3px 7px;
+        color: rgba(255, 216, 88, 0.96);
+        background: rgba(242, 194, 48, 0.12);
+        border: 1px solid rgba(242, 194, 48, 0.22);
+        border-radius: 999px;
+      }
+
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 8;
+        display: grid;
+        place-items: center;
+        padding: 22px;
+        color: rgba(255, 235, 168, 0.92);
+        text-align: center;
+        pointer-events: none;
+        background:
+          radial-gradient(
+            circle at 50% 45%,
+            rgba(14, 34, 74, 0.44),
+            transparent 34%
+          ),
+          rgba(3, 8, 18, 0.42);
+        transition: opacity 0.25s ease;
+      }
+
+      #overlay.hidden {
+        opacity: 0;
+      }
+
+      .overlay-card {
+        width: min(520px, calc(100vw - 32px));
+        padding: 22px;
+        background: rgba(8, 14, 36, 0.78);
+        border: 1px solid rgba(243, 230, 187, 0.16);
+        border-radius: 20px;
+        box-shadow: 0 22px 70px rgba(0, 0, 0, 0.34);
+        backdrop-filter: blur(16px);
+        pointer-events: auto;
+      }
+
+      .overlay-card h2 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        letter-spacing: 0.18em;
+      }
+
+      .overlay-card p {
+        margin: 0 0 14px;
+        color: rgba(243, 230, 187, 0.66);
+        font-size: 11px;
+        line-height: 1.65;
+      }
+
+      @media (max-width: 720px) {
+        #togglePanel {
+          top: auto;
+          bottom: max(12px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          transition: bottom 0.3s ease;
+        }
+
+        #togglePanel.panel-open {
+          bottom: calc(56vh + 22px + max(12px, env(safe-area-inset-bottom)));
+        }
+
+        #flipCamera {
+          position: fixed;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(12px, env(safe-area-inset-bottom));
+          z-index: 12;
+          min-width: 116px;
+          display: block;
+          background: rgba(8, 14, 36, 0.78);
+          box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+          backdrop-filter: blur(15px);
+          transition: bottom 0.3s ease;
+        }
+
+        #flipCamera.panel-open {
+          bottom: calc(56vh + 22px + max(12px, env(safe-area-inset-bottom)));
+        }
+
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 56vh;
+          padding: 12px;
+        }
+
+        .panel.collapsed {
+          transform: translateY(calc(100% + 18px));
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 Van Gogh webcam oil painting"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button
+      id="togglePanel"
+      type="button"
+      class="panel-open"
+      aria-expanded="true"
+    >
+      HIDE UI
+    </button>
+    <button
+      id="flipCamera"
+      type="button"
+      class="panel-open"
+      aria-label="Switch camera"
+    >
+      REAR CAM
+    </button>
+
+    <section
+      id="panel"
+      class="panel"
+      aria-label="Van Gogh webcam controls"
+    ></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+        const flipCameraBtn = document.getElementById("flipCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        /*
+          Palettes sampled from the actual paintings. Each preset defines:
+            shadow / mid / light — split-toning targets by luminance zone
+            accent — rare complementary accent strokes (broken color)
+            ink    — cloisonnist contour-stroke color
+            ground — underpainting color visible between strokes
+        */
+        const PRESETS = {
+          starry: {
+            label: "The Starry Night · 1889",
+            shadow: "#122a63",
+            mid: "#2f6cb0",
+            light: "#ffd23f",
+            accent: "#ff9b1f",
+            ink: "#0a1638",
+            ground: "#0b1233",
+          },
+          sunflowers: {
+            label: "Sunflowers · 1888",
+            shadow: "#7a4a10",
+            mid: "#c9901e",
+            light: "#ffe063",
+            accent: "#2e6f8e",
+            ink: "#6b3d0e",
+            ground: "#c29b41",
+          },
+          wheat: {
+            label: "Wheat Field with Cypresses · 1889",
+            shadow: "#2b4f8f",
+            mid: "#8aa04f",
+            light: "#f0cf51",
+            accent: "#1d4a2c",
+            ink: "#233a24",
+            ground: "#8a7434",
+          },
+          portrait: {
+            label: "Self-Portrait · 1889",
+            shadow: "#173f45",
+            mid: "#3e8891",
+            light: "#e3d3ac",
+            accent: "#d96e2b",
+            ink: "#0d2b30",
+            ground: "#28545a",
+          },
+        };
+
+        const DEFAULTS = {
+          swirl: 1.0,
+          strokeLen: 1.0,
+          brushSize: 1.0,
+          density: 1.0,
+          colorVar: 0.7,
+          palette: 0.8,
+          saturation: 1.45,
+          impasto: 0.8,
+          outline: 0.55,
+          canvasTex: 0.3,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          preset: "starry",
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion,
+        };
+
+        const uiRows = [
+          [
+            "swirl",
+            "Swirl",
+            "Starry-Night vortices in flat regions",
+            0,
+            1.8,
+            0.01,
+          ],
+          [
+            "strokeLen",
+            "Stroke length",
+            "dab length; detail areas stay shorter",
+            0.4,
+            2.2,
+            0.01,
+          ],
+          [
+            "brushSize",
+            "Brush size",
+            "overall stroke width and spacing",
+            0.5,
+            2.2,
+            0.01,
+          ],
+          [
+            "density",
+            "Stroke density",
+            "how tightly strokes are packed",
+            0.5,
+            1.8,
+            0.01,
+          ],
+          [
+            "colorVar",
+            "Broken color",
+            "warm/cool jitter between neighbouring strokes",
+            0,
+            1.5,
+            0.01,
+          ],
+          [
+            "palette",
+            "Palette strength",
+            "pull toward the selected painting's colors",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "saturation",
+            "Saturation",
+            "pre-palette chroma boost",
+            0.6,
+            2.2,
+            0.01,
+          ],
+          [
+            "impasto",
+            "Impasto",
+            "raised-paint relief lighting",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "outline",
+            "Contour ink",
+            "dark cloisonnist outline strokes on edges",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "canvasTex",
+            "Canvas texture",
+            "linen weave showing through thin paint",
+            0,
+            0.8,
+            0.01,
+          ],
+        ];
+
+        panel.innerHTML = `
+          <h1>FABLE5 · VAN GOGH CAM</h1>
+          <p>
+            Tens of thousands of individual instanced brush dabs follow a
+            smoothed edge-tangent flow field, each loaded with one color,
+            layered coarse-to-fine with impasto relief and contour ink.
+          </p>
+          <div class="select-row">
+            <span>PALETTE / WORK</span>
+            <select id="preset" aria-label="Palette preset">
+              ${Object.entries(PRESETS)
+                .map(
+                  ([key, p]) =>
+                    `<option value="${key}"${
+                      key === state.preset ? " selected" : ""
+                    }>${p.label}</option>`,
+                )
+                .join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input
+                    id="${key}"
+                    type="range"
+                    min="${min}"
+                    max="${max}"
+                    step="${step}"
+                    value="${state[key]}"
+                  />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>Mirror webcam</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>Pause living strokes</span>
+            <input id="pauseAnim" type="checkbox" ${
+              state.pauseAnim ? "checked" : ""
+            } />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / RES -- / STROKES --</div>
+            <span class="badge">WebGL2 / instanced strokes / no libraries</span>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        document
+          .getElementById("preset")
+          .addEventListener("change", (event) => {
+            state.preset = event.currentTarget.value;
+          });
+
+        document
+          .getElementById("mirror")
+          .addEventListener("change", (event) => {
+            state.mirror = event.currentTarget.checked;
+          });
+
+        document
+          .getElementById("pauseAnim")
+          .addEventListener("change", (event) => {
+            state.pauseAnim = event.currentTarget.checked;
+          });
+
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.assign(state, DEFAULTS);
+          Object.keys(DEFAULTS).forEach((key) => {
+            document.getElementById(key).value = state[key];
+            document.getElementById(`${key}Out`).textContent = formatValue(
+              state[key],
+            );
+          });
+        });
+
+        togglePanel.addEventListener("click", () => {
+          const collapsed = panel.classList.toggle("collapsed");
+          togglePanel.textContent = collapsed ? "SHOW UI" : "HIDE UI";
+          togglePanel.classList.toggle("panel-open", !collapsed);
+          flipCameraBtn.classList.toggle("panel-open", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        });
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode =
+            state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+
+          // Front camera mirrors like a selfie preview, rear shows the world.
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          // preserveDrawingBuffer is on, so the current frame exports directly.
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-vangogh-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        retryCamera.addEventListener("click", () => {
+          startCamera();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, showRetry = false) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !showRetry;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        function hexToRgb(hex) {
+          const value = hex.replace("#", "");
+          return [
+            parseInt(value.slice(0, 2), 16) / 255,
+            parseInt(value.slice(2, 4), 16) / 255,
+            parseInt(value.slice(4, 6), 16) / 255,
+          ];
+        }
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+            false,
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0),
+            vec2( 3.0, -1.0),
+            vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        const common = `#version 300 es
+          precision highp float;
+          precision highp int;
+          in vec2 vUv;
+
+          float luma(vec3 c) {
+            return dot(c, vec3(0.299, 0.587, 0.114));
+          }
+
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+
+          float fbm(vec2 p) {
+            float v = 0.0;
+            float a = 0.5;
+            mat2 r = mat2(0.8, -0.6, 0.6, 0.8);
+            for (int i = 0; i < 4; i++) {
+              v += a * vnoise(p);
+              p = r * p * 2.03 + 17.1;
+              a *= 0.5;
+            }
+            return v;
+          }
+        `;
+
+        // Pass 0 — cover-fit the camera frame into the paint-resolution buffer.
+        const sceneFS = `${common}
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform bool uMirror;
+          out vec4 fragColor;
+
+          vec2 coverUv(vec2 uv) {
+            float canvasAspect = uResolution.x / max(uResolution.y, 1.0);
+            float videoAspect = uVideoSize.x / max(uVideoSize.y, 1.0);
+            vec2 st = uv;
+            if (canvasAspect > videoAspect) {
+              float scale = canvasAspect / videoAspect;
+              st.y = (uv.y - 0.5) / scale + 0.5;
+            } else {
+              float scale = videoAspect / canvasAspect;
+              st.x = (uv.x - 0.5) / scale + 0.5;
+            }
+            if (uMirror) st.x = 1.0 - st.x;
+            return st;
+          }
+
+          void main() {
+            vec2 st = clamp(coverUv(vUv), 0.001, 0.999);
+            fragColor = vec4(texture(uVideo, st).rgb, 1.0);
+          }
+        `;
+
+        // Pass 1 — Van Gogh color grading: saturation boost, luminance-zone
+        // split toning toward the selected painting, complementary push.
+        // Strokes later sample THIS texture (mipmapped) for their single color.
+        const gradeFS = `${common}
+          uniform sampler2D uScene;
+          uniform float uPalette;
+          uniform float uSaturation;
+          uniform vec3 uShadow;
+          uniform vec3 uMid;
+          uniform vec3 uLight;
+          out vec4 fragColor;
+
+          void main() {
+            vec3 c = texture(uScene, vUv).rgb;
+            float l = luma(c);
+            c = mix(vec3(l), c, uSaturation);
+            c = clamp((c - 0.5) * 1.1 + 0.5, 0.0, 1.0);
+            l = luma(c);
+
+            // Push desaturated (gray) areas harder toward the painting palette;
+            // strongly-colored objects keep their local color, intensified.
+            float mx = max(max(c.r, c.g), c.b);
+            float mn = min(min(c.r, c.g), c.b);
+            float gray = 1.0 - clamp((mx - mn) * 2.4, 0.0, 1.0);
+
+            float sw = 1.0 - smoothstep(0.10, 0.48, l);
+            float mw = smoothstep(0.18, 0.5, l) * (1.0 - smoothstep(0.5, 0.85, l));
+            float hw = smoothstep(0.55, 0.95, l);
+
+            c = mix(c, uShadow * (0.35 + 1.5 * l), sw * uPalette * (0.50 + 0.35 * gray));
+            c = mix(c, uMid * (0.45 + 1.1 * l), mw * uPalette * (0.22 + 0.30 * gray));
+            c = mix(c, uLight * (0.75 + 0.35 * l), hw * uPalette * (0.45 + 0.25 * gray));
+
+            // Blue/yellow complementary separation instead of plain saturation.
+            float warm = clamp((c.r + 0.55 * c.g - 1.25 * c.b) * 1.4, -1.0, 1.0);
+            c *= mix(vec3(0.88, 0.97, 1.16), vec3(1.14, 1.04, 0.80), warm * 0.5 + 0.5);
+
+            fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        // Pass 2 — flow field at reduced resolution. A blurred structure tensor
+        // gives the edge-tangent direction (strokes run ALONG contours); flat
+        // low-coherence regions blend into animated vortices + curl noise.
+        // Output: xy = double-angle direction, z = coherence, w = edge strength.
+        const flowFS = `${common}
+          uniform sampler2D uScene;
+          uniform vec2 uSceneRes;
+          uniform float uTime;
+          uniform float uSwirl;
+          out vec4 fragColor;
+
+          float sceneLuma(vec2 uv) {
+            return luma(texture(uScene, clamp(uv, 0.001, 0.999)).rgb);
+          }
+
+          vec3 tensorAt(vec2 uv, vec2 texel) {
+            float tl = sceneLuma(uv + texel * vec2(-1.0,  1.0));
+            float tc = sceneLuma(uv + texel * vec2( 0.0,  1.0));
+            float tr = sceneLuma(uv + texel * vec2( 1.0,  1.0));
+            float ml = sceneLuma(uv + texel * vec2(-1.0,  0.0));
+            float mr = sceneLuma(uv + texel * vec2( 1.0,  0.0));
+            float bl = sceneLuma(uv + texel * vec2(-1.0, -1.0));
+            float bc = sceneLuma(uv + texel * vec2( 0.0, -1.0));
+            float br = sceneLuma(uv + texel * vec2( 1.0, -1.0));
+            float gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
+            float gy = -bl - 2.0 * bc - br + tl + 2.0 * tc + tr;
+            return vec3(gx * gx, gx * gy, gy * gy);
+          }
+
+          vec2 swirlDir(vec2 uv) {
+            vec2 aspect = vec2(uSceneRes.x / max(uSceneRes.y, 1.0), 1.0);
+            vec2 p = (uv - 0.5) * aspect;
+            vec2 field = vec2(0.0);
+
+            // Drifting Starry-Night vortices, amplitude driven by the slider.
+            for (int i = 0; i < 4; i++) {
+              float fi = float(i);
+              vec2 c = vec2(
+                sin(uTime * (0.11 + fi * 0.019) + fi * 2.11) * 0.36,
+                cos(uTime * (0.09 + fi * 0.015) + fi * 1.37) * 0.26
+              );
+              vec2 d = p - c;
+              float r2 = dot(d, d) + 0.02 + 0.014 * fi;
+              float spin = mix(-1.0, 1.0, step(0.5, fract(fi * 0.5)));
+              field += spin * vec2(-d.y, d.x) / r2 * uSwirl;
+            }
+
+            // Curl of value noise keeps flat areas flowing even at swirl = 0.
+            vec2 e = vec2(0.014, 0.0);
+            float t = uTime * 0.02;
+            float nx1 = fbm(uv * 3.6 + vec2(0.0, t) + e.xy);
+            float nx0 = fbm(uv * 3.6 + vec2(0.0, t) - e.xy);
+            float ny1 = fbm(uv * 3.6 + vec2(t, 0.0) + e.yx);
+            float ny0 = fbm(uv * 3.6 + vec2(t, 0.0) - e.yx);
+            field += vec2(ny1 - ny0, -(nx1 - nx0)) * 16.0;
+
+            return normalize(field + vec2(0.0001, 0.0));
+          }
+
+          void main() {
+            vec2 texel = 1.0 / uSceneRes;
+
+            // 3x3 gaussian-weighted average of structure tensors = smoothed ETF.
+            vec3 T = vec3(0.0);
+            float wsum = 0.0;
+            for (int dy = -1; dy <= 1; dy++) {
+              for (int dx = -1; dx <= 1; dx++) {
+                float w = exp(-0.5 * float(dx * dx + dy * dy));
+                T += tensorAt(vUv + vec2(float(dx), float(dy)) * texel * 2.4, texel * 1.4) * w;
+                wsum += w;
+              }
+            }
+            T /= wsum;
+
+            float E = T.x;
+            float F = T.y;
+            float G = T.z;
+            float det = sqrt(max((E - G) * (E - G) + 4.0 * F * F, 0.0));
+            // Minor eigenvector = edge tangent (gradient direction rotated 90°).
+            float phi = 0.5 * atan(2.0 * F, E - G) + 1.5707963;
+            float aniso = det / (E + G + 1e-5);
+            float mag = clamp(sqrt(E + G) * 1.4, 0.0, 1.0);
+
+            // Double-angle encoding avoids the ±180° sign discontinuity when the
+            // texture is bilinearly interpolated by the stroke vertex shader.
+            vec2 tv = vec2(cos(2.0 * phi), sin(2.0 * phi));
+            vec2 sd = swirlDir(vUv);
+            float sa = atan(sd.y, sd.x);
+            vec2 sv = vec2(cos(2.0 * sa), sin(2.0 * sa));
+
+            float cohere = smoothstep(0.04, 0.16, mag) * smoothstep(0.18, 0.55, aniso);
+            vec2 dv = normalize(mix(tv, sv, 1.0 - cohere) + vec2(1e-5, 0.0));
+
+            float edge = smoothstep(0.05, 0.5, mag);
+            fragColor = vec4(dv * 0.5 + 0.5, cohere, edge);
+          }
+        `;
+
+        // Pass 3 — THE strokes. Instanced quads: position from a jittered grid,
+        // orientation from the flow field, one color per stroke from the graded
+        // texture's mip pyramid. MRT writes paint color + impasto height.
+        const strokeVS = `#version 300 es
+          precision highp float;
+          precision highp int;
+
+          uniform sampler2D uFlow;
+          uniform sampler2D uColor;
+          uniform vec2 uPaintRes;
+          uniform float uSpacing;
+          uniform int uCols;
+          uniform float uLenMul;
+          uniform float uWidthMul;
+          uniform float uSeed;
+          uniform int uLayer;        // 0 base, 1 mid, 2 detail, 3 contour ink
+          uniform float uStrokeLen;
+          uniform float uColorVar;
+          uniform float uOutline;
+          uniform float uTime;
+          uniform float uAnimate;
+          uniform vec3 uInk;
+          uniform vec3 uAccent;
+
+          out vec2 vLocal;
+          out vec3 vColor;
+          out float vAlphaMul;
+          out float vSeed;
+          out float vCurve;
+          out float vPad;
+
+          const vec2 CORNERS[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
+            vec2(-1.0, -1.0), vec2(1.0,  1.0), vec2(-1.0, 1.0)
+          );
+
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+
+          float lum(vec3 c) {
+            return dot(c, vec3(0.299, 0.587, 0.114));
+          }
+
+          void main() {
+            vec2 cell = vec2(
+              float(gl_InstanceID % uCols),
+              float(gl_InstanceID / uCols)
+            );
+            float h1 = hash12(cell * 1.61 + uSeed);
+            float h2 = hash12(cell * 2.73 + uSeed + 19.0);
+            float h3 = hash12(cell + uSeed + 7.7);
+            float h4 = hash12(cell.yx * 3.17 + uSeed + 3.1);
+
+            vec2 centerPx = (cell + 0.5) * uSpacing
+              + (vec2(h1, h2) - 0.5) * uSpacing * 1.15;
+            vec2 uv = centerPx / uPaintRes;
+
+            vec4 flow = textureLod(uFlow, uv, 0.0);
+            vec2 dbl = flow.xy * 2.0 - 1.0;
+            float angle = 0.5 * atan(dbl.y, dbl.x);
+            float cohere = flow.z;
+            float edge = flow.w;
+
+            // Per-stroke orientation jitter + slow "living painting" wobble.
+            angle += (h3 - 0.5) * 0.34;
+            angle += uAnimate * sin(uTime * 0.7 + h1 * 6.2831) * 0.05;
+            vec2 dir = vec2(cos(angle), sin(angle));
+            vec2 nrm = vec2(-dir.y, dir.x);
+
+            // Long flowing dabs in flat/sky regions, short dabs over detail.
+            float lenPx = uSpacing * uLenMul * uStrokeLen
+              * mix(1.25, 0.55, edge) * (0.75 + 0.5 * h2);
+            float widthPx = uSpacing * uWidthMul * (0.80 + 0.45 * h3);
+
+            // Gate detail strokes to detailed areas, contour ink to hard edges.
+            float gate = 1.0;
+            if (uLayer == 2) gate = smoothstep(0.10, 0.34, edge);
+            if (uLayer == 3) gate = smoothstep(0.30, 0.62, edge) * uOutline;
+            widthPx *= step(0.03, gate);
+            vAlphaMul = clamp(gate * 1.5, 0.0, 1.0) * 0.97;
+            if (uLayer == 3) vAlphaMul *= 0.8; // ink sinks into wet paint
+
+            // One flat color per stroke = area average via the mip pyramid.
+            float lod = clamp(log2(max(uSpacing * 0.5, 1.0)), 0.0, 6.0);
+            vec3 col = textureLod(uColor, uv, lod).rgb;
+
+            // Broken color: neighbouring strokes alternate warm/cool and value.
+            float wc = h4;
+            vec3 tint = mix(vec3(0.86, 0.96, 1.16), vec3(1.15, 1.03, 0.82), wc);
+            col *= mix(vec3(1.0), tint, uColorVar * 0.8);
+            col *= 1.0 + (hash12(cell + 31.7) - 0.5) * 0.30 * uColorVar;
+
+            // Rare complementary accent dabs (Van Gogh's punctuating touches).
+            if (uLayer == 1 || uLayer == 2) {
+              float acc = step(0.975, hash12(cell * 4.9 + uSeed + 57.0));
+              col = mix(col, uAccent * (0.55 + 0.9 * lum(col)), acc * 0.7 * uColorVar);
+            }
+
+            if (uLayer == 3) {
+              // Cloisonnist contour: dark ink mixed with the local color.
+              col = mix(col * 0.32, uInk, 0.72);
+              lenPx *= 1.1;
+            }
+
+            // Curved dabs in flat regions (sky commas), straighter on detail.
+            vCurve = (h2 - 0.5) * 2.0 * mix(0.55, 0.12, edge) * (0.4 + 0.6 * cohere);
+            vPad = 1.35 + abs(vCurve) * 0.9;
+
+            vec2 corner = CORNERS[gl_VertexID];
+            vec2 posPx = centerPx
+              + dir * corner.x * lenPx * 0.5
+              + nrm * corner.y * widthPx * 0.5 * vPad;
+
+            vLocal = corner;
+            vColor = clamp(col, 0.0, 1.0);
+            vSeed = hash12(cell * 7.31 + uSeed) * 43.7;
+            gl_Position = vec4(posPx / uPaintRes * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const strokeFS = `#version 300 es
+          precision highp float;
+
+          in vec2 vLocal;
+          in vec3 vColor;
+          in float vAlphaMul;
+          in float vSeed;
+          in float vCurve;
+          in float vPad;
+
+          layout(location = 0) out vec4 oColor;
+          layout(location = 1) out vec4 oHeight;
+
+          float hash11(float p) {
+            p = fract(p * 0.1031);
+            p *= p + 33.33;
+            p *= p + p;
+            return fract(p);
+          }
+
+          float noise1(float x) {
+            float i = floor(x);
+            float f = fract(x);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(hash11(i), hash11(i + 1.0), f);
+          }
+
+          void main() {
+            float u = vLocal.x;
+            float v = vLocal.y * vPad;
+
+            // Bend the centre line: comma-shaped dabs.
+            v -= vCurve * (u * u - 0.4);
+
+            // Bristle streaks along the dab + slightly ragged edges.
+            float br = noise1(v * 2.8 + vSeed * 1.7);
+            float rag = noise1(v * 6.0 - vSeed * 0.9 + u * 1.5);
+            v += (rag - 0.5) * 0.12;
+
+            float body = 1.0 - smoothstep(0.60, 1.0, abs(v));
+            float cap = 1.0 - smoothstep(0.55, 1.0, abs(u) + v * v * 0.30);
+            float alpha = body * cap * (0.88 + 0.12 * noise1(u * 4.0 + vSeed * 2.3));
+            if (alpha < 0.02) discard;
+
+            vec3 col = vColor * (1.0 + (br - 0.5) * 0.20);
+            col *= 1.0 - smoothstep(0.45, 1.0, abs(v)) * 0.16; // darker paint rims
+
+            float a = clamp(alpha * vAlphaMul, 0.0, 1.0);
+            float h = (1.0 - v * v * 0.8) * cap * (0.70 + 0.30 * br);
+
+            oColor = vec4(col, a);
+            oHeight = vec4(vec3(h), a * 0.9);
+          }
+        `;
+
+        // Pass 4 — composite: impasto relighting from the stroke height field,
+        // linen weave through thin paint, vignette, warm varnish.
+        const finalFS = `${common}
+          uniform sampler2D uPaintTex;
+          uniform sampler2D uHeightTex;
+          uniform vec2 uPaintRes;
+          uniform vec2 uResolution;
+          uniform float uImpasto;
+          uniform float uCanvasTex;
+          out vec4 fragColor;
+
+          void main() {
+            vec2 uv = vUv;
+            vec3 col = texture(uPaintTex, uv).rgb;
+            vec2 texel = 1.0 / uPaintRes;
+
+            float hC = texture(uHeightTex, uv).r;
+            float hL = texture(uHeightTex, uv - vec2(texel.x, 0.0)).r;
+            float hR = texture(uHeightTex, uv + vec2(texel.x, 0.0)).r;
+            float hD = texture(uHeightTex, uv - vec2(0.0, texel.y)).r;
+            float hU = texture(uHeightTex, uv + vec2(0.0, texel.y)).r;
+
+            vec3 n = normalize(vec3(
+              (hL - hR) * uImpasto * 2.8,
+              (hD - hU) * uImpasto * 2.8,
+              1.0
+            ));
+            vec3 lightDir = normalize(vec3(-0.5, 0.62, 0.72)); // upper-left
+            float diffuse = clamp(dot(n, lightDir), 0.0, 1.0);
+            vec3 halfDir = normalize(lightDir + vec3(0.0, 0.0, 1.0));
+            float spec = pow(max(dot(n, halfDir), 0.0), 16.0);
+
+            col *= mix(1.0, 0.68 + 0.48 * diffuse, uImpasto * 0.85);
+            col += vec3(1.0, 0.92, 0.72) * spec * uImpasto * 0.20;
+
+            // Linen weave, strongest where the paint is thin over the ground.
+            vec2 p = uv * uResolution;
+            float wx = sin(p.x * 1.85 + 2.2 * fbm(uv * 34.0));
+            float wy = sin(p.y * 1.62 + 2.2 * fbm(uv.yx * 29.0));
+            float weave = wx * wy * 0.5 + (fbm(p * 0.05) - 0.5) * 0.6;
+            float thin = 1.0 - smoothstep(0.12, 0.7, hC);
+            col *= 1.0 + weave * uCanvasTex * (0.08 + 0.26 * thin);
+
+            // Vignette + warm varnish.
+            vec2 d = uv - 0.5;
+            d.x *= uResolution.x / max(uResolution.y, 1.0);
+            col *= mix(0.82, 1.03, smoothstep(0.95, 0.25, dot(d, d)));
+            col *= vec3(1.015, 0.995, 0.955);
+
+            fragColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.96)), 1.0);
+          }
+        `;
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            const info = gl.getShaderInfoLog(shader) || "unknown shader error";
+            gl.deleteShader(shader);
+            throw new Error(info);
+          }
+          return shader;
+        }
+
+        function makeProgram(vsSource, fsSource) {
+          const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+          const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+          const program = gl.createProgram();
+          gl.attachShader(program, vs);
+          gl.attachShader(program, fs);
+          gl.linkProgram(program);
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            const info = gl.getProgramInfoLog(program) || "unknown link error";
+            gl.deleteProgram(program);
+            throw new Error(info);
+          }
+          return program;
+        }
+
+        function collectUniforms(program) {
+          const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
+          const map = {};
+          for (let i = 0; i < count; i++) {
+            const info = gl.getActiveUniform(program, i);
+            if (!info) continue;
+            const name = info.name.replace(/\[0\]$/, "");
+            map[name] = gl.getUniformLocation(program, name);
+          }
+          return map;
+        }
+
+        const programs = {
+          scene: makeProgram(fullscreenVS, sceneFS),
+          grade: makeProgram(fullscreenVS, gradeFS),
+          flow: makeProgram(fullscreenVS, flowFS),
+          stroke: makeProgram(strokeVS, strokeFS),
+          final: makeProgram(fullscreenVS, finalFS),
+        };
+
+        const locations = {};
+        for (const [name, program] of Object.entries(programs)) {
+          locations[name] = collectUniforms(program);
+        }
+
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          2,
+          2,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          new Uint8Array([
+            10, 18, 48, 255, 22, 44, 92, 255, 30, 62, 132, 255, 242, 194, 48,
+            255,
+          ]),
+        );
+
+        function makeTexture(width, height, mipmap) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(
+            gl.TEXTURE_2D,
+            gl.TEXTURE_MIN_FILTER,
+            mipmap ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR,
+          );
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA8,
+            width,
+            height,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            null,
+          );
+          return tex;
+        }
+
+        function makeTarget(width, height, mipmap = false) {
+          const tex = makeTexture(width, height, mipmap);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0,
+          );
+          checkFbo();
+          return { tex, fbo, width, height };
+        }
+
+        function makePaintTarget(width, height) {
+          const colorTex = makeTexture(width, height, false);
+          const heightTex = makeTexture(width, height, false);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            colorTex,
+            0,
+          );
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT1,
+            gl.TEXTURE_2D,
+            heightTex,
+            0,
+          );
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+          checkFbo();
+          return { colorTex, heightTex, fbo, width, height };
+        }
+
+        function checkFbo() {
+          const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+          if (status !== gl.FRAMEBUFFER_COMPLETE) {
+            throw new Error(`Framebuffer incomplete: ${status}`);
+          }
+        }
+
+        function deleteTarget(target) {
+          if (!target) return;
+          gl.deleteFramebuffer(target.fbo);
+          if (target.tex) gl.deleteTexture(target.tex);
+          if (target.colorTex) gl.deleteTexture(target.colorTex);
+          if (target.heightTex) gl.deleteTexture(target.heightTex);
+        }
+
+        let targets = null;
+        let paintW = 0;
+        let paintH = 0;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(deleteTarget);
+          targets = {
+            scene: makeTarget(paintW, paintH),
+            grade: makeTarget(paintW, paintH, true),
+            flow: makeTarget(
+              Math.max(2, Math.round(paintW / 3)),
+              Math.max(2, Math.round(paintH / 3)),
+            ),
+            paint: makePaintTarget(paintW, paintH),
+          };
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            // Cap the paint buffer so stroke fill-rate stays mobile-friendly;
+            // the final pass upscales and adds full-resolution weave/lighting.
+            const paintScale = Math.min(1, 1408 / Math.max(width, height));
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            rebuildTargets();
+          }
+        }
+
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(
+            0,
+            0,
+            target ? target.width : canvas.width,
+            target ? target.height : canvas.height,
+          );
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        /*
+          Stroke layers, coarse to fine (painted "fat over lean"):
+            0 base    — broad underpainting dabs, cover everything
+            1 mid     — the main visible stroke layer
+            2 detail  — small dabs, only where the image has detail
+            3 contour — thin dark cloisonnist ink along strong edges
+          spacing is in paint-buffer pixels before user scaling.
+        */
+        const LAYERS = [
+          { layer: 0, spacing: 34, lenMul: 2.1, widthMul: 0.74, seed: 5.0 },
+          { layer: 1, spacing: 19, lenMul: 1.9, widthMul: 0.72, seed: 23.0 },
+          { layer: 2, spacing: 10.5, lenMul: 1.6, widthMul: 0.68, seed: 47.0 },
+          { layer: 3, spacing: 6.5, lenMul: 2.6, widthMul: 0.24, seed: 71.0 },
+        ];
+        const MAX_INSTANCES = 60000;
+
+        let stream = null;
+        let cameraReady = false;
+        let animationTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let strokeCount = 0;
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 &&
+            video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              video,
+            );
+          }
+        }
+
+        function drawStrokes(preset) {
+          const t = targets.paint;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+          gl.viewport(0, 0, t.width, t.height);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+
+          const ground = hexToRgb(preset.ground);
+          gl.clearBufferfv(gl.COLOR, 0, [...ground, 1]);
+          gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 1]);
+
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+          const program = programs.stroke;
+          const u = locations.stroke;
+          gl.useProgram(program);
+          bindTexture(0, targets.flow.tex);
+          bindTexture(1, targets.grade.tex);
+          gl.uniform1i(u.uFlow, 0);
+          gl.uniform1i(u.uColor, 1);
+          gl.uniform2f(u.uPaintRes, t.width, t.height);
+          gl.uniform1f(u.uStrokeLen, state.strokeLen);
+          gl.uniform1f(u.uColorVar, state.colorVar);
+          gl.uniform1f(u.uOutline, state.outline);
+          gl.uniform1f(u.uTime, animationTime);
+          gl.uniform1f(u.uAnimate, state.pauseAnim ? 0 : 1);
+          gl.uniform3fv(u.uInk, hexToRgb(preset.ink));
+          gl.uniform3fv(u.uAccent, hexToRgb(preset.accent));
+
+          strokeCount = 0;
+          for (const layer of LAYERS) {
+            if (layer.layer === 3 && state.outline <= 0.001) continue;
+            let spacing =
+              (layer.spacing * state.brushSize) / Math.max(state.density, 0.2);
+            spacing = Math.max(
+              spacing,
+              Math.sqrt((t.width * t.height) / MAX_INSTANCES),
+              4,
+            );
+            const cols = Math.ceil(t.width / spacing);
+            const rows = Math.ceil(t.height / spacing);
+            const count = cols * rows;
+            strokeCount += count;
+
+            gl.uniform1f(u.uSpacing, spacing);
+            gl.uniform1i(u.uCols, cols);
+            gl.uniform1f(u.uLenMul, layer.lenMul);
+            gl.uniform1f(u.uWidthMul, layer.widthMul);
+            gl.uniform1f(u.uSeed, layer.seed);
+            gl.uniform1i(u.uLayer, layer.layer);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
+          }
+
+          gl.disable(gl.BLEND);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+        }
+
+        function frame(now) {
+          resize();
+
+          const dt = Math.min(0.05, Math.max(0.0, (now - lastNow) / 1000));
+          lastNow = now;
+          if (!state.pauseAnim) animationTime += dt;
+
+          uploadVideoFrame();
+
+          const preset = PRESETS[state.preset] || PRESETS.starry;
+          const vw = Math.max(1, video.videoWidth || 1280);
+          const vh = Math.max(1, video.videoHeight || 720);
+
+          // Pass 0: cover-fit webcam into the paint-resolution scene buffer.
+          renderPass(targets.scene, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize, vw, vh);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // Pass 1: Van Gogh palette grading (this is what strokes sample).
+          renderPass(targets.grade, programs.grade, () => {
+            const u = locations.grade;
+            bindTexture(0, targets.scene.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1f(u.uPalette, state.palette);
+            gl.uniform1f(u.uSaturation, state.saturation);
+            gl.uniform3fv(u.uShadow, hexToRgb(preset.shadow));
+            gl.uniform3fv(u.uMid, hexToRgb(preset.mid));
+            gl.uniform3fv(u.uLight, hexToRgb(preset.light));
+          });
+
+          // Mip pyramid = per-stroke area-average colors at any brush size.
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.bindTexture(gl.TEXTURE_2D, targets.grade.tex);
+          gl.generateMipmap(gl.TEXTURE_2D);
+
+          // Pass 2: smoothed structure-tensor flow field + swirl (low res).
+          renderPass(targets.flow, programs.flow, () => {
+            const u = locations.flow;
+            bindTexture(0, targets.scene.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform2f(u.uSceneRes, paintW, paintH);
+            gl.uniform1f(u.uTime, animationTime);
+            gl.uniform1f(u.uSwirl, state.swirl);
+          });
+
+          // Pass 3: instanced brush strokes into color + height (MRT).
+          drawStrokes(preset);
+
+          // Pass 4: impasto relight + weave + vignette to the screen.
+          renderPass(null, programs.final, () => {
+            const u = locations.final;
+            bindTexture(0, targets.paint.colorTex);
+            bindTexture(1, targets.paint.heightTex);
+            gl.uniform1i(u.uPaintTex, 0);
+            gl.uniform1i(u.uHeightTex, 1);
+            gl.uniform2f(u.uPaintRes, paintW, paintH);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform1f(u.uImpasto, state.impasto);
+            gl.uniform1f(u.uCanvasTex, state.canvasTex);
+          });
+
+          fpsFrames++;
+          if (now - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (now - fpsLast);
+            fpsLast = now;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / RES ${canvas.width}×${
+              canvas.height
+            } / STROKES ${strokeCount}`;
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay(
+            "requesting",
+            "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.",
+            false,
+          );
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay(
+              "error",
+              "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8888) or HTTPS, then reload.",
+              false,
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay(
+              "error",
+              "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.",
+              false,
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+
+            cameraReady = true;
+            retryCamera.disabled = false;
+            setOverlay("hidden", "", "", false);
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay(
+                "error",
+                "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                true,
+              );
+            } else if (
+              name === "NotFoundError" ||
+              name === "OverconstrainedError"
+            ) {
+              setOverlay(
+                "error",
+                "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                true,
+              );
+            } else {
+              setOverlay(
+                "error",
+                "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                true,
+              );
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        window.addEventListener("beforeunload", stopCamera);
+
+        try {
+          resize();
+          startCamera();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay(
+            "error",
+            "WEBGL SETUP ERROR",
+            error && error.message
+              ? error.message
+              : "Could not initialize the renderer.",
+            false,
+          );
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
