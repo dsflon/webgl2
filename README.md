@@ -20,3 +20,7 @@
 [https://dsflon.github.io/webgl2/fable5_oneline-cam.html](https://dsflon.github.io/webgl2/fable5_oneline-cam.html)  
 [https://dsflon.github.io/webgl2/fable5_typo-cam.html](https://dsflon.github.io/webgl2/fable5_typo-cam.html)  
 [https://dsflon.github.io/webgl2/fable5_van-gogh.html](https://dsflon.github.io/webgl2/fable5_van-gogh.html)
+
+## Docs
+
+[CREATIVE_GUIDE.md](./CREATIVE_GUIDE.md) — このリポジトリのような WebGL2 リアルタイム映像作品を作るための制作ガイド(様式の解体・手法カタログ・検証手順)
