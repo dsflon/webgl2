@@ -20,3 +20,7 @@
 [https://dsflon.github.io/webgl2/fable5_oneline-cam.html](https://dsflon.github.io/webgl2/fable5_oneline-cam.html)  
 [https://dsflon.github.io/webgl2/fable5_typo-cam.html](https://dsflon.github.io/webgl2/fable5_typo-cam.html)  
 [https://dsflon.github.io/webgl2/fable5_van-gogh.html](https://dsflon.github.io/webgl2/fable5_van-gogh.html)
+
+## Docs
+
+[AI_DIRECTION_GUIDE.md](./AI_DIRECTION_GUIDE.md) — このリポジトリのような WebGL2 リアルタイム映像作品を、生成AIに依頼して最大の品質で作らせるためのディレクション指示書(失敗モード対策・発注ワークフロー・プロンプトテンプレート・技術語彙辞典)
