@@ -1,0 +1,1740 @@
+<!doctype html>
+<!--
+  fable5_papercraft-cam.html — WebGL2 webcam → multi-layer papercut diorama
+
+  概要:
+    Webカメラ映像を単眼深度推定(Depth Anything v2 small / transformers.js)で
+    奥行き分解し、空間を 3〜8 枚の「色紙レイヤー」へ量子化して、切り絵の
+    ジオラマとしてリアルタイム描画する。写真のポスタライズや輪郭線フィルタ
+    ではなく、「深度量子化 → マスク形態学的平滑化 → 擬似SDF境界帯(切り口) →
+    レイヤー間ドロップシャドウ」という描画アーキテクチャで様式を作る。
+
+  実行方法:
+    python3 -m http.server 8888
+    → http://localhost:8888/fable5_papercraft-cam.html を開きカメラを許可
+    (カメラ/深度モデルはセキュアコンテキスト必須。file:// では動きません)
+    ?fakedepth=1 で推論の代わりに合成深度(斜めランプ+球+矩形)を使用。
+
+  様式解析の要約(視覚的不変量。優先度 1>2>4>3>5>6):
+    1. 空間が 4〜6(UI上 3〜8)枚の平面レイヤーに完全離散化。中間深度なし。
+       → 深度推定 → 分位点しきい値で量子化 → EMA+ヒステリシスで安定化。
+    2. 輪郭は「ハサミで切った紙」。滑らかで丸く、境界に 1〜3px の切り口ハイライト。
+       → マスク(深度)を分離ガウスぼかし → smoothstep 再閾値化。ぼかし値を
+          擬似SDFとして境界帯を切り口色で着色。
+    3. レイヤー内部はフラットな紙色。深度ゾーン別の限定パレットへ写像。
+       奥ほど明るく淡く、手前ほど濃い(空気遠近)。高彩度画素は差し色へスナップ。
+       → Kuwahara風の平坦化下地 → ゾーン別スプリットトーン+灰色度重み。
+    4. レイヤー間の柔らかいドロップシャドウが紙の厚みと浮きを作る。影は黒でなく
+       落ちる先の紙色を暗く濁した色。下+視差方向へオフセット。
+    5. 微小パララックス。ポインタ/傾きで深度に応じて各所が別速度で動く。
+    6. 紙の物質感。cell-hash 由来の静的グレイン(時間を混ぜない)+色ムラ。
+
+  パイプライン図:
+    video ─(2D cover-fit + mirror)→ framedCanvas
+        ├─ upload → uVideo ─→ [Kuwahara-lite flatten] → paperBase (1/2)
+        └─ downscale(≤384) → depth-estimation(async, latest-wins)
+                                   │(CPU: temporal min/max EMA 正規化, 分位点しきい値)
+                                   ▼
+    depthSource(合成 or 推論) → [EMA ping-pong] → [blur H] → [blur V] → depthSmooth
+        │                                                           │
+        └──────────────── composite pass ◄──────────────────────────┘
+             量子化 / 切り口SDF / ゾーン色 / ドロップシャドウ / パララックス / グレイン
+             → screen (uDebug で中間出力を単独表示)
+
+    ※本フェーズ(骨格+パイプライン)ではレイヤーを個別FBOに持たず、深度場から
+      合成時に量子化・影を導出する軽量方式を採用(モバイルのフィルレート優先)。
+      per-layer FBO / テクスチャ配列方式は Phase 2 設計比較の対象。
+
+  スライダー(写真らしさ ↔ 様式の強さ):
+    LAYERS         紙のレイヤー枚数(3〜8)
+    DEPTH SPREAD   分位点しきい値の広がり(手前偏重 ↔ 全域均等)
+    DEPTH CALM     深度EMAの強さ(層の落ち着き ↔ 追従の速さ)
+    CUT ROUNDNESS  切り口の丸み(マスクぼかし半径)
+    CUT HIGHLIGHT  切り口ハイライトの明るさ・太さ
+    PAPER FLATTEN  平坦化の強度(写真 ↔ 紙)
+    PALETTE        映像色 ↔ プリセットパレットの写像率
+    PAPER LIFT     影のオフセット・ぼけ・濃さ(紙の浮き)
+    PARALLAX       視差カメラの振れ幅
+    PAPER GRAIN    繊維グレインの強さ
+
+  DEBUG: 0=最終合成 1=生深度 2=平滑化深度 3=量子化レイヤー 4=マスク+切り口
+         5=影バッファ 6=Kuwahara下地
+
+  依存: @huggingface/transformers(CDN, 深度モデルのみ例外)。他は WebGL2 単体。
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Papercraft Cam — WebGL2 depth-layered paper diorama</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #082624;
+        --ink: #eef3ec;
+        --muted: rgba(238, 243, 236, 0.68);
+        --panel: rgba(8, 32, 30, 0.8);
+        --line: rgba(238, 243, 236, 0.16);
+        --accent: #f08a4b;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            circle at 78% 14%,
+            rgba(240, 138, 75, 0.12),
+            transparent 26%
+          ),
+          radial-gradient(
+            circle at 16% 84%,
+            rgba(45, 127, 110, 0.3),
+            transparent 38%
+          ),
+          linear-gradient(140deg, #061e1c, #0b2b30 52%, #071a19);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      video {
+        position: fixed;
+        width: 1px;
+        height: 1px;
+        left: -10px;
+        top: -10px;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .panel {
+        position: fixed;
+        top: max(58px, calc(env(safe-area-inset-top) + 58px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(352px, calc(100vw - 28px));
+        max-height: calc(100vh - 72px);
+        overflow: auto;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background:
+          linear-gradient(180deg, rgba(18, 58, 52, 0.82), rgba(8, 32, 30, 0.7)),
+          var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        box-shadow:
+          0 18px 50px rgba(0, 0, 0, 0.36),
+          inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(15px);
+        transition:
+          opacity 0.25s ease,
+          transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+      .panel.collapsed {
+        opacity: 0;
+        pointer-events: none;
+        transform: translateX(calc(-100% - 18px));
+      }
+      .panel h1 {
+        margin: 0 0 4px;
+        color: rgba(255, 255, 255, 0.95);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.2em;
+      }
+      .panel p {
+        margin: 0 0 10px;
+        font-size: 10px;
+        line-height: 1.55;
+        letter-spacing: 0.04em;
+      }
+      .select-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 0;
+        border-top: 1px solid rgba(238, 243, 236, 0.1);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+      select {
+        min-height: 30px;
+        padding: 4px 8px;
+        color: rgba(255, 255, 255, 0.94);
+        background: rgba(12, 44, 40, 0.72);
+        border: 1px solid rgba(238, 243, 236, 0.2);
+        border-radius: 8px;
+        font-family: inherit;
+        font-size: 10px;
+        letter-spacing: 0.06em;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 64px;
+        gap: 7px 10px;
+        align-items: center;
+        padding: 8px 0;
+        border-top: 1px solid rgba(238, 243, 236, 0.1);
+      }
+      .row label {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        color: rgba(238, 243, 236, 0.82);
+        font-size: 10px;
+        letter-spacing: 0.07em;
+      }
+      .row label span {
+        color: rgba(238, 243, 236, 0.46);
+        font-size: 9px;
+        letter-spacing: 0.03em;
+      }
+      .row output {
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      input[type="range"] {
+        grid-column: 1 / -1;
+        width: 100%;
+        accent-color: var(--accent);
+      }
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 9px 0;
+        border-top: 1px solid rgba(238, 243, 236, 0.1);
+        color: rgba(238, 243, 236, 0.82);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+      input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--accent);
+      }
+      .buttons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      button {
+        min-height: 36px;
+        padding: 9px 12px;
+        color: rgba(255, 255, 255, 0.92);
+        background: rgba(12, 44, 40, 0.64);
+        border: 1px solid rgba(238, 243, 236, 0.18);
+        border-radius: 999px;
+        font-family: inherit;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        cursor: pointer;
+      }
+      button:hover {
+        background: rgba(32, 86, 78, 0.78);
+      }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.5;
+      }
+      #flipCamera {
+        display: none;
+      }
+      #togglePanel {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 12;
+        min-width: 116px;
+        background: rgba(8, 32, 30, 0.8);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+        backdrop-filter: blur(15px);
+      }
+      .status {
+        margin-top: 10px;
+        padding-top: 9px;
+        border-top: 1px solid rgba(238, 243, 236, 0.1);
+        color: rgba(238, 243, 236, 0.58);
+        font-size: 9px;
+        line-height: 1.5;
+        letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block;
+        margin-top: 5px;
+        padding: 3px 7px;
+        color: rgba(240, 138, 75, 0.96);
+        background: rgba(240, 138, 75, 0.12);
+        border: 1px solid rgba(240, 138, 75, 0.22);
+        border-radius: 999px;
+      }
+      #progress {
+        margin-top: 8px;
+        font-size: 9px;
+        letter-spacing: 0.1em;
+        color: rgba(157, 196, 95, 0.9);
+      }
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 8;
+        display: grid;
+        place-items: center;
+        padding: 22px;
+        color: rgba(255, 255, 255, 0.92);
+        text-align: center;
+        pointer-events: none;
+        background:
+          radial-gradient(
+            circle at 50% 45%,
+            rgba(18, 58, 52, 0.44),
+            transparent 34%
+          ),
+          rgba(3, 12, 11, 0.42);
+        transition: opacity 0.25s ease;
+      }
+      #overlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .overlay-card {
+        width: min(520px, calc(100vw - 32px));
+        padding: 22px;
+        background: rgba(8, 32, 30, 0.8);
+        border: 1px solid rgba(238, 243, 236, 0.16);
+        border-radius: 20px;
+        box-shadow: 0 22px 70px rgba(0, 0, 0, 0.34);
+        backdrop-filter: blur(16px);
+        pointer-events: auto;
+      }
+      .overlay-card h2 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        letter-spacing: 0.18em;
+      }
+      .overlay-card p {
+        margin: 0 0 14px;
+        color: rgba(238, 243, 236, 0.66);
+        font-size: 11px;
+        line-height: 1.65;
+      }
+      .overlay-card .buttons {
+        max-width: 360px;
+        margin: 0 auto;
+      }
+      @media (max-width: 720px) {
+        #togglePanel {
+          top: auto;
+          bottom: max(12px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          transition: bottom 0.3s ease;
+        }
+        #togglePanel.panel-open {
+          bottom: calc(56vh + 22px + max(12px, env(safe-area-inset-bottom)));
+        }
+        #flipCamera {
+          position: fixed;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(12px, env(safe-area-inset-bottom));
+          z-index: 12;
+          min-width: 116px;
+          display: block;
+          background: rgba(8, 32, 30, 0.8);
+          box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+          backdrop-filter: blur(15px);
+          transition: bottom 0.3s ease;
+        }
+        #flipCamera.panel-open {
+          bottom: calc(56vh + 22px + max(12px, env(safe-area-inset-bottom)));
+        }
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 56vh;
+          padding: 12px;
+        }
+        .panel.collapsed {
+          transform: translateY(calc(100% + 18px));
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1 class="sr-only">
+      FABLE5 · Papercraft Cam — WebGL2 depth-layered paper diorama
+    </h1>
+    <canvas id="gl" aria-label="WebGL2 papercraft diorama webcam"></canvas>
+    <video id="video" playsinline muted autoplay>
+      <track
+        kind="captions"
+        label="No spoken audio"
+        src="data:text/vtt,WEBVTT%0A"
+        default
+      />
+    </video>
+
+    <button
+      id="togglePanel"
+      type="button"
+      class="panel-open"
+      aria-expanded="true"
+    >
+      HIDE UI
+    </button>
+    <button
+      id="flipCamera"
+      type="button"
+      class="panel-open"
+      aria-label="Switch camera"
+    >
+      REAR CAM
+    </button>
+
+    <section
+      id="panel"
+      class="panel"
+      aria-label="Papercraft webcam controls"
+    ></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve from localhost or HTTPS.
+        </p>
+        <div class="buttons">
+          <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+          <button id="continueFlat" type="button" hidden>CONTINUE FLAT</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+        const continueFlat = document.getElementById("continueFlat");
+        const flipCameraBtn = document.getElementById("flipCamera");
+
+        const params = new URLSearchParams(location.search);
+        const FAKE_DEPTH = params.get("fakedepth") === "1";
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        // Depth Anything v2: higher value ≈ nearer. Flip here if a model differs.
+        const INVERT_DEPTH = false;
+
+        // ---- Palette presets (zone base colors 奥→手前, accents, cut, shadow, bg)
+        const PRESETS = {
+          forest: {
+            label: "Deep Forest",
+            zones: [
+              "#a8ded2",
+              "#5db3a0",
+              "#2e7f6e",
+              "#175a4f",
+              "#0e3b38",
+              "#082624",
+            ],
+            accents: ["#f08a4b", "#ec5f8a", "#f2b134", "#9dc45f"],
+            cut: "#f4efe2",
+            shadow: "#05201f",
+            bg: "#0b2b30",
+          },
+          eco: {
+            label: "Eco White",
+            zones: [
+              "#10301a",
+              "#1f4d26",
+              "#3e7d3f",
+              "#6fae5c",
+              "#dfe3e0",
+              "#f5f4ee",
+            ],
+            accents: [],
+            cut: "#ffffff",
+            shadow: "#59695c",
+            bg: "#10301a",
+          },
+        };
+
+        const DEFAULTS = {
+          layerCount: 6,
+          depthRange: 0.72,
+          depthSmooth: 0.72,
+          cutSmooth: 0.68,
+          edgeLight: 0.78,
+          flatten: 0.86,
+          paletteMix: 0.92,
+          thickness: 0.88,
+          parallax: 0.72,
+          grain: 0.48,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          preset: "forest",
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion,
+          debug: 0,
+        };
+
+        const uiRows = [
+          ["layerCount", "LAYERS", "paper layer count", 3, 8, 1],
+          [
+            "depthRange",
+            "DEPTH SPREAD",
+            "quantile threshold spread",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "depthSmooth",
+            "DEPTH CALM",
+            "depth EMA strength (calm ↔ fast)",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "cutSmooth",
+            "CUT ROUNDNESS",
+            "mask blur radius (scissor curve)",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "edgeLight",
+            "CUT HIGHLIGHT",
+            "cut edge highlight brightness/width",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "flatten",
+            "PAPER FLATTEN",
+            "Kuwahara flatten (photo ↔ paper)",
+            0,
+            1,
+            0.01,
+          ],
+          ["paletteMix", "PALETTE", "video color ↔ preset palette", 0, 1, 0.01],
+          [
+            "thickness",
+            "PAPER LIFT",
+            "shadow offset/blur/strength",
+            0,
+            1,
+            0.01,
+          ],
+          ["parallax", "PARALLAX", "parallax camera amplitude", 0, 1, 0.01],
+          ["grain", "PAPER GRAIN", "paper fiber grain strength", 0, 1, 0.01],
+        ];
+
+        const DEBUG_LABELS = [
+          "0 · final",
+          "1 · raw depth",
+          "2 · smooth depth",
+          "3 · layers",
+          "4 · mask + cut",
+          "5 · shadow",
+          "6 · kuwahara base",
+        ];
+
+        function formatValue(v) {
+          return Number(v).toFixed(
+            Number.isInteger(v) ? 0 : Math.abs(v) >= 10 ? 0 : 2,
+          );
+        }
+
+        function buildPanel() {
+          panel.innerHTML = `
+            <h1>FABLE5 · PAPERCRAFT CAM</h1>
+            <p>
+              Monocular depth quantizes the webcam into 3–8 paper layers with
+              scissor-smoothed cut edges, drop shadows and micro-parallax —
+              a real-time papercut diorama, not a posterized photo.
+            </p>
+            <div class="select-row">
+              <span>PALETTE</span>
+              <select id="preset" aria-label="Palette preset">
+                ${Object.entries(PRESETS)
+                  .map(
+                    ([k, p]) =>
+                      `<option value="${k}"${k === state.preset ? " selected" : ""}>${p.label}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </div>
+            <div class="select-row">
+              <span>DEBUG</span>
+              <select id="debug" aria-label="Debug view">
+                ${DEBUG_LABELS.map(
+                  (l, i) =>
+                    `<option value="${i}"${i === state.debug ? " selected" : ""}>${l}</option>`,
+                ).join("")}
+              </select>
+            </div>
+            ${uiRows
+              .map(
+                ([key, label, hint, min, max, step]) => `
+              <div class="row">
+                <label for="${key}">${label}<span>${hint}</span></label>
+                <output id="${key}Out">${formatValue(state[key])}</output>
+                <input id="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${state[key]}" />
+              </div>`,
+              )
+              .join("")}
+            <label class="check-row">
+              <span>Mirror webcam</span>
+              <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+            </label>
+            <label class="check-row">
+              <span>Pause parallax sway</span>
+              <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+            </label>
+            <div class="buttons">
+              <button id="savePng" type="button">SAVE PNG</button>
+              <button id="resetLook" type="button">RESET LOOK</button>
+            </div>
+            <div class="status">
+              <div id="readout">FPS -- / RES -- / DEPTH -- / -- Hz / L --</div>
+              <div id="progress"></div>
+              <span class="badge">WebGL2 · depth-layered papercut</span>
+            </div>`;
+
+          uiRows.forEach(([key]) => {
+            const input = document.getElementById(key);
+            const out = document.getElementById(`${key}Out`);
+            input.addEventListener("input", () => {
+              state[key] = Number(input.value);
+              out.textContent = formatValue(state[key]);
+            });
+          });
+          document.getElementById("preset").addEventListener("change", (e) => {
+            state.preset = e.currentTarget.value;
+          });
+          document.getElementById("debug").addEventListener("change", (e) => {
+            state.debug = Number(e.currentTarget.value);
+          });
+          document.getElementById("mirror").addEventListener("change", (e) => {
+            state.mirror = e.currentTarget.checked;
+          });
+          document
+            .getElementById("pauseAnim")
+            .addEventListener("change", (e) => {
+              state.pauseAnim = e.currentTarget.checked;
+            });
+          document.getElementById("resetLook").addEventListener("click", () => {
+            Object.assign(state, DEFAULTS);
+            Object.keys(DEFAULTS).forEach((key) => {
+              document.getElementById(key).value = state[key];
+              document.getElementById(`${key}Out`).textContent = formatValue(
+                state[key],
+              );
+            });
+          });
+          document.getElementById("savePng").addEventListener("click", () => {
+            const link = document.createElement("a");
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+            link.download = `fable5-papercraft-${stamp}.png`;
+            link.href = canvas.toDataURL("image/png");
+            link.click();
+          });
+        }
+
+        togglePanel.addEventListener("click", () => {
+          const collapsed = panel.classList.toggle("collapsed");
+          togglePanel.textContent = collapsed ? "SHOW UI" : "HIDE UI";
+          togglePanel.classList.toggle("panel-open", !collapsed);
+          flipCameraBtn.classList.toggle("panel-open", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        });
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode =
+            state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+          state.mirror = state.facingMode === "user";
+          const m = document.getElementById("mirror");
+          if (m) m.checked = state.mirror;
+          startCamera();
+        });
+        retryCamera.addEventListener("click", () => startCamera());
+        continueFlat.addEventListener("click", () => setOverlay("hidden"));
+
+        function setOverlay(kind, title, text, opts = {}) {
+          if (title) overlayTitle.textContent = title;
+          if (text) overlayText.textContent = text;
+          retryCamera.hidden = !opts.retry;
+          continueFlat.hidden = !opts.flat;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        function hexToRgb(hex) {
+          const v = hex.replace("#", "");
+          return [
+            parseInt(v.slice(0, 2), 16) / 255,
+            parseInt(v.slice(2, 4), 16) / 255,
+            parseInt(v.slice(4, 6), 16) / 255,
+          ];
+        }
+
+        buildPanel();
+
+        // ==================================================================
+        //  WebGL2 setup
+        // ==================================================================
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Use a current browser with hardware acceleration.",
+          );
+          return;
+        }
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+        const VS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }`;
+
+        const COMMON = `#version 300 es
+          precision highp float;
+          precision highp int;
+          in vec2 vUv;
+          float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
+          float hash12(vec2 p){
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }`;
+
+        // ---- Pass: flatten (Kuwahara-lite) → paper base color
+        const FLATTEN_FS = `${COMMON}
+          uniform sampler2D uTex;
+          uniform vec2 uTexel;
+          uniform float uFlatten;
+          out vec4 fragColor;
+          void mean(vec2 c0, vec2 c1, out vec3 m, out float v){
+            vec3 s = vec3(0.0); vec3 s2 = vec3(0.0); float n = 0.0;
+            for(int y=-2;y<=2;y++){
+              for(int x=-2;x<=2;x++){
+                vec2 o = vec2(float(x),float(y));
+                if(o.x < c0.x || o.x > c1.x || o.y < c0.y || o.y > c1.y) continue;
+                vec3 col = texture(uTex, vUv + o*uTexel).rgb;
+                s += col; s2 += col*col; n += 1.0;
+              }
+            }
+            m = s/max(n,1.0);
+            vec3 var3 = s2/max(n,1.0) - m*m;
+            v = var3.r + var3.g + var3.b;
+          }
+          void main(){
+            vec3 raw = texture(uTex, vUv).rgb;
+            vec3 bm; float bv; vec3 m; float v;
+            mean(vec2(-2.,0.), vec2(0.,2.), bm, bv);
+            mean(vec2(0.,0.), vec2(2.,2.), m, v); if(v<bv){bv=v;bm=m;}
+            mean(vec2(-2.,-2.), vec2(0.,0.), m, v); if(v<bv){bv=v;bm=m;}
+            mean(vec2(0.,-2.), vec2(2.,0.), m, v); if(v<bv){bv=v;bm=m;}
+            vec3 col = mix(raw, bm, clamp(uFlatten,0.0,1.0));
+            fragColor = vec4(col, 1.0);
+          }`;
+
+        // ---- Pass: depth source (synthetic fakedepth OR pass-through upload)
+        const DEPTHSRC_FS = `${COMMON}
+          uniform sampler2D uDepthTex;
+          uniform bool uFake;
+          out vec4 fragColor;
+          float syntheticDepth(vec2 uv){
+            // diagonal ramp: bottom = near
+            float d = mix(0.12, 0.55, uv.y);
+            // sphere near the lower-center (a head-like near blob)
+            vec2 c = vec2(0.5, 0.42);
+            float r = length((uv - c) * vec2(1.6, 1.0));
+            d = max(d, smoothstep(0.34, 0.28, r) * 0.92);
+            // mid rectangle slab
+            if(uv.x>0.12 && uv.x<0.34 && uv.y>0.45 && uv.y<0.82) d = max(d, 0.70);
+            return clamp(d, 0.0, 1.0);
+          }
+          void main(){
+            float d = uFake ? syntheticDepth(vUv) : texture(uDepthTex, vUv).r;
+            fragColor = vec4(vec3(d), 1.0);
+          }`;
+
+        // ---- Pass: temporal EMA of depth (ping-pong)
+        const EMA_FS = `${COMMON}
+          uniform sampler2D uCur;
+          uniform sampler2D uPrev;
+          uniform float uAlpha;
+          uniform bool uInit;
+          out vec4 fragColor;
+          void main(){
+            float c = texture(uCur, vUv).r;
+            float p = texture(uPrev, vUv).r;
+            float d = uInit ? c : mix(p, c, uAlpha);
+            fragColor = vec4(vec3(d), 1.0);
+          }`;
+
+        // ---- Pass: separable blur (depth mask smoothing)
+        const BLUR_FS = `${COMMON}
+          uniform sampler2D uTex;
+          uniform vec2 uDir;
+          out vec4 fragColor;
+          void main(){
+            float w[5];
+            w[0]=0.227; w[1]=0.194; w[2]=0.121; w[3]=0.054; w[4]=0.017;
+            float s = texture(uTex, vUv).r * w[0];
+            for(int i=1;i<5;i++){
+              vec2 o = uDir * float(i);
+              s += texture(uTex, vUv + o).r * w[i];
+              s += texture(uTex, vUv - o).r * w[i];
+            }
+            fragColor = vec4(vec3(s), 1.0);
+          }`;
+
+        // ---- Pass: composite (the paper diorama)
+        const COMP_FS = `${COMMON}
+          uniform sampler2D uBase;      // kuwahara flattened video
+          uniform sampler2D uDepthS;    // smoothed/blurred depth (rounded masks)
+          uniform sampler2D uDepthRaw;  // raw depth (this frame, for uDebug=1)
+          uniform vec2 uRes;
+          uniform int uLayerCount;
+          uniform float uThresh[8];
+          uniform vec3 uZone[8];
+          uniform vec3 uAccent[4];
+          uniform int uAccentCount;
+          uniform vec3 uCut;
+          uniform vec3 uShadowCol;
+          uniform vec3 uBg;
+          uniform float uCutSmooth;
+          uniform float uEdgeLight;
+          uniform float uPaletteMix;
+          uniform float uThickness;
+          uniform float uParallax;
+          uniform float uGrain;
+          uniform float uDepthMix;      // loading ease 0→1
+          uniform vec2 uParVec;         // pointer/orientation parallax vector
+          uniform int uDebug;
+          out vec4 fragColor;
+
+          const int MAXL = 8;
+
+          int layerOf(float d){
+            int L = 0;
+            for(int i=0;i<MAXL-1;i++){
+              if(i >= uLayerCount-1) break;
+              if(d > uThresh[i]) L++;
+            }
+            return L;
+          }
+          vec3 zoneColor(int L){
+            for(int i=0;i<MAXL;i++){ if(i==L) return uZone[i]; }
+            return uZone[0];
+          }
+
+          void main(){
+            vec2 screenUv = vUv;
+            float dRaw = texture(uDepthRaw, screenUv).r;
+            float dS = mix(0.5, texture(uDepthS, screenUv).r, uDepthMix);
+            int L = layerOf(dS);
+            vec3 base = texture(uBase, screenUv).rgb;
+
+            // -----------------------------------------------------------------
+            // Back-to-front layer compositor.
+            // Instead of colouring the current depth sample once, each paper
+            // layer is sampled with its own parallax offset, masked by its
+            // quantized depth interval, shadowed by nearer layers, then stacked.
+            // This makes real "paper plates" sliding over one another.
+            // -----------------------------------------------------------------
+            float denom = max(float(uLayerCount - 1), 1.0);
+            vec3 outc = mix(uBg, zoneColor(0), 0.28);
+            float visibleRim = 0.0;
+            float visibleShadow = 0.0;
+            int visibleLayer = 0;
+            vec3 visibleBase = base;
+            const int SH = 14;
+            float edgeW = 0.007 + 0.045 * uCutSmooth;
+            vec2 shadowDir = normalize(vec2(0.28 + uParVec.x * 0.42, 0.96));
+            float shadowReach = 0.016 + 0.105 * uThickness;
+            for(int li=0; li<MAXL; li++){
+              if(li >= uLayerCount) break;
+              float lf = float(li) / denom;
+              // Quantized Z position: near plates move much more than back plates.
+              vec2 layerPar = uParVec * uParallax * uDepthMix * ((lf - 0.5) * 0.155);
+              vec2 luv = clamp(screenUv + layerPar, 0.0011, 0.9989);
+              float ld = mix(0.5, texture(uDepthS, luv).r, uDepthMix);
+              float lo = li == 0 ? 0.0 : uThresh[li - 1];
+              float hi = li == uLayerCount - 1 ? 1.0 : uThresh[li];
+              float lower = li == 0 ? 1.0 : smoothstep(lo - edgeW, lo + edgeW, ld);
+              float upper = li == uLayerCount - 1 ? 1.0 : 1.0 - smoothstep(hi - edgeW, hi + edgeW, ld);
+              float mask = clamp(lower * upper, 0.0, 1.0);
+              if(mask < 0.01) continue;
+
+              vec3 b = texture(uBase, luv).rgb;
+              vec3 zone = zoneColor(li);
+              float lum = luma(b);
+              float mx = max(max(b.r,b.g),b.b);
+              float mn = min(min(b.r,b.g),b.b);
+              float chroma = mx - mn;
+              float gray = 1.0 - clamp(chroma * 2.7, 0.0, 1.0);
+
+              // Paper plates must read as material first, photo second:
+              // luminance only gently modulates a flat zone colour.
+              float lumBand = floor(lum * 4.0) / 4.0;
+              vec3 paper = zone * (0.70 + 0.34 * mix(lum, lumBand, 0.65));
+              float styleMix = clamp(0.28 + 0.72 * uPaletteMix, 0.0, 1.0);
+              vec3 col = mix(b, paper, styleMix * (0.78 + 0.22 * gray));
+
+              // Snap saturated image areas to the limited accent papers.
+              if(uAccentCount > 0 && chroma > 0.23){
+                float hue = atan(b.g - b.b, b.r - 0.5*(b.g+b.b));
+                int best = 0; float bestd = 1e9;
+                for(int ai=0; ai<4; ai++){
+                  if(ai >= uAccentCount) break;
+                  vec3 a = uAccent[ai];
+                  float ahue = atan(a.g - a.b, a.r - 0.5*(a.g+a.b));
+                  float dd = abs(hue - ahue);
+                  if(dd < bestd){ bestd = dd; best = ai; }
+                }
+                vec3 acc = uAccent[0];
+                for(int ai=0; ai<4; ai++){ if(ai == best) acc = uAccent[ai]; }
+                col = mix(col, acc, uPaletteMix * smoothstep(0.23, 0.46, chroma));
+              }
+
+              // Shadow on this layer from nearer plates. This is intentionally
+              // discrete by layer index, so it reads as stacked cut paper rather
+              // than a continuous depth-map contour.
+              float shadow = 0.0;
+              for(int si=1; si<=SH; si++){
+                float t = float(si) / float(SH);
+                vec2 suv = clamp(luv + shadowDir * shadowReach * t, 0.0011, 0.9989);
+                int sl = layerOf(mix(0.5, texture(uDepthS, suv).r, uDepthMix));
+                float occluder = sl > li ? 1.0 : 0.0;
+                shadow += occluder * (1.0 - t) * (0.65 + 0.35 * smoothstep(0.0, 1.0, float(sl - li) / denom));
+              }
+              shadow = clamp(shadow / float(SH) * 4.6 * (0.48 + uThickness), 0.0, 1.0);
+
+              // Contact crease + bright scissor-cut rim at both interval bounds.
+              float rimLo = li == 0 ? 0.0 : 1.0 - smoothstep(0.0, edgeW * 1.08, abs(ld - lo));
+              float rimHi = li == uLayerCount - 1 ? 0.0 : 1.0 - smoothstep(0.0, edgeW * 1.08, abs(ld - hi));
+              float rim = max(rimLo, rimHi) * mask;
+              float crease = max(rimLo, rimHi) * (0.34 + 0.34 * uThickness);
+              shadow = max(shadow, crease);
+
+              vec3 shadowTint = mix(zone, uShadowCol, 0.82) * 0.34;
+              vec3 cutCol = mix(zone, uCut, 0.88);
+              vec3 plate = mix(col, shadowTint, shadow * 0.96);
+              plate = mix(plate, cutCol, rim * uEdgeLight);
+
+              // Static paper fibre and patchy colour mottle: seed is screen cell
+              // and layer only, never time, so the paper does not sparkle.
+              vec2 cell = floor(gl_FragCoord.xy / 3.0);
+              float g = hash12(cell + float(li) * 37.13) - 0.5;
+              float mottle = hash12(floor(gl_FragCoord.xy/46.0) + float(li)*11.7) - 0.5;
+              plate *= 1.0 + g * uGrain * 0.16 + mottle * uGrain * 0.075;
+
+              outc = mix(outc, plate, mask);
+              visibleRim = mix(visibleRim, rim, mask);
+              visibleShadow = mix(visibleShadow, shadow, mask);
+              visibleLayer = mask > 0.45 ? li : visibleLayer;
+              visibleBase = mix(visibleBase, b, mask);
+            }
+
+            // A foreground proscenium arch: the reference image reads strongly
+            // because the nearest dark paper layer frames the whole scene.
+            // Add the same kind of cut-paper tunnel frame procedurally so the
+            // webcam content sits inside a paper diorama, not just a filtered photo.
+            vec2 p2 = screenUv * 2.0 - 1.0;
+            float rectSdf = max(max(abs(p2.x) - 0.74, -0.78 - p2.y), p2.y - 0.16);
+            float archSdf = length((p2 - vec2(0.0, 0.16)) / vec2(0.74, 0.62)) - 1.0;
+            float openSdf = min(rectSdf, archSdf);
+            float frameA = smoothstep(-0.014, 0.024, openSdf);
+            float frameEdge = (1.0 - smoothstep(0.0, 0.038, abs(openSdf))) * (0.55 + 0.45 * frameA);
+            vec3 frameCol = zoneColor(uLayerCount - 1) * vec3(0.78, 0.86, 0.82);
+            float frameMottle = hash12(floor(gl_FragCoord.xy / 34.0) + 91.7) - 0.5;
+            frameCol *= 1.0 + frameMottle * uGrain * 0.10;
+            // Inset shadow cast from the arch into the scene.
+            float archShadow = 1.0 - smoothstep(0.0, 0.08 + 0.08 * uThickness, -openSdf);
+            archShadow *= 1.0 - frameA;
+            outc = mix(outc, mix(outc, uShadowCol * 0.42, 0.62), archShadow * 0.55 * uThickness);
+            outc = mix(outc, frameCol, frameA * 0.92);
+            outc = mix(outc, mix(frameCol, uCut, 0.86), frameEdge * uEdgeLight);
+
+            L = visibleLayer;
+            base = visibleBase;
+            float rim = max(visibleRim, frameEdge);
+            float shadow = max(visibleShadow, archShadow * 0.7);
+            float Lf = float(L);
+            outc = clamp(outc, 0.0, 1.0);
+
+            // ---- debug views
+            if(uDebug == 1){ fragColor = vec4(vec3(dRaw), 1.0); return; }
+            if(uDebug == 2){ fragColor = vec4(vec3(dS), 1.0); return; }
+            if(uDebug == 3){
+              vec3 c = zoneColor(L);
+              fragColor = vec4(mix(c, vec3(1.0), 0.06*Lf), 1.0); return;
+            }
+            if(uDebug == 4){
+              float m = float(L) / max(float(uLayerCount-1),1.0);
+              fragColor = vec4(vec3(m) + vec3(rim,rim*0.6,0.0), 1.0); return;
+            }
+            if(uDebug == 5){ fragColor = vec4(vec3(shadow), 1.0); return; }
+            if(uDebug == 6){ fragColor = vec4(base, 1.0); return; }
+
+            fragColor = vec4(outc, 1.0);
+          }`;
+
+        function compileShader(type, src) {
+          const sh = gl.createShader(type);
+          gl.shaderSource(sh, src);
+          gl.compileShader(sh);
+          if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+            console.error(gl.getShaderInfoLog(sh), src);
+            throw new Error("shader compile failed");
+          }
+          return sh;
+        }
+        function makeProgram(fs) {
+          const p = gl.createProgram();
+          gl.attachShader(p, compileShader(gl.VERTEX_SHADER, VS));
+          gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, fs));
+          gl.linkProgram(p);
+          if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+            console.error(gl.getProgramInfoLog(p));
+            throw new Error("program link failed");
+          }
+          const u = {};
+          const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+          for (let i = 0; i < n; i++) {
+            const info = gl.getActiveUniform(p, i);
+            const name = info.name.replace(/\[0\]$/, "");
+            u[name] = gl.getUniformLocation(p, name);
+          }
+          return { prog: p, u };
+        }
+
+        const progFlatten = makeProgram(FLATTEN_FS);
+        const progDepthSrc = makeProgram(DEPTHSRC_FS);
+        const progEma = makeProgram(EMA_FS);
+        const progBlur = makeProgram(BLUR_FS);
+        const progComp = makeProgram(COMP_FS);
+
+        const vao = gl.createVertexArray();
+
+        // ---- FBO helper (RGBA8; depth packed in .r) ----
+        function makeTarget(w, h) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA8,
+            w,
+            h,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            null,
+          );
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0,
+          );
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, w, h };
+        }
+
+        let RW = 2,
+          RH = 2,
+          DW = 2,
+          DH = 2;
+        let sceneTarget, baseTarget, depthSrcTarget, depthUploadTex;
+        let emaA,
+          emaB,
+          emaReadIsA = true,
+          emaInit = true;
+        let blurTmp, depthSmooth;
+
+        // Video framing canvas (cover-fit + mirror baked → plain UV alignment)
+        const framedCanvas = document.createElement("canvas");
+        const framedCtx = framedCanvas.getContext("2d", {
+          willReadFrequently: false,
+        });
+        const depthInputCanvas = document.createElement("canvas");
+        const depthInputCtx = depthInputCanvas.getContext("2d", {
+          willReadFrequently: true,
+        });
+
+        // uploaded depth texture (from model, single channel packed to RGBA)
+        depthUploadTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, depthUploadTex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA8,
+          2,
+          2,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          new Uint8Array([
+            0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+          ]),
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const videoTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA8,
+          2,
+          2,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          null,
+        );
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        function allocTargets() {
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          RW = Math.max(2, Math.round(canvas.clientWidth * dpr));
+          RH = Math.max(2, Math.round(canvas.clientHeight * dpr));
+          canvas.width = RW;
+          canvas.height = RH;
+          DW = Math.max(2, Math.round(RW / 2));
+          DH = Math.max(2, Math.round(RH / 2));
+          framedCanvas.width = Math.min(RW, 960);
+          framedCanvas.height = Math.min(RH, 960);
+
+          baseTarget = makeTarget(DW, DH);
+          depthSrcTarget = makeTarget(DW, DH);
+          emaA = makeTarget(DW, DH);
+          emaB = makeTarget(DW, DH);
+          blurTmp = makeTarget(DW, DH);
+          depthSmooth = makeTarget(DW, DH);
+          emaInit = true;
+        }
+        allocTargets();
+
+        function resize() {
+          allocTargets();
+        }
+        window.addEventListener("resize", resize);
+
+        // ---- pointer / orientation parallax ----
+        const parTarget = { x: 0, y: 0 };
+        const parCur = { x: 0, y: 0 };
+        window.addEventListener("pointermove", (e) => {
+          parTarget.x = (e.clientX / window.innerWidth) * 2 - 1;
+          parTarget.y = (e.clientY / window.innerHeight) * 2 - 1;
+        });
+        window.addEventListener("deviceorientation", (e) => {
+          if (e.gamma == null) return;
+          parTarget.x = Math.max(-1, Math.min(1, e.gamma / 40));
+          parTarget.y = Math.max(-1, Math.min(1, (e.beta - 45) / 40));
+        });
+
+        // ==================================================================
+        //  Camera
+        // ==================================================================
+        let stream = null;
+        let cameraReady = false;
+
+        async function startCamera() {
+          setOverlay("info", "REQUESTING CAMERA", "Allow webcam access…", {
+            retry: false,
+          });
+          if (!window.isSecureContext && location.protocol !== "http:") {
+            setOverlay(
+              "error",
+              "INSECURE CONTEXT",
+              "Camera needs HTTPS or localhost. Serve with: python3 -m http.server 8888",
+              { retry: true, flat: FAKE_DEPTH },
+            );
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay(
+              "error",
+              "NO CAMERA API",
+              "This browser has no getUserMedia. Try a current browser.",
+              { retry: true },
+            );
+            return;
+          }
+          try {
+            if (stream) stream.getTracks().forEach((t) => t.stop());
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            setOverlay("hidden");
+            // reveal rear/front toggle when multiple cameras exist
+            try {
+              const devs = await navigator.mediaDevices.enumerateDevices();
+              if (devs.filter((d) => d.kind === "videoinput").length > 1) {
+                flipCameraBtn.style.display = "block";
+              }
+            } catch (_) {}
+          } catch (err) {
+            cameraReady = false;
+            const denied =
+              err &&
+              (err.name === "NotAllowedError" || err.name === "SecurityError");
+            setOverlay(
+              "error",
+              denied ? "CAMERA BLOCKED" : "NO CAMERA FOUND",
+              denied
+                ? "Camera permission was denied. Enable it and retry."
+                : "No camera device is available. Connect one and retry.",
+              { retry: true, flat: FAKE_DEPTH },
+            );
+          }
+        }
+
+        // ==================================================================
+        //  Depth model (transformers.js) — async latest-wins loop
+        // ==================================================================
+        let depthPipe = null;
+        let depthBackend = "loading";
+        let depthBusy = false;
+        let depthHz = 0;
+        let lastDepthTime = 0;
+        let haveDepth = false;
+        const emaNorm = { min: 0, max: 1, init: false };
+        const progressEl = () => document.getElementById("progress");
+
+        async function initDepthModel() {
+          if (FAKE_DEPTH) {
+            depthBackend = "fakedepth";
+            haveDepth = true;
+            return;
+          }
+          const setProg = (t) => {
+            const el = progressEl();
+            if (el) el.textContent = t;
+          };
+          setProg("FOLDING PAPER … loading model");
+          const CDN =
+            "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2";
+          let tf;
+          try {
+            tf = await import(CDN);
+          } catch (e) {
+            setProg("");
+            setOverlay(
+              "error",
+              "MODEL LOAD FAILED",
+              "Could not fetch the depth model (offline?). Continue with flat paper, retry, or reload with ?fakedepth=1.",
+              { retry: true, flat: true },
+            );
+            return;
+          }
+          const { pipeline, env } = tf;
+          env.allowLocalModels = false;
+          const progress_callback = (p) => {
+            if (p && p.status === "progress" && p.total) {
+              const pct = Math.round((p.loaded / p.total) * 100);
+              setProg(`FOLDING PAPER … ${pct}%`);
+            } else if (p && p.status === "ready") {
+              setProg("FOLDING PAPER … ready");
+            }
+          };
+          const model = "onnx-community/depth-anything-v2-small";
+          try {
+            depthPipe = await pipeline("depth-estimation", model, {
+              device: "webgpu",
+              dtype: "fp16",
+              progress_callback,
+            });
+            depthBackend = "webgpu";
+          } catch (e1) {
+            try {
+              depthPipe = await pipeline("depth-estimation", model, {
+                device: "wasm",
+                dtype: "q8",
+                progress_callback,
+              });
+              depthBackend = "wasm";
+            } catch (e2) {
+              setProg("");
+              setOverlay(
+                "error",
+                "MODEL INIT FAILED",
+                "The depth backend failed to start. Continue flat, retry, or use ?fakedepth=1.",
+                { retry: true, flat: true },
+              );
+              return;
+            }
+          }
+          setProg("");
+          depthLoop();
+        }
+
+        function drawDepthInput() {
+          // Downscale the framed (already cover-fit + mirrored) canvas.
+          const long = 384;
+          const fw = framedCanvas.width,
+            fh = framedCanvas.height;
+          const scale = long / Math.max(fw, fh);
+          const w = Math.max(2, Math.round(fw * scale));
+          const h = Math.max(2, Math.round(fh * scale));
+          if (depthInputCanvas.width !== w) depthInputCanvas.width = w;
+          if (depthInputCanvas.height !== h) depthInputCanvas.height = h;
+          depthInputCtx.drawImage(framedCanvas, 0, 0, w, h);
+          return { w, h };
+        }
+
+        async function depthLoop() {
+          if (document.hidden || !depthPipe) {
+            setTimeout(depthLoop, 250);
+            return;
+          }
+          if (!cameraReady) {
+            setTimeout(depthLoop, 120);
+            return;
+          }
+          if (depthBusy) {
+            requestAnimationFrame(depthLoop);
+            return;
+          }
+          depthBusy = true;
+          try {
+            const { w, h } = drawDepthInput();
+            const t0 = performance.now();
+            const out = await depthPipe(depthInputCanvas);
+            const raw = out.depth || out.predicted_depth || out;
+            const data = raw.data;
+            const dw = raw.width || w,
+              dh = raw.height || h;
+            // temporal min/max EMA normalization
+            let mn = Infinity,
+              mx = -Infinity;
+            const step = Math.max(1, Math.floor(data.length / 4096));
+            for (let i = 0; i < data.length; i += step) {
+              const v = data[i];
+              if (v < mn) mn = v;
+              if (v > mx) mx = v;
+            }
+            if (!emaNorm.init) {
+              emaNorm.min = mn;
+              emaNorm.max = mx;
+              emaNorm.init = true;
+            } else {
+              const a = 0.15;
+              emaNorm.min += (mn - emaNorm.min) * a;
+              emaNorm.max += (mx - emaNorm.max) * a;
+            }
+            const range = Math.max(1e-3, emaNorm.max - emaNorm.min);
+            // build RGBA8 upload (r = normalized depth), and histogram for quantiles
+            const rgba = new Uint8Array(dw * dh * 4);
+            const hist = new Float32Array(256);
+            for (let i = 0; i < dw * dh; i++) {
+              let n = (data[i] - emaNorm.min) / range;
+              n = Math.min(1, Math.max(0, n));
+              if (INVERT_DEPTH) n = 1 - n;
+              const b = (n * 255) | 0;
+              rgba[i * 4] = b;
+              rgba[i * 4 + 1] = b;
+              rgba[i * 4 + 2] = b;
+              rgba[i * 4 + 3] = 255;
+              hist[b] += 1;
+            }
+            computeThresholds(hist, dw * dh);
+            gl.bindTexture(gl.TEXTURE_2D, depthUploadTex);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA8,
+              dw,
+              dh,
+              0,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              rgba,
+            );
+            haveDepth = true;
+
+            const dt = performance.now() - t0;
+            depthHz = 1000 / Math.max(dt, 1);
+            lastDepthTime = performance.now();
+          } catch (e) {
+            // swallow — keep looping; flat base still renders
+          } finally {
+            depthBusy = false;
+          }
+          requestAnimationFrame(depthLoop);
+        }
+
+        // ---- CPU quantile thresholds (equal-area) with spread + EMA smoothing
+        let curThresh = new Float32Array(8);
+        let threshInit = false;
+        function computeThresholds(hist, total) {
+          const N = state.layerCount;
+          const cum = new Float32Array(257);
+          for (let i = 0; i < 256; i++) cum[i + 1] = cum[i] + hist[i];
+          const spread = state.depthRange; // 0 foreground-biased ↔ 1 even
+          const exponent = 1.8 - 0.8 * spread;
+          const target = new Float32Array(8);
+          for (let k = 1; k < N; k++) {
+            const frac = Math.pow(k / N, exponent);
+            const want = frac * total;
+            // find value where cumulative crosses want
+            let lo = 0;
+            while (lo < 256 && cum[lo + 1] < want) lo++;
+            target[k - 1] = Math.min(0.999, Math.max(0.001, lo / 255));
+          }
+          const a = 0.25;
+          for (let i = 0; i < 8; i++) {
+            const t = i < N - 1 ? target[i] : 1.0;
+            curThresh[i] = threshInit
+              ? curThresh[i] + (t - curThresh[i]) * a
+              : t;
+          }
+          threshInit = true;
+        }
+        function fakeThresholds() {
+          const N = state.layerCount;
+          for (let i = 0; i < 8; i++)
+            curThresh[i] = i < N - 1 ? (i + 1) / N : 1.0;
+        }
+
+        // ==================================================================
+        //  Palette → uniform arrays
+        // ==================================================================
+        function lerp3(a, b, t) {
+          return [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+          ];
+        }
+        function zoneArray() {
+          const p = PRESETS[state.preset];
+          const src = p.zones.map(hexToRgb);
+          const N = state.layerCount;
+          const out = new Float32Array(24);
+          for (let i = 0; i < 8; i++) {
+            let c;
+            if (i < N) {
+              const t = N === 1 ? 0 : (i / (N - 1)) * (src.length - 1);
+              const i0 = Math.floor(t),
+                i1 = Math.min(src.length - 1, i0 + 1);
+              c = lerp3(src[i0], src[i1], t - i0);
+            } else c = src[src.length - 1];
+            out[i * 3] = c[0];
+            out[i * 3 + 1] = c[1];
+            out[i * 3 + 2] = c[2];
+          }
+          return out;
+        }
+        function accentArray() {
+          const p = PRESETS[state.preset];
+          const out = new Float32Array(12);
+          for (let i = 0; i < 4; i++) {
+            const c = i < p.accents.length ? hexToRgb(p.accents[i]) : [0, 0, 0];
+            out[i * 3] = c[0];
+            out[i * 3 + 1] = c[1];
+            out[i * 3 + 2] = c[2];
+          }
+          return { arr: out, count: Math.min(4, p.accents.length) };
+        }
+
+        // ==================================================================
+        //  Render passes
+        // ==================================================================
+        function drawTo(target, prog, setUniforms) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.w : RW, target ? target.h : RH);
+          gl.useProgram(prog.prog);
+          gl.bindVertexArray(vao);
+          setUniforms(prog.u);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        function bindTex(unit, tex) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+        }
+
+        let paperReadyFired = false;
+        let depthMix = 0;
+        let lastFrame = performance.now();
+        let fps = 0,
+          fpsAcc = 0,
+          fpsN = 0,
+          fpsTimer = 0;
+
+        function frame(now) {
+          const dt = (now - lastFrame) / 1000;
+          lastFrame = now;
+          fpsAcc += 1 / Math.max(dt, 1e-3);
+          fpsN++;
+          if (now - fpsTimer > 500) {
+            fps = fpsAcc / Math.max(fpsN, 1);
+            fpsAcc = 0;
+            fpsN = 0;
+            fpsTimer = now;
+          }
+
+          // ease parallax + loading depth contribution
+          const ease = state.pauseAnim ? 0.0 : 1.0;
+          parCur.x += (parTarget.x * ease - parCur.x) * 0.06;
+          parCur.y += (parTarget.y * ease - parCur.y) * 0.06;
+          const wantDepth = haveDepth || FAKE_DEPTH ? 1 : 0;
+          depthMix += (wantDepth - depthMix) * 0.03;
+
+          if (FAKE_DEPTH) fakeThresholds();
+
+          // update video texture from framed canvas
+          if (cameraReady && video.videoWidth) updateFramedCanvas();
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          if (cameraReady && video.videoWidth) {
+            bindTex(0, videoTex);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA8,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              framedCanvas,
+            );
+          }
+
+          // Pass 1: flatten (Kuwahara-lite) → base
+          drawTo(baseTarget, progFlatten, (u) => {
+            bindTex(0, videoTex);
+            gl.uniform1i(u.uTex, 0);
+            gl.uniform2f(u.uTexel, 1 / DW, 1 / DH);
+            gl.uniform1f(u.uFlatten, state.flatten);
+          });
+
+          // Pass 2: depth source
+          drawTo(depthSrcTarget, progDepthSrc, (u) => {
+            bindTex(0, depthUploadTex);
+            gl.uniform1i(u.uDepthTex, 0);
+            gl.uniform1i(u.uFake, FAKE_DEPTH ? 1 : 0);
+          });
+
+          // Pass 3: EMA ping-pong
+          const emaRead = emaReadIsA ? emaA : emaB;
+          const emaWrite = emaReadIsA ? emaB : emaA;
+          const alpha = 0.5 - 0.46 * state.depthSmooth; // calm → smaller alpha
+          drawTo(emaWrite, progEma, (u) => {
+            bindTex(0, depthSrcTarget.tex);
+            bindTex(1, emaRead.tex);
+            gl.uniform1i(u.uCur, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform1f(u.uAlpha, alpha);
+            gl.uniform1i(u.uInit, emaInit ? 1 : 0);
+          });
+          emaInit = false;
+          emaReadIsA = !emaReadIsA;
+
+          // Pass 4: separable blur (mask smoothing)
+          const rad = 0.4 + 2.2 * state.cutSmooth;
+          drawTo(blurTmp, progBlur, (u) => {
+            bindTex(0, emaWrite.tex);
+            gl.uniform1i(u.uTex, 0);
+            gl.uniform2f(u.uDir, rad / DW, 0);
+          });
+          drawTo(depthSmooth, progBlur, (u) => {
+            bindTex(0, blurTmp.tex);
+            gl.uniform1i(u.uTex, 0);
+            gl.uniform2f(u.uDir, 0, rad / DH);
+          });
+
+          // Pass 5: composite → screen
+          const zones = zoneArray();
+          const acc = accentArray();
+          const p = PRESETS[state.preset];
+          drawTo(null, progComp, (u) => {
+            bindTex(0, baseTarget.tex);
+            bindTex(1, depthSmooth.tex);
+            bindTex(2, depthSrcTarget.tex);
+            gl.uniform1i(u.uBase, 0);
+            gl.uniform1i(u.uDepthS, 1);
+            gl.uniform1i(u.uDepthRaw, 2);
+            gl.uniform2f(u.uRes, RW, RH);
+            gl.uniform1i(u.uLayerCount, state.layerCount);
+            gl.uniform1fv(u.uThresh, curThresh);
+            gl.uniform3fv(u.uZone, zones);
+            gl.uniform3fv(u.uAccent, acc.arr);
+            gl.uniform1i(u.uAccentCount, acc.count);
+            gl.uniform3fv(u.uCut, hexToRgb(p.cut));
+            gl.uniform3fv(u.uShadowCol, hexToRgb(p.shadow));
+            gl.uniform3fv(u.uBg, hexToRgb(p.bg));
+            gl.uniform1f(u.uCutSmooth, state.cutSmooth);
+            gl.uniform1f(u.uEdgeLight, state.edgeLight);
+            gl.uniform1f(u.uPaletteMix, state.paletteMix);
+            gl.uniform1f(u.uThickness, state.thickness);
+            gl.uniform1f(u.uParallax, state.parallax);
+            gl.uniform1f(u.uGrain, state.grain);
+            gl.uniform1f(u.uDepthMix, depthMix);
+            gl.uniform2f(u.uParVec, parCur.x, parCur.y);
+            gl.uniform1i(u.uDebug, state.debug);
+          });
+
+          if (!paperReadyFired && cameraReady) {
+            paperReadyFired = true;
+            window.__paperReady = true;
+          }
+
+          const ro = document.getElementById("readout");
+          if (ro) {
+            ro.textContent =
+              `FPS ${fps.toFixed(0)} / RES ${RW}×${RH} / ` +
+              `DEPTH ${depthBackend} / ${depthHz.toFixed(1)} Hz / L ${state.layerCount}`;
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        function updateFramedCanvas() {
+          const vw = video.videoWidth,
+            vh = video.videoHeight;
+          const cw = framedCanvas.width,
+            ch = framedCanvas.height;
+          const canvasAspect = cw / ch;
+          const videoAspect = vw / vh;
+          let sx, sy, sw, sh;
+          if (canvasAspect > videoAspect) {
+            sw = vw;
+            sh = vw / canvasAspect;
+            sx = 0;
+            sy = (vh - sh) / 2;
+          } else {
+            sh = vh;
+            sw = vh * canvasAspect;
+            sy = 0;
+            sx = (vw - sw) / 2;
+          }
+          framedCtx.save();
+          // Vertical flip so the 2D-canvas (top-left origin) matches the
+          // WebGL texture (bottom-left origin). Depth is derived from this same
+          // framedCanvas, so color and depth stay in one consistent UV system.
+          framedCtx.translate(0, ch);
+          framedCtx.scale(1, -1);
+          if (state.mirror) {
+            framedCtx.translate(cw, 0);
+            framedCtx.scale(-1, 1);
+          }
+          framedCtx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+          framedCtx.restore();
+        }
+
+        // pause inference on hidden; resume on visible
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden && depthPipe && !FAKE_DEPTH) depthLoop();
+        });
+
+        // ==================================================================
+        //  Boot
+        // ==================================================================
+        (async function boot() {
+          if (FAKE_DEPTH) {
+            depthBackend = "fakedepth";
+            haveDepth = true;
+            fakeThresholds();
+          }
+          await startCamera();
+          requestAnimationFrame(frame);
+          initDepthModel();
+          // safety: mark ready even without camera (flat/fake) so tooling proceeds
+          setTimeout(() => {
+            window.__paperReady = true;
+          }, 8000);
+        })();
+      })();
+    </script>
+  </body>
+</html>
