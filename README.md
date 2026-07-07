@@ -20,6 +20,7 @@
 [https://dsflon.github.io/webgl2/fable5_oneline-cam.html](https://dsflon.github.io/webgl2/fable5_oneline-cam.html)  
 [https://dsflon.github.io/webgl2/fable5_typo-cam.html](https://dsflon.github.io/webgl2/fable5_typo-cam.html)  
 [https://dsflon.github.io/webgl2/fable5_van-gogh.html](https://dsflon.github.io/webgl2/fable5_van-gogh.html)
+[https://dsflon.github.io/webgl2/fable5_papercraft-cam.html](https://dsflon.github.io/webgl2/fable5_papercraft-cam.html)
 
 ## Docs
 
