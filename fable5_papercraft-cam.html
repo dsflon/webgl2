@@ -1,0 +1,2149 @@
+<!doctype html>
+<!--
+  fable5_papercraft-cam.html — WebGL2 webcam → 多層ペーパークラフト・ジオラマ
+
+  発注書: prompts/fable5_papercraft-cam_order.md
+  ディレクション規約: AI_DIRECTION_GUIDE.md / 参照実装: fable5_van-gogh.html
+
+  様式解析の要約(不変量、優先順):
+  1. 空間の離散化 — 単眼深度推定(Depth Anything V2 small / transformers.js)で
+     奥行きを推定し、深度ヒストグラムの分位点しきい値で 3〜8 枚の「紙のレイヤー」
+     に量子化する。中間深度は存在しない。
+  2. ハサミで切った紙の輪郭 — 深度場を分離ガウスぼかしで平滑化してから
+     鋭く再閾値化(smoothstep)。輪郭は滑らかな有機曲線になり、しきい値近傍の
+     擬似SDF帯を明るい「切り口」ハイライトとして描く。
+  3. フラットな紙の色 — anisotropic 系 Kuwahara で映像を平坦化し、深度ゾーン別
+     スプリットトーン(奥=明るいミスト色 → 手前=濃色)+灰色度重みで限定パレットへ。
+     高彩度の被写体のみ差し色へスナップする。
+  4. 紙の厚み — レイヤーの影(さらに強くぼかした深度場を上方向オフセットで参照)を
+     奥のレイヤーへ乗算。影は黒でなくプリセット固有の暗色ティント。
+  5. 微小パララックス — レイヤーごとに UV を深度係数でシフト。ポインタ/傾き+
+     低周波の自動ドリフトでジオラマとして知覚させる。
+  6. 紙の物質感 — セル座標ハッシュ由来の静的な繊維グレインとレイヤーごとの色ムラ
+     (シードに時間は混ぜない)。
+
+  パイプライン(コンポジットは毎フレーム、深度推論のみ非同期):
+    video ──► [P0 scene]  cover-fit + mirror                RGBA8  ≤1408 長辺
+          └─► (async) crop 350px → Depth Anything V2 small → Float32 → 正規化 u8
+                 正規化は min/max の EMA(temporal normalization)
+                 しきい値は深度ヒストグラム分位点を EMA(CPU 側)
+    [P1 kuwahara] scene → 紙のフラット色                    RGBA8  1/2 解像度
+    [P2 ema]      深度 raw(または ?fakedepth=1 の合成深度)→ EMA ping-pong  R16F 320級
+    [P3,P4 blur]  分離ガウス → depthSoft(切り口用)          R16F
+    [P5,P6 blur]  さらに広い分離ガウス → depthShadow(影用)  R16F
+    [P7 composite] 奥→手前へレイヤーをループ合成(パララックスUV、量子化マスク、
+                   切り口SDF帯、ドロップシャドウ、パレット写像、グレイン)→ 画面
+
+  スライダー:
+    Layers        紙のレイヤー枚数(3〜8)
+    Depth spread  しきい値の等分割 ↔ 分位点(内容適応)ブレンド
+    Depth calm    深度EMAの時定数(層の落ち着き ↔ 追従の速さ)
+    Cut roundness 切り口の丸み(深度場のぼかし半径)
+    Cut highlight 切り口ハイライトの明るさ・太さ
+    Paper flatten Kuwahara 平坦化の強度(写真 ↔ 紙)
+    Palette       映像色 ↔ プリセットパレットの写像率
+    Paper lift    影のオフセット・濃さ(紙の浮き)
+    Parallax      視差カメラの振れ幅
+    Paper grain   繊維グレインの強さ
+
+  実行方法:
+    python3 -m http.server 8888
+    → http://localhost:8888/fable5_papercraft-cam.html を開きカメラを許可
+    (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    初回は深度モデル(数十MB)のダウンロードが走ります。完了までは単層の
+    「下地モード」で表示され、深度が届くとレイヤーが立ち上がります。
+    ?fakedepth=1 を付けると推論の代わりに合成深度(検証・標本用)を使います。
+
+  依存: @huggingface/transformers(CDN)+ onnx-community/depth-anything-v2-small
+  のみ(リポジトリ規約の ML 例外)。描画は WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Papercraft Cam — WebGL2 depth-layered paper diorama</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b2b30;
+        --ink: #f4efe2;
+        --muted: rgba(244, 239, 226, 0.68);
+        --panel: rgba(5, 24, 27, 0.8);
+        --line: rgba(244, 239, 226, 0.16);
+        --accent: #f08a4b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            circle at 70% 20%,
+            rgba(168, 222, 210, 0.14),
+            transparent 30%
+          ),
+          radial-gradient(
+            circle at 22% 84%,
+            rgba(240, 138, 75, 0.1),
+            transparent 34%
+          ),
+          linear-gradient(150deg, #06181b, #0b2b30 55%, #082624);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+      }
+
+      video {
+        position: fixed;
+        width: 1px;
+        height: 1px;
+        left: -10px;
+        top: -10px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .top-btn {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        z-index: 11;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: var(--panel);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left));
+      }
+
+      #flipCamera {
+        right: max(14px, env(safe-area-inset-right));
+        display: none;
+      }
+
+      @media (pointer: coarse) {
+        #flipCamera {
+          display: block;
+        }
+      }
+
+      #depthStatusChip {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 11;
+        padding: 7px 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        background: var(--panel);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        pointer-events: none;
+        transition: opacity 0.6s ease;
+        white-space: nowrap;
+      }
+
+      #depthStatusChip.hidden {
+        opacity: 0;
+      }
+
+      .panel {
+        position: fixed;
+        top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(360px, calc(100vw - 28px));
+        max-height: calc(100vh - 76px);
+        overflow: auto;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        backdrop-filter: blur(10px);
+        transition:
+          transform 0.25s ease,
+          opacity 0.25s ease;
+      }
+
+      .panel h1 {
+        margin: 0 0 6px;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--ink);
+      }
+
+      .panel p {
+        margin: 0 0 12px;
+        font-size: 10.5px;
+        line-height: 1.55;
+      }
+
+      .select-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 0 0 10px;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+
+      .select-row select {
+        flex: 1;
+        max-width: 210px;
+        padding: 5px 6px;
+        color: var(--ink);
+        background: rgba(244, 239, 226, 0.06);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        font: inherit;
+        font-size: 10.5px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 44px;
+        grid-template-areas:
+          "label out"
+          "slider slider";
+        gap: 2px 8px;
+        padding: 7px 0 2px;
+        border-top: 1px solid var(--line);
+      }
+
+      .row label {
+        grid-area: label;
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .row label span {
+        display: block;
+        font-size: 9.5px;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+
+      .row output {
+        grid-area: out;
+        justify-self: end;
+        font-size: 10.5px;
+        color: var(--accent);
+      }
+
+      .row input[type="range"] {
+        grid-area: slider;
+        width: 100%;
+        accent-color: var(--accent);
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0 2px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .buttons button {
+        flex: 1;
+        min-width: 100px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(244, 239, 226, 0.06);
+        font: inherit;
+        font-size: 10.5px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      .status {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+        font-size: 9.5px;
+        line-height: 1.7;
+        letter-spacing: 0.05em;
+      }
+
+      .badge {
+        display: inline-block;
+        margin-top: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 9px;
+        color: var(--muted);
+      }
+
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(4, 16, 18, 0.72);
+        backdrop-filter: blur(6px);
+        transition: opacity 0.3s ease;
+      }
+
+      #overlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .overlay-card {
+        max-width: 460px;
+        padding: 22px 24px;
+        text-align: center;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+
+      .overlay-card h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.16em;
+        color: var(--ink);
+      }
+
+      .overlay-card p {
+        margin: 0 0 14px;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+
+      .overlay-card .bar {
+        height: 6px;
+        margin: 0 0 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .overlay-card .bar i {
+        display: block;
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+        transition: width 0.2s ease;
+      }
+
+      .overlay-card button {
+        margin: 0 4px;
+        padding: 9px 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(244, 239, 226, 0.08);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      @media (max-width: 640px) {
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 54vh;
+          padding: 12px;
+        }
+
+        .panel.collapsed {
+          transform: translateY(calc(100% + 18px));
+          opacity: 0;
+        }
+      }
+
+      @media (min-width: 641px) {
+        .panel.collapsed {
+          transform: translateX(calc(-100% - 22px));
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 papercraft diorama webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn" aria-expanded="true">
+      HIDE UI
+    </button>
+    <button
+      id="flipCamera"
+      type="button"
+      class="top-btn"
+      aria-label="Switch camera"
+    >
+      REAR CAM
+    </button>
+    <div id="depthStatusChip">DEPTH · BOOTING</div>
+
+    <section
+      id="panel"
+      class="panel"
+      aria-label="Papercraft webcam controls"
+    ></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <div class="bar" id="overlayBar" hidden><i id="overlayBarFill"></i></div>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+        <button id="retryModel" type="button" hidden>RETRY DOWNLOAD</button>
+        <button id="continueFlat" type="button" hidden>CONTINUE FLAT</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const depthStatusChip = document.getElementById("depthStatusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const overlayBar = document.getElementById("overlayBar");
+        const overlayBarFill = document.getElementById("overlayBarFill");
+        const retryCamera = document.getElementById("retryCamera");
+        const retryModel = document.getElementById("retryModel");
+        const continueFlat = document.getElementById("continueFlat");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        // ?fakedepth=1 replaces inference with a synthetic depth field
+        // (offline verification, cross-section specimen, debugging).
+        const SYNTH_DEPTH =
+          new URLSearchParams(location.search).get("fakedepth") === "1";
+
+        const MAX_LAYERS = 8;
+        const MODEL_ID = "onnx-community/depth-anything-v2-small";
+        const TRANSFORMERS_CDN =
+          "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.0";
+
+        /*
+          Palettes from the two reference pictures. Each preset defines:
+            zones      — per-depth-zone paper colors, FAR → NEAR
+            accents    — snap targets for high-chroma subjects (may be empty)
+            cut        — the bright "scissor cut" edge color
+            shadowTint — multiplied shadow color (never plain black)
+        */
+        const PRESETS = {
+          forest: {
+            label: "Deep Forest",
+            zones: [
+              "#a8ded2",
+              "#5db3a0",
+              "#2e7f6e",
+              "#175a4f",
+              "#0e3b38",
+              "#082624",
+            ],
+            accents: ["#f08a4b", "#ec5f8a", "#f2b134", "#9dc45f"],
+            cut: "#f4efe2",
+            shadowTint: "#4d827b",
+          },
+          eco: {
+            label: "Eco White",
+            zones: [
+              "#10301a",
+              "#1f4d26",
+              "#3e7d3f",
+              "#6fae5c",
+              "#dfe3e0",
+              "#f5f4ee",
+            ],
+            accents: [],
+            cut: "#ffffff",
+            shadowTint: "#9aa89b",
+          },
+        };
+
+        const DEBUG_MODES = [
+          "FINAL",
+          "RAW DEPTH",
+          "SMOOTH DEPTH",
+          "LAYER MAP",
+          "MASK + CUT",
+          "SHADOWS",
+          "FLAT BASE",
+        ];
+
+        const DEFAULTS = {
+          layerCount: 5,
+          depthRange: 0.6,
+          depthSmooth: 0.65,
+          cutSmooth: 0.5,
+          edgeLight: 0.55,
+          flatten: 0.7,
+          paletteMix: 0.75,
+          thickness: 0.6,
+          parallax: 0.5,
+          grain: 0.4,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          preset: "forest",
+          debugView: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion,
+        };
+
+        const uiRows = [
+          ["layerCount", "Layers", "how many sheets of paper", 3, 8, 1],
+          [
+            "depthRange",
+            "Depth spread",
+            "equal slices ↔ content-adaptive (quantile)",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "depthSmooth",
+            "Depth calm",
+            "layer steadiness ↔ responsiveness",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "cutSmooth",
+            "Cut roundness",
+            "how smoothly the scissors travelled",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "edgeLight",
+            "Cut highlight",
+            "bright paper edge along each cut",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "flatten",
+            "Paper flatten",
+            "photo detail ↔ flat paper color",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "paletteMix",
+            "Palette",
+            "camera colors ↔ preset paper colors",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "thickness",
+            "Paper lift",
+            "drop shadow: how high sheets float",
+            0,
+            1,
+            0.01,
+          ],
+          ["parallax", "Parallax", "diorama camera sway amount", 0, 1, 0.01],
+          ["grain", "Paper grain", "paper fiber texture", 0, 1, 0.01],
+        ];
+
+        panel.innerHTML = `
+          <h1>FABLE5 · PAPERCRAFT CAM</h1>
+          <p>
+            Monocular depth (Depth Anything V2) quantized into a handful of
+            paper sheets: smoothed scissor-cut contours, flat split-toned
+            paper colors, soft inter-layer shadows and a gently drifting
+            parallax camera.
+          </p>
+          <div class="select-row">
+            <span>PALETTE</span>
+            <select id="preset" aria-label="Palette preset">
+              ${Object.entries(PRESETS)
+                .map(
+                  ([key, p]) =>
+                    `<option value="${key}"${
+                      key === state.preset ? " selected" : ""
+                    }>${p.label}</option>`,
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>DEBUG VIEW</span>
+            <select id="debugView" aria-label="Debug view">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input
+                    id="${key}"
+                    type="range"
+                    min="${min}"
+                    max="${max}"
+                    step="${step}"
+                    value="${state[key]}"
+                  />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>Mirror webcam</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>Pause camera drift</span>
+            <input id="pauseAnim" type="checkbox" ${
+              state.pauseAnim ? "checked" : ""
+            } />
+          </label>
+          <div class="buttons">
+            <button id="tiltBtn" type="button" hidden>ENABLE TILT</button>
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / RES -- / DEPTH -- / LAYERS --</div>
+            <div id="depthStatusRow">DEPTH · BOOTING</div>
+            <span class="badge">WebGL2 · Depth Anything V2 · paper diorama</span>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        document
+          .getElementById("preset")
+          .addEventListener("change", (event) => {
+            state.preset = event.currentTarget.value;
+          });
+
+        document
+          .getElementById("debugView")
+          .addEventListener("change", (event) => {
+            state.debugView = Number(event.currentTarget.value);
+          });
+
+        document
+          .getElementById("mirror")
+          .addEventListener("change", (event) => {
+            state.mirror = event.currentTarget.checked;
+          });
+
+        document
+          .getElementById("pauseAnim")
+          .addEventListener("change", (event) => {
+            state.pauseAnim = event.currentTarget.checked;
+          });
+
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.assign(state, DEFAULTS);
+          Object.keys(DEFAULTS).forEach((key) => {
+            document.getElementById(key).value = state[key];
+            document.getElementById(`${key}Out`).textContent = formatValue(
+              state[key],
+            );
+          });
+        });
+
+        togglePanel.addEventListener("click", () => {
+          const collapsed = panel.classList.toggle("collapsed");
+          togglePanel.textContent = collapsed ? "SHOW UI" : "HIDE UI";
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        });
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode =
+            state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+
+          // Front camera mirrors like a selfie preview, rear shows the world.
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          // preserveDrawingBuffer is on, so the current frame exports directly.
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-papercraft-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        let overlayKind = "requesting";
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayKind = kind;
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          retryModel.hidden = !buttons.retryModel;
+          continueFlat.hidden = !buttons.continueFlat;
+          overlayBar.hidden = !buttons.progress;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        function hexToRgb(hex) {
+          const value = hex.replace("#", "");
+          return [
+            parseInt(value.slice(0, 2), 16) / 255,
+            parseInt(value.slice(2, 4), 16) / 255,
+            parseInt(value.slice(4, 6), 16) / 255,
+          ];
+        }
+
+        // Interpolate the preset's FAR→NEAR zone gradient at N layer stops.
+        function zoneColors(preset, n) {
+          const stops = preset.zones.map(hexToRgb);
+          const cols = new Float32Array(MAX_LAYERS * 3);
+          for (let k = 0; k < n; k++) {
+            const pos = n > 1 ? (k / (n - 1)) * (stops.length - 1) : 0.5;
+            const i = Math.min(stops.length - 2, Math.floor(pos));
+            const f = pos - i;
+            for (let c = 0; c < 3; c++) {
+              cols[k * 3 + c] = stops[i][c] * (1 - f) + stops[i + 1][c] * f;
+            }
+          }
+          return cols;
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // R16F render targets keep the depth EMA from stalling in 8 bits.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0),
+            vec2( 3.0, -1.0),
+            vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Pass 0 — webcam cover-fit + mirror into the working scene buffer.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform int uMirror;
+          void main() {
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scale = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scale + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // Pass 1 — 4-sector Kuwahara: edge-preserving flattening toward paper.
+        const kuwaharaFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform vec2 uTexel;
+          uniform int uRadius;
+          uniform float uMix;
+          void main() {
+            vec3 orig = texture(uScene, vUv).rgb;
+            vec3 bestMean = orig;
+            float bestVar = 1e9;
+            for (int s = 0; s < 4; ++s) {
+              vec2 sgn = vec2(
+                (s == 0 || s == 2) ? -1.0 : 1.0,
+                (s < 2) ? -1.0 : 1.0
+              );
+              vec3 sum = vec3(0.0);
+              vec3 sq = vec3(0.0);
+              float n = 0.0;
+              for (int y = 0; y <= 6; ++y) {
+                if (y > uRadius) break;
+                for (int x = 0; x <= 6; ++x) {
+                  if (x > uRadius) break;
+                  vec3 c = texture(
+                    uScene,
+                    vUv + sgn * vec2(float(x), float(y)) * uTexel
+                  ).rgb;
+                  sum += c;
+                  sq += c * c;
+                  n += 1.0;
+                }
+              }
+              vec3 mean = sum / n;
+              float variance = dot(max(sq / n - mean * mean, 0.0), vec3(1.0));
+              if (variance < bestVar) {
+                bestVar = variance;
+                bestMean = mean;
+              }
+            }
+            fragColor = vec4(mix(orig, bestMean, uMix), 1.0);
+          }
+        `;
+
+        // Pass 2 — depth EMA ping-pong. Reads the raw inference upload
+        // (top-down, unmirrored) or a synthetic diorama field (?fakedepth=1).
+        const emaFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uRaw;
+          uniform sampler2D uPrev;
+          uniform float uAlpha;
+          uniform int uMirror;
+          uniform int uSynth;
+          uniform int uHasDepth;
+
+          // Synthetic depth: ground ramp + sphere + slab + foreground fringe.
+          // Doubles as the cross-section specimen and offline test source.
+          float synthDepth(vec2 uv) {
+            float d = mix(0.55, 0.12, uv.y);
+            float s = 1.0 - smoothstep(0.0, 0.30, distance(uv, vec2(0.38, 0.48)));
+            d = max(d, s * 0.80);
+            vec2 q = abs(uv - vec2(0.75, 0.42)) - vec2(0.10, 0.17);
+            float slab = 1.0 - smoothstep(-0.02, 0.05, max(q.x, q.y));
+            d = max(d, slab * 0.62);
+            float fringe = 1.0 -
+              smoothstep(0.0, 0.20, uv.y - 0.05 * sin(uv.x * 14.0) - 0.03);
+            d = max(d, fringe * 0.95);
+            return clamp(d, 0.0, 1.0);
+          }
+
+          void main() {
+            float cur;
+            if (uSynth == 1) {
+              cur = synthDepth(vUv);
+            } else {
+              vec2 suv = vec2(
+                uMirror == 1 ? 1.0 - vUv.x : vUv.x,
+                1.0 - vUv.y
+              );
+              cur = texture(uRaw, suv).r;
+            }
+            float prev = texture(uPrev, vUv).r;
+            float d = uHasDepth == 1 ? mix(prev, cur, uAlpha) : 0.5;
+            fragColor = vec4(d, 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // Passes 3-6 — separable Gaussian on the depth field (R channel).
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            float acc = 0.0;
+            float wsum = 0.0;
+            for (int i = -12; i <= 12; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / (uSigma * uSigma));
+              acc += texture(uSrc, vUv + uDir * x).r * w;
+              wsum += w;
+            }
+            fragColor = vec4(acc / wsum, 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // Pass 7 — the diorama composite: back-to-front paper layers with
+        // parallax UVs, quantized masks, cut-edge SDF band, drop shadows,
+        // zone palette mapping, grain and vignette.
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+
+          uniform sampler2D uFlat;
+          uniform sampler2D uDepthRaw;
+          uniform sampler2D uDepthSoft;
+          uniform sampler2D uDepthShadow;
+          uniform vec2 uResolution;
+          uniform float uThresh[7];
+          uniform int uLayers;
+          uniform vec3 uZone[8];
+          uniform vec3 uAccent[4];
+          uniform int uAccentCount;
+          uniform vec3 uCut;
+          uniform vec3 uShadowTint;
+          uniform vec2 uParallax;
+          uniform vec2 uShadowOff;
+          uniform float uDepthMix;
+          uniform float uPaletteMix;
+          uniform float uEdgeLight;
+          uniform float uThickness;
+          uniform float uGrain;
+          uniform int uDebug;
+          uniform int uMirror;
+
+          float luma(vec3 c) {
+            return dot(c, vec3(0.299, 0.587, 0.114));
+          }
+
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+
+          vec3 hsv2rgb(vec3 c) {
+            vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+            return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+          }
+
+          vec2 layerUv(int k) {
+            float z = uLayers > 1 ? float(k) / float(uLayers - 1) : 0.5;
+            return vUv + uParallax * (z - 0.5);
+          }
+
+          // Flat-mode blend: before the first depth arrives the whole scene
+          // sits on one mid sheet, then layers rise as uDepthMix eases to 1.
+          float depthAt(sampler2D tex, vec2 uv) {
+            return mix(0.5, texture(tex, uv).r, uDepthMix);
+          }
+
+          vec3 paperColor(int k, vec2 uv) {
+            vec3 zone = uZone[k];
+            vec3 cam = texture(uFlat, uv).rgb;
+            float l = luma(cam);
+            // Flat paper, gently modulated by scene luminance so the
+            // subject stays readable inside its sheet. The modulation is
+            // soft-quantized: paper keeps broad tonal steps, not gradients.
+            float lq = mix(l, (floor(l * 4.0) + 0.5) / 4.0, 0.6);
+            vec3 paper = zone * (0.9 + 0.26 * (lq - 0.5));
+            // Static per-layer mottle (cell hash — no time in the seed).
+            float mo = vnoise(gl_FragCoord.xy / 150.0 + float(k) * 13.7);
+            paper *= 1.0 + (mo - 0.5) * 0.11;
+            float sat =
+              max(max(cam.r, cam.g), cam.b) - min(min(cam.r, cam.g), cam.b);
+            if (uAccentCount > 0) {
+              float best = 1e9;
+              vec3 acc = paper;
+              for (int i = 0; i < 4; ++i) {
+                if (i >= uAccentCount) break;
+                vec3 cn = cam / max(1e-4, l);
+                vec3 an = uAccent[i] / max(1e-4, luma(uAccent[i]));
+                float d2 = distance(cn, an);
+                if (d2 < best) {
+                  best = d2;
+                  acc = uAccent[i];
+                }
+              }
+              // Vivid subjects snap to the nearest accent paper.
+              float snap = smoothstep(0.24, 0.55, sat);
+              paper = mix(paper, acc * (0.72 + 0.55 * l), snap);
+            }
+            // Gray-weight: low-chroma pixels pull hardest toward the palette.
+            float amt = uPaletteMix * mix(1.0, 0.75, smoothstep(0.15, 0.5, sat));
+            return mix(cam, paper, amt);
+          }
+
+          void main() {
+            int layIdx = 0;
+            float shMul = 1.0;
+            float cutAcc = 0.0;
+
+            vec2 uv0 = layerUv(0);
+            vec3 col = paperColor(0, uv0);
+
+            float dHere = depthAt(uDepthSoft, vUv);
+            for (int j = 0; j < 7; ++j) {
+              if (j >= uLayers - 1) break;
+              if (dHere > uThresh[j]) layIdx = j + 1;
+            }
+
+            for (int k = 1; k < 8; ++k) {
+              if (k >= uLayers) break;
+              vec2 uvk = layerUv(k);
+              float dSoft = depthAt(uDepthSoft, uvk);
+              float t = uThresh[k - 1];
+              float aa = max(fwidth(dSoft) * 1.4, 0.0035);
+              float m = smoothstep(t - aa, t + aa, dSoft);
+
+              // Drop shadow: the extra-blurred field, sampled toward the
+              // light, darkens whatever is already composited beneath.
+              float dShadow = depthAt(uDepthShadow, uvk + uShadowOff);
+              float sh = smoothstep(t - 0.03, t + 0.03, dShadow) *
+                min(1.0, uThickness * 1.25) * (1.0 - m) * uDepthMix;
+              col *= mix(vec3(1.0), uShadowTint, sh);
+              shMul *= 1.0 - sh * 0.85;
+
+              vec3 pc = paperColor(k, uvk);
+
+              // Cut edge: the blurred depth is a pseudo-SDF around the
+              // threshold; a thin band just inside the sheet reads as the
+              // bright scissor cut.
+              float sd = dSoft - t;
+              float band = fwidth(dSoft) * (1.6 + 5.0 * uEdgeLight) + 0.0015;
+              float cut = smoothstep(0.0, aa, sd) *
+                (1.0 - smoothstep(band * 0.55, band * 1.5, sd));
+              cut *= uDepthMix;
+              pc = mix(pc, uCut, cut * (0.3 + 0.7 * uEdgeLight));
+              cutAcc = max(cutAcc, cut * m);
+
+              col = mix(col, pc, m);
+            }
+
+            // Paper fiber grain — static, seeded by pixel coords only.
+            float g1 = hash12(gl_FragCoord.xy);
+            float g2 = vnoise(gl_FragCoord.xy * vec2(0.33, 0.9) + 7.0);
+            float grain = (0.65 * (g1 - 0.5) + 0.35 * (g2 - 0.5)) * uGrain * 0.13;
+            col += grain * (0.35 + 0.65 * luma(col));
+
+            // Gentle vignette keeps the diorama boxed.
+            vec2 q = (vUv - 0.5) * vec2(uResolution.x / uResolution.y, 1.0);
+            col *= mix(0.88, 1.0, smoothstep(1.05, 0.45, length(q)));
+
+            if (uDebug == 1) {
+              vec2 ruv = vec2(
+                uMirror == 1 ? 1.0 - vUv.x : vUv.x,
+                1.0 - vUv.y
+              );
+              col = vec3(texture(uDepthRaw, ruv).r);
+            } else if (uDebug == 2) {
+              col = vec3(texture(uDepthSoft, vUv).r);
+            } else if (uDebug == 3) {
+              float z = uLayers > 1 ? float(layIdx) / float(uLayers - 1) : 0.0;
+              col = hsv2rgb(vec3(mix(0.62, 0.08, z), 0.65, mix(0.45, 1.0, z)));
+            } else if (uDebug == 4) {
+              float z = uLayers > 1 ? float(layIdx) / float(uLayers - 1) : 0.0;
+              col = mix(vec3(0.25 + 0.6 * z), vec3(1.0, 0.55, 0.15), cutAcc);
+            } else if (uDebug == 5) {
+              col = vec3(shMul);
+            } else if (uDebug == 6) {
+              col = texture(uFlat, vUv).rgb;
+            }
+
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            const log = gl.getShaderInfoLog(shader);
+            throw new Error(`Shader compile failed: ${log}`);
+          }
+          return shader;
+        }
+
+        function createProgram(fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, fullscreenVS));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          kuwahara: createProgram(kuwaharaFS),
+          ema: createProgram(emaFS),
+          blur: createProgram(blurFS),
+          composite: createProgram(compositeFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo",
+            "uResolution",
+            "uVideoSize",
+            "uMirror",
+          ]),
+          kuwahara: getLocations(programs.kuwahara, [
+            "uScene",
+            "uTexel",
+            "uRadius",
+            "uMix",
+          ]),
+          ema: getLocations(programs.ema, [
+            "uRaw",
+            "uPrev",
+            "uAlpha",
+            "uMirror",
+            "uSynth",
+            "uHasDepth",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          composite: getLocations(programs.composite, [
+            "uFlat",
+            "uDepthRaw",
+            "uDepthSoft",
+            "uDepthShadow",
+            "uResolution",
+            "uThresh",
+            "uLayers",
+            "uZone",
+            "uAccent",
+            "uAccentCount",
+            "uCut",
+            "uShadowTint",
+            "uParallax",
+            "uShadowOff",
+            "uDepthMix",
+            "uPaletteMix",
+            "uEdgeLight",
+            "uThickness",
+            "uGrain",
+            "uDebug",
+            "uMirror",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            internal,
+            width,
+            height,
+            0,
+            format,
+            type,
+            null,
+          );
+          return tex;
+        }
+
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.R16F : gl.RGBA8;
+          const format = useFloat && floatExt ? gl.RED : gl.RGBA;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, format, type);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0,
+          );
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          2,
+          2,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          null,
+        );
+
+        // Raw depth upload target (R8, sized to the model output on arrival).
+        const depthRawTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, depthRawTex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.R8,
+          1,
+          1,
+          0,
+          gl.RED,
+          gl.UNSIGNED_BYTE,
+          new Uint8Array([128]),
+        );
+
+        let targets = null;
+        let paintW = 2;
+        let paintH = 2;
+        let procW = 2;
+        let procH = 2;
+        let emaNeedsReset = true;
+
+        function rebuildTargets() {
+          if (targets) {
+            Object.values(targets).forEach(destroyTarget);
+          }
+          const flatW = Math.max(2, Math.round(paintW / 2));
+          const flatH = Math.max(2, Math.round(paintH / 2));
+          targets = {
+            scene: createTarget(paintW, paintH, false),
+            flat: createTarget(flatW, flatH, false),
+            emaA: createTarget(procW, procH, true),
+            emaB: createTarget(procW, procH, true),
+            blurTmp: createTarget(procW, procH, true),
+            depthSoft: createTarget(procW, procH, true),
+            depthShadow: createTarget(procW, procH, true),
+          };
+          emaNeedsReset = true;
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            // Cap working buffers: paper is flat, upscaling is invisible.
+            const paintScale = Math.min(1, 1408 / Math.max(width, height));
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            const procScale = 320 / Math.max(width, height);
+            procW = Math.max(2, Math.round(width * procScale));
+            procH = Math.max(2, Math.round(height * procScale));
+            rebuildTargets();
+            resizeInferCanvas();
+          }
+        }
+
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(
+            0,
+            0,
+            target ? target.width : canvas.width,
+            target ? target.height : canvas.height,
+          );
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        /* ------------------------------------------------------------------
+           Depth engine — Depth Anything V2 small via transformers.js.
+           Inference runs in its own async loop (latest-wins: one frame in
+           flight, queue nothing), fully decoupled from the render loop.
+        ------------------------------------------------------------------ */
+
+        const inferCanvas = document.createElement("canvas");
+        const inferCtx = inferCanvas.getContext("2d", {
+          willReadFrequently: true,
+        });
+
+        function resizeInferCanvas() {
+          const aspect = Math.max(
+            0.2,
+            Math.min(
+              5,
+              canvas.clientWidth / Math.max(1, canvas.clientHeight),
+            ),
+          );
+          let w;
+          let h;
+          if (aspect >= 1) {
+            w = 350;
+            h = Math.max(2, Math.round(350 / aspect));
+          } else {
+            h = 350;
+            w = Math.max(2, Math.round(350 * aspect));
+          }
+          if (inferCanvas.width !== w || inferCanvas.height !== h) {
+            inferCanvas.width = w;
+            inferCanvas.height = h;
+          }
+        }
+
+        const depth = {
+          pipe: null,
+          RawImage: null,
+          // idle | loading | warming | ready | error | flat | synth
+          status: SYNTH_DEPTH ? "synth" : "idle",
+          backend: SYNTH_DEPTH ? "SYNTH" : "--",
+          hz: 0,
+          hasDepth: SYNTH_DEPTH,
+          texW: 0,
+          texH: 0,
+          emaMin: null,
+          emaMax: null,
+          cumHist: new Float32Array(256),
+          histValid: false,
+          firstDepthAt: SYNTH_DEPTH ? performance.now() : 0,
+          progress: 0,
+          loadedBytes: {},
+          totalBytes: {},
+        };
+
+        const depthStatusRow = document.getElementById("depthStatusRow");
+
+        function updateDepthStatus() {
+          let text;
+          if (depth.status === "synth") {
+            text = "DEPTH · SYNTHETIC (fakedepth=1)";
+          } else if (depth.status === "idle") {
+            text = "DEPTH · BOOTING";
+          } else if (depth.status === "loading") {
+            text = `FOLDING PAPER … ${Math.round(depth.progress * 100)}%`;
+          } else if (depth.status === "warming") {
+            text = `DEPTH · WARMING UP (${depth.backend})`;
+          } else if (depth.status === "ready") {
+            text = `DEPTH · ${depth.backend} ${depth.hz.toFixed(1)}Hz`;
+          } else if (depth.status === "flat") {
+            text = "DEPTH · OFF (FLAT MODE)";
+          } else {
+            text = "DEPTH · DOWNLOAD FAILED";
+          }
+          depthStatusChip.textContent = text;
+          depthStatusRow.textContent = text;
+        }
+
+        async function loadDepthModel() {
+          if (SYNTH_DEPTH) return;
+          depth.status = "loading";
+          depth.progress = 0;
+          updateDepthStatus();
+          try {
+            const lib = await import(TRANSFORMERS_CDN);
+            depth.RawImage = lib.RawImage;
+            const progressCallback = (info) => {
+              if (info.status === "progress" && info.total) {
+                depth.loadedBytes[info.file] = info.loaded;
+                depth.totalBytes[info.file] = info.total;
+                let loaded = 0;
+                let total = 0;
+                Object.keys(depth.totalBytes).forEach((f) => {
+                  loaded += depth.loadedBytes[f] || 0;
+                  total += depth.totalBytes[f];
+                });
+                depth.progress = total ? loaded / total : 0;
+                overlayBarFill.style.width = `${Math.round(depth.progress * 100)}%`;
+                updateDepthStatus();
+              }
+            };
+            let device = "wasm";
+            let dtype = "q8";
+            if (navigator.gpu) {
+              try {
+                if (await navigator.gpu.requestAdapter()) {
+                  device = "webgpu";
+                  dtype = "fp16";
+                }
+              } catch (_) {
+                /* stay on wasm */
+              }
+            }
+            try {
+              depth.pipe = await lib.pipeline("depth-estimation", MODEL_ID, {
+                device,
+                dtype,
+                progress_callback: progressCallback,
+              });
+            } catch (err) {
+              if (device !== "wasm") {
+                console.warn("webgpu init failed, falling back to wasm", err);
+                device = "wasm";
+                dtype = "q8";
+                depth.pipe = await lib.pipeline("depth-estimation", MODEL_ID, {
+                  device,
+                  dtype,
+                  progress_callback: progressCallback,
+                });
+              } else {
+                throw err;
+              }
+            }
+            depth.backend = device.toUpperCase();
+            depth.status = "warming";
+            updateDepthStatus();
+          } catch (err) {
+            console.error("depth model load failed", err);
+            depth.status = "error";
+            updateDepthStatus();
+            setOverlay(
+              "error",
+              "DEPTH MODEL UNAVAILABLE",
+              "Could not download the depth model (network is needed on the first run). Retry, or keep the flat single-sheet look.",
+              { retryModel: true, continueFlat: true },
+            );
+          }
+        }
+
+        function sleep(ms) {
+          return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+
+        function drawInferFrame() {
+          // Same cover-fit crop as the scene pass, never mirrored: the
+          // shaders apply one shared UV flip to color and depth alike.
+          const cw = inferCanvas.width;
+          const ch = inferCanvas.height;
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          const ca = cw / ch;
+          const va = vw / vh;
+          let sw;
+          let sh;
+          if (va > ca) {
+            sh = vh;
+            sw = vh * ca;
+          } else {
+            sw = vw;
+            sh = vw / ca;
+          }
+          const sx = (vw - sw) / 2;
+          const sy = (vh - sh) / 2;
+          inferCtx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+        }
+
+        async function depthLoop() {
+          if (SYNTH_DEPTH) return;
+          for (;;) {
+            if (
+              !depth.pipe ||
+              depth.status === "flat" ||
+              document.hidden ||
+              !cameraReady ||
+              video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+              video.videoWidth === 0
+            ) {
+              await sleep(200);
+              continue;
+            }
+            try {
+              drawInferFrame();
+              const id = inferCtx.getImageData(
+                0,
+                0,
+                inferCanvas.width,
+                inferCanvas.height,
+              );
+              const img = new depth.RawImage(id.data, id.width, id.height, 4);
+              const t0 = performance.now();
+              const out = await depth.pipe(img);
+              const ms = Math.max(1, performance.now() - t0);
+              depth.hz = depth.hz
+                ? depth.hz * 0.7 + (1000 / ms) * 0.3
+                : 1000 / ms;
+              processDepth(out.predicted_depth);
+              if (depth.status === "warming") depth.status = "ready";
+              updateDepthStatus();
+            } catch (err) {
+              console.error("depth inference failed", err);
+              await sleep(1000);
+            }
+            await sleep(15);
+          }
+        }
+
+        let normBuf = null;
+
+        function processDepth(tensor) {
+          const dims = tensor.dims;
+          const h = dims[dims.length - 2];
+          const w = dims[dims.length - 1];
+          const d = tensor.data;
+          let mn = Infinity;
+          let mx = -Infinity;
+          for (let i = 0; i < d.length; i += 7) {
+            const v = d[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+          }
+          if (!isFinite(mn) || !isFinite(mx) || mx - mn < 1e-6) return;
+          // Temporal normalization: per-frame min/max pops layers around,
+          // an EMA'd range drifts calmly instead.
+          if (depth.emaMin === null) {
+            depth.emaMin = mn;
+            depth.emaMax = mx;
+          } else {
+            depth.emaMin += (mn - depth.emaMin) * 0.25;
+            depth.emaMax += (mx - depth.emaMax) * 0.25;
+          }
+          const lo = depth.emaMin;
+          const range = Math.max(1e-6, depth.emaMax - lo);
+          const count = w * h;
+          if (!normBuf || normBuf.length !== count) {
+            normBuf = new Uint8Array(count);
+          }
+          const hist = new Float32Array(256);
+          for (let i = 0; i < count; i++) {
+            let v = (d[i] - lo) / range;
+            v = v < 0 ? 0 : v > 1 ? 1 : v;
+            const q = (v * 255) | 0;
+            normBuf[i] = q;
+            hist[q] += 1;
+          }
+          let cum = 0;
+          for (let i = 0; i < 256; i++) {
+            cum += hist[i];
+            depth.cumHist[i] = cum / count;
+          }
+          depth.histValid = true;
+          // Deterministic array orientation: FLIP_Y off for typed-array
+          // uploads, the EMA shader flips Y itself (tech notes 10/15).
+          gl.bindTexture(gl.TEXTURE_2D, depthRawTex);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (depth.texW !== w || depth.texH !== h) {
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.R8,
+              w,
+              h,
+              0,
+              gl.RED,
+              gl.UNSIGNED_BYTE,
+              normBuf,
+            );
+            depth.texW = w;
+            depth.texH = h;
+          } else {
+            gl.texSubImage2D(
+              gl.TEXTURE_2D,
+              0,
+              0,
+              0,
+              w,
+              h,
+              gl.RED,
+              gl.UNSIGNED_BYTE,
+              normBuf,
+            );
+          }
+          depth.hasDepth = true;
+          if (!depth.firstDepthAt) depth.firstDepthAt = performance.now();
+        }
+
+        /* ------------------------------------------------------------------
+           Layer thresholds — histogram quantiles blended with equal slices,
+           EMA'd so boundaries drift instead of popping.
+        ------------------------------------------------------------------ */
+
+        const threshEma = new Float32Array(7);
+        let threshInit = false;
+        let lastLayerCount = 0;
+
+        function quantile(a) {
+          if (!depth.histValid) return a;
+          const c = depth.cumHist;
+          let bin = 0;
+          for (let i = 0; i < 256; i++) {
+            if (c[i] >= a) {
+              bin = i;
+              break;
+            }
+          }
+          const prev = bin > 0 ? c[bin - 1] : 0;
+          const seg = Math.max(1e-6, c[bin] - prev);
+          return (bin + (a - prev) / seg) / 255;
+        }
+
+        function updateThresholds(dt) {
+          const n = Math.round(state.layerCount);
+          const hard = !threshInit || n !== lastLayerCount;
+          lastLayerCount = n;
+          threshInit = true;
+          const k = Math.min(1, dt * 2.5);
+          for (let j = 1; j < n; j++) {
+            const a = j / n;
+            const target = a + (quantile(a) - a) * state.depthRange;
+            const idx = j - 1;
+            threshEma[idx] = hard
+              ? target
+              : threshEma[idx] + (target - threshEma[idx]) * k;
+          }
+          // Keep boundaries ordered with a minimum gap.
+          for (let j = 1; j < n - 1; j++) {
+            if (threshEma[j] < threshEma[j - 1] + 0.015) {
+              threshEma[j] = threshEma[j - 1] + 0.015;
+            }
+          }
+        }
+
+        /* ------------------------------------------------------------------
+           Parallax input — pointer on desktop, optional tilt on mobile,
+           plus a slow drift so the diorama reads as layered when idle.
+        ------------------------------------------------------------------ */
+
+        const pointer = { tx: 0, ty: 0, x: 0, y: 0 };
+
+        window.addEventListener(
+          "pointermove",
+          (event) => {
+            pointer.tx =
+              (event.clientX / Math.max(1, window.innerWidth)) * 2 - 1;
+            pointer.ty =
+              (event.clientY / Math.max(1, window.innerHeight)) * 2 - 1;
+          },
+          { passive: true },
+        );
+
+        const tilt = { active: false, x: 0, y: 0 };
+        const tiltBtn = document.getElementById("tiltBtn");
+        const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+
+        if (coarsePointer && typeof DeviceOrientationEvent !== "undefined") {
+          tiltBtn.hidden = false;
+          tiltBtn.addEventListener("click", async () => {
+            try {
+              if (
+                typeof DeviceOrientationEvent.requestPermission === "function"
+              ) {
+                const res = await DeviceOrientationEvent.requestPermission();
+                if (res !== "granted") return;
+              }
+              window.addEventListener(
+                "deviceorientation",
+                (event) => {
+                  tilt.active = true;
+                  tilt.x = Math.max(-1, Math.min(1, (event.gamma || 0) / 25));
+                  tilt.y = Math.max(
+                    -1,
+                    Math.min(1, ((event.beta || 0) - 40) / 25),
+                  );
+                },
+                { passive: true },
+              );
+              tiltBtn.textContent = "TILT ON";
+              tiltBtn.disabled = true;
+            } catch (err) {
+              console.warn("tilt permission failed", err);
+            }
+          });
+        }
+
+        /* ------------------------------------------------------------------
+           Render loop
+        ------------------------------------------------------------------ */
+
+        let stream = null;
+        let cameraReady = false;
+        let animationTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let depthMix = 0;
+        let emaPing = false;
+        let readyStamped = false;
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 &&
+            video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              video,
+            );
+            return true;
+          }
+          return false;
+        }
+
+        function blurPass(src, tmp, dst, sigma) {
+          renderPass(tmp, programs.blur, () => {
+            const u = locations.blur;
+            bindTexture(0, src.tex);
+            gl.uniform1i(u.uSrc, 0);
+            gl.uniform2f(u.uDir, 1 / tmp.width, 0);
+            gl.uniform1f(u.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            const u = locations.blur;
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(u.uSrc, 0);
+            gl.uniform2f(u.uDir, 0, 1 / dst.height);
+            gl.uniform1f(u.uSigma, sigma);
+          });
+        }
+
+        function frame(now) {
+          resize();
+
+          const dt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          if (!state.pauseAnim) animationTime += dt;
+
+          const preset = PRESETS[state.preset] || PRESETS.forest;
+          const n = Math.round(state.layerCount);
+          const haveVideo = uploadVideoFrame();
+          updateThresholds(dt);
+
+          // Eased flat→layered transition once depth starts flowing.
+          const wantDepth =
+            depth.hasDepth && depth.status !== "flat" ? 1 : 0;
+          depthMix += (wantDepth - depthMix) * Math.min(1, dt * 1.4);
+
+          // Parallax camera: smoothed pointer/tilt plus a slow drift.
+          const srcX = tilt.active ? tilt.x : pointer.tx;
+          const srcY = tilt.active ? tilt.y : pointer.ty;
+          pointer.x += (srcX - pointer.x) * Math.min(1, dt * 4);
+          pointer.y += (srcY - pointer.y) * Math.min(1, dt * 4);
+          const sway = state.pauseAnim ? 0 : 1;
+          const swayX = Math.cos(animationTime * 0.45) * 0.22 * sway;
+          const swayY = Math.sin(animationTime * 0.32) * 0.14 * sway;
+          const amp = 0.028 * state.parallax;
+          const parX = (pointer.x * 0.9 + swayX) * amp;
+          const parY = (-pointer.y * 0.9 + swayY) * amp;
+
+          // P0 — scene (neutral gray until the camera delivers frames).
+          if (haveVideo) {
+            renderPass(targets.scene, programs.scene, () => {
+              const u = locations.scene;
+              bindTexture(0, videoTexture);
+              gl.uniform1i(u.uVideo, 0);
+              gl.uniform2f(u.uResolution, paintW, paintH);
+              gl.uniform2f(u.uVideoSize, video.videoWidth, video.videoHeight);
+              gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            });
+          } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targets.scene.fbo);
+            gl.viewport(0, 0, targets.scene.width, targets.scene.height);
+            gl.clearColor(0.5, 0.5, 0.5, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+          }
+
+          // P1 — Kuwahara flattening toward paper color.
+          renderPass(targets.flat, programs.kuwahara, () => {
+            const u = locations.kuwahara;
+            bindTexture(0, targets.scene.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform2f(
+              u.uTexel,
+              1 / targets.flat.width,
+              1 / targets.flat.height,
+            );
+            gl.uniform1i(u.uRadius, Math.max(1, Math.round(1 + state.flatten * 5)));
+            gl.uniform1f(u.uMix, Math.min(1, 0.5 + state.flatten * 0.5));
+          });
+
+          // P2 — depth EMA (ping-pong, dt-based time constant).
+          const emaPrev = emaPing ? targets.emaB : targets.emaA;
+          const emaOut = emaPing ? targets.emaA : targets.emaB;
+          emaPing = !emaPing;
+          const tau = 0.05 + Math.pow(state.depthSmooth, 1.5) * 1.6;
+          let alpha = 1 - Math.exp(-dt / tau);
+          // Without float buffers an 8-bit EMA stalls; keep alpha coarse.
+          if (!floatExt) alpha = Math.max(alpha, 0.25);
+          if (emaNeedsReset) {
+            alpha = 1;
+            emaNeedsReset = false;
+          }
+          renderPass(emaOut, programs.ema, () => {
+            const u = locations.ema;
+            bindTexture(0, depthRawTex);
+            bindTexture(1, emaPrev.tex);
+            gl.uniform1i(u.uRaw, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform1f(u.uAlpha, alpha);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uSynth, SYNTH_DEPTH ? 1 : 0);
+            gl.uniform1i(u.uHasDepth, depth.hasDepth ? 1 : 0);
+          });
+
+          // P3-P6 — cut field, then the wider shadow field.
+          const sigma1 = 0.6 + state.cutSmooth * 9.0;
+          const sigma2 = sigma1 * 1.4 + 2.0;
+          blurPass(emaOut, targets.blurTmp, targets.depthSoft, sigma1);
+          blurPass(targets.depthSoft, targets.blurTmp, targets.depthShadow, sigma2);
+
+          // P7 — the diorama composite.
+          const zones = zoneColors(preset, n);
+          const accents = new Float32Array(12);
+          preset.accents.slice(0, 4).forEach((hex, i) => {
+            const c = hexToRgb(hex);
+            accents[i * 3] = c[0];
+            accents[i * 3 + 1] = c[1];
+            accents[i * 3 + 2] = c[2];
+          });
+          const shadowScale = 0.004 + 0.012 * state.thickness;
+          const threshPad = new Float32Array(7).fill(2);
+          for (let j = 0; j < n - 1; j++) threshPad[j] = threshEma[j];
+
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, targets.flat.tex);
+            bindTexture(1, depthRawTex);
+            bindTexture(2, targets.depthSoft.tex);
+            bindTexture(3, targets.depthShadow.tex);
+            gl.uniform1i(u.uFlat, 0);
+            gl.uniform1i(u.uDepthRaw, 1);
+            gl.uniform1i(u.uDepthSoft, 2);
+            gl.uniform1i(u.uDepthShadow, 3);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform1fv(u.uThresh, threshPad);
+            gl.uniform1i(u.uLayers, n);
+            gl.uniform3fv(u.uZone, zones);
+            gl.uniform3fv(u.uAccent, accents);
+            gl.uniform1i(u.uAccentCount, Math.min(4, preset.accents.length));
+            gl.uniform3fv(u.uCut, hexToRgb(preset.cut));
+            gl.uniform3fv(u.uShadowTint, hexToRgb(preset.shadowTint));
+            gl.uniform2f(u.uParallax, parX, parY);
+            gl.uniform2f(
+              u.uShadowOff,
+              -0.3 * shadowScale + parX * 0.4,
+              1.0 * shadowScale + parY * 0.4,
+            );
+            gl.uniform1f(u.uDepthMix, depthMix);
+            gl.uniform1f(u.uPaletteMix, state.paletteMix);
+            gl.uniform1f(u.uEdgeLight, state.edgeLight);
+            gl.uniform1f(u.uThickness, state.thickness);
+            gl.uniform1f(u.uGrain, state.grain);
+            gl.uniform1i(u.uDebug, state.debugView);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // Verification hook: the first composited layer frame is on screen.
+          if (!readyStamped && (depth.firstDepthAt || SYNTH_DEPTH)) {
+            readyStamped = true;
+            window.__paperReady = true;
+          }
+          if (depth.status === "ready" || depth.status === "synth") {
+            const since = now - (depth.firstDepthAt || now);
+            depthStatusChip.classList.toggle("hidden", since > 4000);
+          }
+
+          fpsFrames++;
+          if (now - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (now - fpsLast);
+            fpsLast = now;
+            fpsFrames = 0;
+            const dh =
+              depth.status === "ready"
+                ? `${depth.backend} ${depth.hz.toFixed(1)}Hz`
+                : depth.backend;
+            readout.textContent = `FPS ${fps.toFixed(0)} / RES ${canvas.width}×${
+              canvas.height
+            } / DEPTH ${dh} / LAYERS ${n}`;
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay(
+            "requesting",
+            "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.",
+          );
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay(
+              "error",
+              "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8888) or HTTPS, then reload.",
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay(
+              "error",
+              "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.",
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+
+            cameraReady = true;
+            retryCamera.disabled = false;
+            // Don't wipe a model-error overlay that raced in while the
+            // camera prompt was up; if the model already failed, resurface
+            // that error instead.
+            if (overlayKind === "requesting") {
+              if (depth.status === "error") {
+                setOverlay(
+                  "error",
+                  "DEPTH MODEL UNAVAILABLE",
+                  "Could not download the depth model (network is needed on the first run). Retry, or keep the flat single-sheet look.",
+                  { retryModel: true, continueFlat: true },
+                );
+              } else {
+                setOverlay("hidden", "", "");
+              }
+            }
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay(
+                "error",
+                "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true },
+              );
+            } else if (
+              name === "NotFoundError" ||
+              name === "OverconstrainedError"
+            ) {
+              setOverlay(
+                "error",
+                "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true },
+              );
+            } else {
+              setOverlay(
+                "error",
+                "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true },
+              );
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => {
+          startCamera();
+        });
+
+        retryModel.addEventListener("click", () => {
+          setOverlay("hidden", "", "");
+          loadDepthModel();
+        });
+
+        continueFlat.addEventListener("click", () => {
+          depth.status = "flat";
+          updateDepthStatus();
+          setOverlay("hidden", "", "");
+        });
+
+        document.addEventListener("visibilitychange", () => {
+          // The depth loop pauses itself on document.hidden; avoid a dt
+          // spike when the tab comes back.
+          if (!document.hidden) lastNow = performance.now();
+        });
+
+        window.addEventListener("beforeunload", stopCamera);
+
+        try {
+          resize();
+          updateDepthStatus();
+          startCamera();
+          loadDepthModel();
+          depthLoop();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay(
+            "error",
+            "WEBGL SETUP ERROR",
+            error && error.message
+              ? error.message
+              : "Could not initialize the renderer.",
+          );
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
