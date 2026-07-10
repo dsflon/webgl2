@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "art-loop V2 aesthetic review (Checker 出力)",
+  "description": "V2 美的レビューの出力仕様(loop/DESIGN.md §4)。壊れたレビューはこのスキーマで弾く。意味検証(verdict と採点の整合: 全 scores≥4 かつ common 全軸≥4 のときだけ pass)は verify_review.mjs が行う。",
+  "type": "object",
+  "required": ["artifact", "stance", "scores", "common", "verdict", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "artifact": {
+      "type": "object",
+      "required": ["file"],
+      "properties": {
+        "file": { "type": "string" },
+        "commit": { "type": "string" },
+        "screenshots": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "stance": {
+      "description": "「拒否する理由を探す」姿勢で採点したことの宣言(指南書 §3.2-2)",
+      "const": "reject-seeking"
+    },
+    "scores": {
+      "description": "brief の不変量ごとの採点。score<4 の行は fix_instructions 必須",
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "required": ["invariant_id", "score", "evidence"],
+        "properties": {
+          "invariant_id": { "type": "integer", "minimum": 1 },
+          "score": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "evidence": {
+            "description": "どのスクリーンショットのどこを見た判断か(存在しなければ1点+理由)",
+            "type": "string",
+            "minLength": 20
+          },
+          "reject_reasons": { "type": "array", "items": { "type": "string" } },
+          "fix_instructions": {
+            "description": "制作規約 §10 翻訳表の語彙による修正指示(エラー原文として Maker に渡る)",
+            "type": "array",
+            "items": { "type": "string", "minLength": 10 }
+          }
+        },
+        "if": { "properties": { "score": { "maximum": 3 } } },
+        "then": { "required": ["invariant_id", "score", "evidence", "fix_instructions"] }
+      }
+    },
+    "common": {
+      "description": "作品共通の3軸(不変量表に依らない下限品質)",
+      "type": "object",
+      "required": ["style_holds", "subject_readable", "artifact_free"],
+      "properties": {
+        "style_holds": {
+          "description": "縮小表示で様式として成立しているか",
+          "type": "integer", "minimum": 1, "maximum": 5
+        },
+        "subject_readable": {
+          "description": "被写体(特に人物)が判読できるか",
+          "type": "integer", "minimum": 1, "maximum": 5
+        },
+        "artifact_free": {
+          "description": "等倍で破綻・後処理の誤魔化しがないか",
+          "type": "integer", "minimum": 1, "maximum": 5
+        }
+      }
+    },
+    "verdict": { "enum": ["pass", "fail"] },
+    "summary": { "type": "string", "minLength": 20 }
+  }
+}

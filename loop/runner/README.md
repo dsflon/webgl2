@@ -1,20 +1,30 @@
-# loop/runner — V1 決定的検証器
+# loop/runner — 検証器と状態機械
 
-制作ループの停止条件を判定するコード(LLM 不使用)。設計は [loop/DESIGN.md](../DESIGN.md) §4。
+制作ループの停止条件を判定するコード(LLM 不使用)と、進捗の唯一の正である状態機械 CLI。
+設計は [loop/DESIGN.md](../DESIGN.md) §4・§7。
 
 ## 使い方
 
 ```bash
-cd loop/runner && npm install   # playwright-core のみ
+cd loop/runner && npm install   # playwright-core + ajv
 
-# 静的 lint(JSON レポート。error があれば exit 1)
+# V1: 静的 lint(JSON レポート。error があれば exit 1)
 node verify_static.mjs ../../fable5_papercraft-cam.html
 
-# 実行時検証(URL には作品が持つ検証パラメータを付けて渡す)
+# V1: 実行時検証(URL には作品が持つ検証パラメータを付けて渡す)
 python3 -m http.server 8888 --directory ../..   # または任意のサーバ
 node verify_runtime.mjs "http://localhost:8888/fable5_papercraft-cam.html?fakedepth=1&freeze=1"
 
-# Phase 1 受入テスト(フィクスチャ合格+破壊テスト+実行時の両経路)
+# S0/S1/V2 の停止条件
+node verify_brief.mjs  ../state/<slug>/brief.json
+node verify_order.mjs  ../../prompts/fable5_<slug>_order.md     # 実物の検証のみ --legacy
+node verify_review.mjs ../state/<slug>/review.json --brief ../state/<slug>/brief.json
+
+# 状態機械(スキルは JSON を直接編集せず必ずこれを使う)
+node state.mjs init <slug> "<テーマ>" / show / list / status / attempt / error /
+              needs-review / resume / cost / next
+
+# 受入テスト(フィクスチャ合格+破壊テスト+モック両経路+中断再開+実行時両経路)
 node selftest.mjs            # 実行時込み(数分)
 node selftest.mjs --skip-runtime
 ```
@@ -44,6 +54,10 @@ node selftest.mjs --skip-runtime
 
 | ここ(検証) | 合格の定義 | 生成 |
 | --- | --- | --- |
-| `verify_static.mjs` の①ルール | `AI_DIRECTION_GUIDE.md` §4 制約条件ブロック | `loop/templates/order_template.md`(Phase 2)に同梱される規約ブロック |
+| `verify_static.mjs` の①ルール | `AI_DIRECTION_GUIDE.md` §4 制約条件ブロック | `loop/templates/order_template.md` の規約ブロック |
 | `verify_runtime.mjs` の検証フック | 同 §4「検証フック」 | 同上 |
-| `selftest.mjs` の期待値 | 規格フィクスチャ = `fable5_papercraft-cam.html`(これのみ。DESIGN §3) | — |
+| `verify_brief.mjs` | `loop/schemas/invariants.schema.json` | `.claude/skills/art-loop` S0 手順 |
+| `verify_order.mjs` | `loop/schemas/order_checklist.md` | `loop/templates/order_template.md` |
+| `verify_review.mjs` | `loop/schemas/review.schema.json` | `loop/templates/checker_prompt.md` |
+| `state.mjs` の書き込み検証・LIMITS | `loop/schemas/state.schema.json` / DESIGN §9 | `.claude/skills/art-loop` の内側ループ |
+| `selftest.mjs` の期待値 | 規格フィクスチャ = `fable5_papercraft-cam.html` と `prompts/fable5_papercraft-cam_order.md`(実物はこの2点のみ。DESIGN §3) | — |

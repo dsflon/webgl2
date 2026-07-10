@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "art-loop S0 brief (様式解析)",
+  "description": "S0 の停止条件(loop/DESIGN.md §6)。不変量表の列構成は「合格の実物」prompts/fable5_papercraft-cam_order.md §2 に準拠(指南書 Step 1: 仕様を発明せず実物から採る)。出典は references(常に必須)が最低保証で、行単位 source は任意の上乗せ。意味検証(priority と id の整合)は verify_brief.mjs が行う。",
+  "type": "object",
+  "required": [
+    "slug",
+    "theme",
+    "references",
+    "signals",
+    "vocabulary",
+    "invariants",
+    "priority"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "theme": { "type": "string", "minLength": 1 },
+    "references": {
+      "description": "様式の参照(実作品名・参考画像の言語化)。出典の最低保証(ゲート1で人間が実画像と照合する対象)",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["type", "description"],
+        "properties": {
+          "type": { "enum": ["artwork", "image", "style", "photo"] },
+          "name": { "type": "string" },
+          "description": { "type": "string", "minLength": 10 }
+        }
+      }
+    },
+    "signals": {
+      "description": "入力映像から生き残らせる信号 / 様式側で置き換える信号",
+      "type": "object",
+      "required": ["survive", "replaced"],
+      "properties": {
+        "survive": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "replaced": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+      }
+    },
+    "vocabulary": {
+      "description": "制作規約 §5 の技法語彙(実装原理を固定する正式名称)。3語以上",
+      "type": "array",
+      "minItems": 3,
+      "items": { "type": "string", "minLength": 3 }
+    },
+    "invariants": {
+      "description": "視覚的不変量 5±2 個。実物の列構成: 不変量/担当軸/実装原理/外した場合",
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "required": ["id", "invariant", "axis", "principle", "if_missing"],
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "invariant": {
+            "description": "実装可能な構造の言葉で(「温かみ」等の形容はゲート1/V2 が落とす)",
+            "type": "string",
+            "minLength": 15
+          },
+          "axis": {
+            "type": "string",
+            "pattern": "^(知覚|場|マーク|色|物質|時間)(/(知覚|場|マーク|色|物質|時間)){0,2}$"
+          },
+          "principle": {
+            "description": "実装原理の指定(vocabulary の語を含めること — verify_brief が照合)",
+            "type": "string",
+            "minLength": 10
+          },
+          "if_missing": { "type": "string", "minLength": 5 },
+          "source": { "type": "string", "description": "行単位の出典(任意)" }
+        }
+      }
+    },
+    "priority": {
+      "description": "不変量 id の優先順(外すと様式に見えなくなる順)。全 id をちょうど1回ずつ",
+      "type": "array",
+      "minItems": 3,
+      "items": { "type": "integer" },
+      "uniqueItems": true
+    }
+  }
+}
