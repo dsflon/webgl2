@@ -6,7 +6,11 @@ AIエージェント（Claude Code / Fable 5 を含む任意の LLM エージェ
 
 出典: Addy Osmani「Loop Engineering」(2026-06)、Peter Steinberger の提唱、cobusgreyling/loop-engineering、
 および国内解説記事（monkey-gineer / suwa-sh / Syoitu 各氏）の整理に準拠する。
-本リポジトリはこの指南書の適用例そのものである（§10 に対応表）。
+
+本書は特定プロジェクトに依存しない**汎用の方法論**である。文中の具体例（「音声→ナレッジDB化」・
+通話・スプレッドシート等）はすべて**出典プロジェクトでの適用例**であり、本リポジトリ（webgl2）への
+適用は [loop/DESIGN.md](./DESIGN.md)（§12 に本書との対応表）に定める。
+（webgl2 への同梱にあたり、出典プロジェクト固有の記述 — 旧 §10 対応表ほか — は本方針に沿って改稿した）
 
 ---
 
@@ -129,7 +133,7 @@ Worktrees（実行の隔離）、Sub-agents（検証: 生成役と評価役の�
 
 - ゴール成果物の**実例**（既存の完成品・過去の人手作業の出力）を必ず入手して読む。仕様書や口頭説明だけで進めない。
 - 実物から読み取る: フィールドの完全な一覧と順序 / 値の語彙（enum）/ 例外ケースの扱い / 暗黙の粒度。
-- 例（本リポジトリ）: 実スプレッドシートを読んだことで「1通話から複数行が生まれる」「ナレッジが無い通話も理由付きで1行残す」という、指示に無かった運用ルールを発見した。知らずに設計していれば検証器もプロンプトも作り直しだった。
+- 例（出典プロジェクト）: 実スプレッドシートを読んだことで「1通話から複数行が生まれる」「ナレッジが無い通話も理由付きで1行残す」という、指示に無かった運用ルールを発見した。知らずに設計していれば検証器もプロンプトも作り直しだった。
 - **進んでよい条件**: 成果物のサンプルを最低1つ、自分で開いて確認した。
 
 ### Step 2: 「合格」をコードで書ける形に翻訳する（停止条件を先に決める）
@@ -142,7 +146,7 @@ Worktrees（実行の隔離）、Sub-agents（検証: 生成役と評価役の�
 
 - 変換の流れを「入力→出力」が明確なステージ列に切る。切る基準: 使う道具が変わる / 失敗の種類が変わる / 人間ゲートが入る、ところ。
 - 各ステージに4点を定義する。**1つでも書けないなら分割が間違っている**: ①入力 ②出力 ③完了条件（Step 2 のどの検証か）④失敗時の遷移先。
-- **進んでよい条件**: ステージ表（本リポジトリ `docs/architecture.md` §2.1 の形式）が埋まる。
+- **進んでよい条件**: ステージ表（webgl2 では `loop/DESIGN.md` §6 の形式。各ステージに入力/出力/完了条件/失敗時遷移の4点）が埋まる。
 
 ### Step 4: 状態・Discovery・Trigger を設計する
 
@@ -294,23 +298,14 @@ def run_batch(items):
 
 ---
 
-## 10. 本リポジトリへの対応表（適用例）
+## 10. 適用先プロジェクトへの対応表
 
-本プロジェクトの現在地は **L2 Assisted**（抽出まで自動、シート書き込み前に人間ゲート）。Trigger は当面「人間の一度きりの指示」（`/process-audio`）で、Phase 5 で cron 化（L3方向）を検討する。
+本書を新しいリポジトリへ適用するときは、§2〜§7 の各項目と実プロジェクトの実装を対応づけた表を、
+**適用先リポジトリ側の設計文書に**作る（本書側には書かない。指南書に特定プロジェクトの
+ファイルパスを書き込むと、別リポジトリへ持ち出したときに実在しない参照が混入するため —
+まさにその事故が webgl2 への初回同梱時に起きた）。
 
-| 指南書の項目 | 本リポジトリでの実装 |
-| --- | --- |
-| Step 0 自律度 | L2。書き込みゲート = `/write-sheet` の dry-run→承認 |
-| Step 1 実物の入手 | 実スプレッドシートから29列/6列と運用ルールを採取（`docs/architecture.md` §5） |
-| Step 2 停止条件の翻訳 | `config/knowledge_db_schema.json` / `refusal_schema.json` + グラウンディング検証 |
-| Step 3 ステージ分解 | scan→transcribe→extract→validate→export→write（§2.1） |
-| Step 4 状態/Discovery/Trigger | `state/manifest.jsonl`（attempts/error/状態遷移）/ scan_audio.py が Discovery / Trigger は `/process-audio` |
-| Step 5 Validator-First | Phase 2 で `validate.py` を extract より先に完成させる（`docs/implementation-plan.md`） |
-| Step 6 修正ループ+ブレーカー | `extract.py` 内ループ + `max_repair_attempts: 3` + `state/usage.jsonl`（コスト記録） |
-| §5 実行規律 | `CLAUDE.md`「ループ実行の規約」1〜8 |
-| §6 Inbox / Gate | `/review-queue`（Inbox）と `/write-sheet`（Gate） |
-| §7 メタループ | スキーマ→プロンプト→validate.py の3点同期規約（`CLAUDE.md`） |
-| プリミティブ | Skills=`.claude/commands/` / Connectors=MCP（google-drive）/ Memory=`state/` |
+- 本リポジトリ（webgl2 / WebGL2 アート制作ループ）の対応表: [loop/DESIGN.md](./DESIGN.md) §12
 
 ---
 

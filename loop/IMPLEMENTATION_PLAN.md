@@ -13,12 +13,14 @@
 ループが検証できる形にリポジトリ規約を先に整える(3点同期の起点)。
 
 - [ ] `AI_DIRECTION_GUIDE.md` §4 規約ブロックに追記:
-      `window.__artReady`(必須)/ `?fakesource=1`(推奨)/ 不変量表の表形式必須
+      `window.__artReady`(必須)/ `?freeze=1`(必須: 時間駆動アニメーションの停止スイッチ。
+      V1 フリッカ検査の前提)/ `?fakesource=1`(推奨)/ 不変量表の表形式必須
 - [ ] `loop/` ディレクトリ骨組みと `loop/themes.md`(空キュー+書式説明)を作成
 - [ ] `loop/state/` の `state.json` スキーマを定義
       (`status` / `attempts` / `last_error` / `requires_human` / `updated_at` / `cost`)
-- [ ] 既存作品 `fable5_papercraft-cam.html` に `window.__artReady` を追補
-      (`__paperReady` は互換のため残す)
+- [ ] 既存作品 `fable5_papercraft-cam.html` に `window.__artReady` と `?freeze=1` を追補
+      (`__paperReady` は互換のため残す。`fable5_van-gogh.html` は旧規格の採取元であり
+      追補・lint 適合の対象外 — DESIGN §3 の線引き)
 
 **受入条件**: 状態ファイルのサンプルを手書きし、「強制終了→再実行で続きから回る」ための
 情報が全て含まれていると確認できる。
@@ -33,9 +35,15 @@
 - [ ] `loop/runner/testscene.mjs`: 共通フェイクカメラ
       (深度キュー入りテストシーン。papercraft-cam 検証で使った実物を一般化)
 - [ ] `loop/runner/verify_runtime.mjs`:
-      pageerror / `__artReady` / 黒画面検査 / **フリッカ差分** / スライダー掃引 /
-      デバッグビュー / リサイズ / カメラ拒否経路 — を1コマンドで実行し JSON レポート
-- [ ] フィクスチャテスト: `fable5_papercraft-cam.html` が**全項目合格**すること
+      pageerror / `__artReady` / 黒画面検査 / **フリッカ差分(`?freeze=1` 状態で計測)** /
+      スライダー掃引 / デバッグビュー / リサイズ / カメラ拒否経路 — を1コマンドで実行し
+      JSON レポート
+- [ ] 静的 lint の線引きを `loop/runner/README.md` に明文化(DESIGN §4 V1):
+      ①決定的近似ルール(severity=error、停止条件)②限定パターンの warning
+      (V2 への申し送り。`uTime` のシード混入・ping-pong 検査はまずここから)
+      ③パターン化できず V2/V3 に回す検査 — の3分類表
+- [ ] フィクスチャテスト: `fable5_papercraft-cam.html`(Phase 0 追補後)が**全項目合格**
+      すること(規格フィクスチャはこの1本のみ — DESIGN §3)
 - [ ] 破壊テスト: 意図的に壊したコピー(ヘッダ節削除・`preserveDrawingBuffer` 除去・
       シェーダに構文エラー・シードに uTime 混入)に対し、**フィールド単位のエラー+
       修正ヒント**が返ること(指南書 Step 5 の受入条件)
@@ -45,8 +53,11 @@
 
 ## Phase 2 — スキーマとテンプレート(1日)
 
-- [ ] `loop/schemas/invariants.schema.json`: S0 brief の停止条件
-      (不変量 5±2・各行に 軸/実装原理/出典/優先度/外した場合)
+- [ ] `loop/schemas/invariants.schema.json`: S0 brief の停止条件。
+      **列構成は「合格の実物」`prompts/fable5_papercraft-cam_order.md` の不変量表に準拠**
+      (不変量 5±2・各行に 不変量/担当軸/実装原理/外した場合+優先順。
+      出典は行単位または brief の参照リストのどちらかで必須 — 参照が画像の場合があるため。
+      指南書 Step 1「仕様を発明せず実物から採る」の遵守)
 - [ ] `loop/schemas/review.schema.json`: V2 レビュー出力
       (不変量ごとの score 1〜5 / verdict / reasons / fix_instructions[§10語彙])
 - [ ] `loop/schemas/order_checklist.md`: S1 発注書 lint 定義
@@ -60,6 +71,9 @@
       (拒否する理由を探す・スクショ+不変量表のみ・review.schema.json で出力)
 - [ ] 破壊テスト: 不変量が3個しかない brief / スライダー4本の発注書が
       フィールド単位で不合格になる
+- [ ] リスク認識の明記: 発注書 lint の「合格の実物」は**サンプルが1つしかない**
+      (papercraft-cam)。lint は当面「必須節の存在」など保守的なルールに留め、
+      Phase 4 パイロットで2本目の発注書が通ってから厳格化する
 
 **受入条件**: スキーマ・テンプレ・検証器の対応関係が 1:1 で文書化されている
 (どれか1つを変えるとき他の2つのどこを見るかが書いてある)。
