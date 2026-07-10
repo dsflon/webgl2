@@ -1,0 +1,13 @@
+{
+  "name": "art-loop-runner",
+  "private": true,
+  "type": "module",
+  "description": "V1 deterministic verifiers for the webgl2 art loop (loop/DESIGN.md §4)",
+  "scripts": {
+    "selftest": "node selftest.mjs",
+    "selftest:static": "node selftest.mjs --skip-runtime"
+  },
+  "dependencies": {
+    "playwright-core": "^1.45.0"
+  }
+}

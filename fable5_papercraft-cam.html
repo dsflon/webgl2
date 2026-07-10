@@ -1850,9 +1850,12 @@
           updateThresholds(dt);
 
           // Eased flat→layered transition once depth starts flowing.
+          // Under ?freeze=1 the easing snaps so stills are deterministic
+          // (the asymptotic tail would otherwise read as flicker).
           const wantDepth =
             depth.hasDepth && depth.status !== "flat" ? 1 : 0;
-          depthMix += (wantDepth - depthMix) * Math.min(1, dt * 1.4);
+          if (FREEZE) depthMix = wantDepth;
+          else depthMix += (wantDepth - depthMix) * Math.min(1, dt * 1.4);
 
           // Parallax camera: smoothed pointer/tilt plus a slow drift.
           const srcX = tilt.active ? tilt.x : pointer.tx;
