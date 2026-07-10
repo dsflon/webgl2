@@ -1,1 +1,6 @@
 src/
+
+# art-loop runtime artifacts
+loop/state/
+loop/runner/node_modules/
+loop/runner/.selftest_tmp/

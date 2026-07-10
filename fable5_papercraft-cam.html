@@ -53,6 +53,7 @@
     初回は深度モデル(数十MB)のダウンロードが走ります。完了までは単層の
     「下地モード」で表示され、深度が届くとレイヤーが立ち上がります。
     ?fakedepth=1 を付けると推論の代わりに合成深度(検証・標本用)を使います。
+    ?freeze=1 を付けると時間駆動のドリフトを停止します(検証用の決定的静止フレーム)。
 
   依存: @huggingface/transformers(CDN)+ onnx-community/depth-anything-v2-small
   のみ(リポジトリ規約の ML 例外)。描画は WebGL2 / GLSL ES 3.00 単体。
@@ -468,10 +469,13 @@
           "(prefers-reduced-motion: reduce)",
         ).matches;
 
+        const QUERY = new URLSearchParams(location.search);
         // ?fakedepth=1 replaces inference with a synthetic depth field
         // (offline verification, cross-section specimen, debugging).
-        const SYNTH_DEPTH =
-          new URLSearchParams(location.search).get("fakedepth") === "1";
+        const SYNTH_DEPTH = QUERY.get("fakedepth") === "1";
+        // ?freeze=1 stops time-driven drift for deterministic still frames
+        // (repo verification-hook convention; same as the Pause toggle).
+        const FREEZE = QUERY.get("freeze") === "1";
 
         const MAX_LAYERS = 8;
         const MODEL_ID = "onnx-community/depth-anything-v2-small";
@@ -545,7 +549,7 @@
           debugView: 0,
           mirror: true,
           facingMode: "user",
-          pauseAnim: reducedMotion,
+          pauseAnim: reducedMotion || FREEZE,
         };
 
         const uiRows = [
@@ -1846,9 +1850,12 @@
           updateThresholds(dt);
 
           // Eased flat→layered transition once depth starts flowing.
+          // Under ?freeze=1 the easing snaps so stills are deterministic
+          // (the asymptotic tail would otherwise read as flicker).
           const wantDepth =
             depth.hasDepth && depth.status !== "flat" ? 1 : 0;
-          depthMix += (wantDepth - depthMix) * Math.min(1, dt * 1.4);
+          if (FREEZE) depthMix = wantDepth;
+          else depthMix += (wantDepth - depthMix) * Math.min(1, dt * 1.4);
 
           // Parallax camera: smoothed pointer/tilt plus a slow drift.
           const srcX = tilt.active ? tilt.x : pointer.tx;
@@ -1970,8 +1977,11 @@
           });
 
           // Verification hook: the first composited layer frame is on screen.
+          // __artReady is the repo-wide convention; __paperReady is kept for
+          // backward compatibility with earlier verification scripts.
           if (!readyStamped && (depth.firstDepthAt || SYNTH_DEPTH)) {
             readyStamped = true;
+            window.__artReady = true;
             window.__paperReady = true;
           }
           if (depth.status === "ready" || depth.status === "synth") {

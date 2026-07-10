@@ -12,13 +12,13 @@
 
 ループが検証できる形にリポジトリ規約を先に整える(3点同期の起点)。
 
-- [ ] `AI_DIRECTION_GUIDE.md` §4 規約ブロックに追記:
+- [x] `AI_DIRECTION_GUIDE.md` §4 規約ブロックに追記:
       `window.__artReady`(必須)/ `?freeze=1`(必須: 時間駆動アニメーションの停止スイッチ。
       V1 フリッカ検査の前提)/ `?fakesource=1`(推奨)/ 不変量表の表形式必須
-- [ ] `loop/` ディレクトリ骨組みと `loop/themes.md`(空キュー+書式説明)を作成
-- [ ] `loop/state/` の `state.json` スキーマを定義
+- [x] `loop/` ディレクトリ骨組みと `loop/themes.md`(空キュー+書式説明)を作成
+- [x] `loop/state/` の `state.json` スキーマを定義
       (`status` / `attempts` / `last_error` / `requires_human` / `updated_at` / `cost`)
-- [ ] 既存作品 `fable5_papercraft-cam.html` に `window.__artReady` と `?freeze=1` を追補
+- [x] 既存作品 `fable5_papercraft-cam.html` に `window.__artReady` と `?freeze=1` を追補
       (`__paperReady` は互換のため残す。`fable5_van-gogh.html` は旧規格の採取元であり
       追補・lint 適合の対象外 — DESIGN §3 の線引き)
 
@@ -29,22 +29,22 @@
 
 生成系より先に検証器を完成させる。既存2作品が「合格の実物」= テストフィクスチャ。
 
-- [ ] `loop/runner/verify_static.mjs`:
+- [x] `loop/runner/verify_static.mjs`:
       入力 = HTML パス、出力 = 指南書 §3.2-3 形式の JSON エラーリスト
       (例: `{"path":"header.pipeline","rule":"required_section","message":"ヘッダコメントにパイプライン図がありません","hint":"制作規約 §4 の5節構成に従ってください"}`)
-- [ ] `loop/runner/testscene.mjs`: 共通フェイクカメラ
+- [x] `loop/runner/testscene.mjs`: 共通フェイクカメラ
       (深度キュー入りテストシーン。papercraft-cam 検証で使った実物を一般化)
-- [ ] `loop/runner/verify_runtime.mjs`:
+- [x] `loop/runner/verify_runtime.mjs`:
       pageerror / `__artReady` / 黒画面検査 / **フリッカ差分(`?freeze=1` 状態で計測)** /
       スライダー掃引 / デバッグビュー / リサイズ / カメラ拒否経路 — を1コマンドで実行し
       JSON レポート
-- [ ] 静的 lint の線引きを `loop/runner/README.md` に明文化(DESIGN §4 V1):
+- [x] 静的 lint の線引きを `loop/runner/README.md` に明文化(DESIGN §4 V1):
       ①決定的近似ルール(severity=error、停止条件)②限定パターンの warning
       (V2 への申し送り。`uTime` のシード混入・ping-pong 検査はまずここから)
       ③パターン化できず V2/V3 に回す検査 — の3分類表
-- [ ] フィクスチャテスト: `fable5_papercraft-cam.html`(Phase 0 追補後)が**全項目合格**
+- [x] フィクスチャテスト: `fable5_papercraft-cam.html`(Phase 0 追補後)が**全項目合格**
       すること(規格フィクスチャはこの1本のみ — DESIGN §3)
-- [ ] 破壊テスト: 意図的に壊したコピー(ヘッダ節削除・`preserveDrawingBuffer` 除去・
+- [x] 破壊テスト: 意図的に壊したコピー(ヘッダ節削除・`preserveDrawingBuffer` 除去・
       シェーダに構文エラー・シードに uTime 混入)に対し、**フィールド単位のエラー+
       修正ヒント**が返ること(指南書 Step 5 の受入条件)
 

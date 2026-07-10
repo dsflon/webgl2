@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "art-loop item state",
+  "description": "loop/state/<slug>/state.json — 1テーマの進捗の唯一の正。強制終了→再実行はこのファイルだけを頼りに続きから回る(loop/DESIGN.md §7)。",
+  "type": "object",
+  "required": ["slug", "theme", "status", "attempts", "updated_at"],
+  "properties": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "theme": { "type": "string", "minLength": 1 },
+    "status": {
+      "description": "ステージ完了形+出口2種。袋小路なし: needs_review は人間の指示で該当ステージへ戻す",
+      "enum": [
+        "created",
+        "briefed",
+        "ordered",
+        "implemented",
+        "runtime_ok",
+        "aesthetic_ok",
+        "submitted",
+        "needs_review",
+        "failed"
+      ]
+    },
+    "attempts": {
+      "description": "ステージ別の試行回数(サーキットブレーカー①の判定元)",
+      "type": "object",
+      "properties": {
+        "brief": { "type": "integer", "minimum": 0 },
+        "order": { "type": "integer", "minimum": 0 },
+        "implement": { "type": "integer", "minimum": 0 },
+        "runtime": { "type": "integer", "minimum": 0 },
+        "aesthetic": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "last_error": {
+      "description": "直近の検証エラーリスト原文(要約しない — 指南書 §5.1-2)",
+      "type": ["array", "null"],
+      "items": { "type": "object" }
+    },
+    "requires_human": { "type": "boolean" },
+    "blocked_reason": {
+      "description": "needs_review のとき必須: エラー+収束しなかった理由の仮説",
+      "type": ["string", "null"]
+    },
+    "resume_stage": {
+      "description": "needs_review から人間が戻すときの再開ステージ",
+      "type": ["string", "null"],
+      "enum": ["brief", "order", "implement", "runtime", "aesthetic", "submit", null]
+    },
+    "cost": {
+      "description": "サーキットブレーカー③: 周回ごとの消費記録",
+      "type": "object",
+      "properties": {
+        "loops": { "type": "integer", "minimum": 0 },
+        "approx_tokens": { "type": "integer", "minimum": 0 },
+        "wall_minutes": { "type": "number", "minimum": 0 }
+      }
+    },
+    "pr_url": { "type": ["string", "null"] },
+    "updated_at": { "type": "string", "format": "date-time" }
+  }
+}
