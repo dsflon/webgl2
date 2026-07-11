@@ -2,7 +2,10 @@
 // See loop/DESIGN.md §4 (V1) and loop/runner/README.md.
 //
 // Usage:
-//   node verify_runtime.mjs <url> [--timeout ms] [--settle ms] [--shots dir]
+//   node verify_runtime.mjs <url> [--timeout ms] [--settle ms] [--shots dir] [--motion]
+//
+// --motion: 運動応答チェックを追加する(brief に担当軸「時間」の不変量がある作品用。
+//           freeze を外した URL で「動く合成シーンに画面が追従して変化するか」を測る)
 //
 // The URL should already carry the verification params the artwork supports,
 // e.g. ?fakesource=1&freeze=1 (papercraft-cam: ?fakedepth=1&freeze=1).
@@ -68,6 +71,38 @@ function meanAbsDiff(a, b) {
     n++;
   }
   return sum / n;
+}
+
+// Temporal-invariant support (メタループ #1 — blue-dissolve パイロットからの還元):
+// 「動きに反応する」は静止画からは判定できない。決定的な翻訳:
+//   frozen(?freeze=1)なら静止する — 既存の flicker チェックが担保
+//   unfrozen+動く合成シーンなら画面が変化し続ける — この checkMotion が担保
+// 使い方: brief の不変量に担当軸「時間」を含む作品は --motion を付けて実行する。
+// 前提: ?fakesource=1 の合成シーンに動く要素が1つ含まれること(制作規約 §4)。
+export async function checkMotion(url, opts = {}) {
+  const settle = opts.settle ?? 8000;
+  const gap = opts.gap ?? 2000;
+  // 0.5/255: frozen(=0.000)との分離は十分保ちつつ、低FPS環境(swiftshader)でも
+  // 動く合成シーンが確実に超えるマージンを取る
+  const threshold = opts.threshold ?? 0.5;
+  const timeout = opts.timeout ?? 60000;
+  const browser = await chromium.launch(chromiumOptions());
+  try {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 750 } });
+    await page.addInitScript(fakeCameraInit);
+    await page.goto(url);
+    await page.waitForFunction(() => window.__artReady === true, null, { timeout });
+    await page.waitForTimeout(settle);
+    const s1 = await page.evaluate(SAMPLE_FN);
+    await page.waitForTimeout(gap);
+    const s2 = await page.evaluate(SAMPLE_FN);
+    const diff = meanAbsDiff(s1, s2);
+    return { pass: diff > threshold, diff, threshold };
+  } catch (e) {
+    return { pass: false, diff: -1, threshold, error: e.message };
+  } finally {
+    await browser.close();
+  }
 }
 
 export async function verifyRuntime(url, opts = {}) {
@@ -198,6 +233,21 @@ export async function verifyRuntime(url, opts = {}) {
     await browser.close();
   }
 
+  // Motion-response check (opt-in): freeze を外した URL で実施
+  if (opts.motion) {
+    const motionUrl = url
+      .replace(/([?&])freeze=1&?/, "$1")
+      .replace(/[?&]$/, "");
+    const m = await checkMotion(motionUrl, { timeout: opts.timeout });
+    checks.push({
+      id: "motionResponse",
+      pass: m.pass,
+      detail: m.error
+        ? `checkMotion failed: ${m.error}`
+        : `unfrozen mean|Δ|=${m.diff.toFixed(3)}/255 over 2s (要 >${m.threshold} — 動く合成シーンに画面が追従)`,
+    });
+  }
+
   return { url, pass: checks.every((c) => c.pass), checks };
 }
 
@@ -212,6 +262,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     timeout: Number(argVal("--timeout", 60000)),
     settle: Number(argVal("--settle", 25000)),
     shotsDir: argVal("--shots", null),
+    motion: process.argv.includes("--motion"),
   });
   console.log(JSON.stringify(report, null, 2));
   process.exit(report.pass ? 0 : 1);

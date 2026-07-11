@@ -362,6 +362,25 @@ if (!process.argv.includes("--skip-runtime")) {
     for (const c of r.checks) if (!c.pass) console.log(`     ${c.id}: ${c.detail}`);
   }
 
+  // H. motion-response check (時間的不変量の V1 格上げ — メタループ #1)
+  //    fixture: fable5_blue-dissolve.html(動く合成シーンを持つ承認済み作品)
+  {
+    const { checkMotion } = await import("./verify_runtime.mjs");
+    const base = `http://localhost:${PORT}/fable5_blue-dissolve.html?fakesource=1`;
+    const live = await checkMotion(base, { settle: 8000, gap: 2000 });
+    check(
+      "H motion: unfrozen moving-source scene keeps changing",
+      live.pass,
+      `mean|Δ|=${live.diff.toFixed(3)}/255 (要 >${live.threshold})`,
+    );
+    const frozen = await checkMotion(`${base}&freeze=1`, { settle: 4000, gap: 2000 });
+    check(
+      "H motion: frozen scene must fail the motion check",
+      !frozen.pass,
+      `mean|Δ|=${frozen.diff.toFixed(3)}/255`,
+    );
+  }
+
   // D. shader-broken variant must fail (boot error → no __artReady)
   {
     writeFileSync(
