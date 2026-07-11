@@ -196,14 +196,32 @@ export async function verifyRuntime(url, opts = {}) {
       await page.waitForTimeout(700);
       add("resize", stats(await page.evaluate(SAMPLE_FN)) > 8, "2回のリサイズ後もキャンバス生存");
 
-      // UI toggle
-      await page.click("#togglePanel");
+      // UI toggle — supports two conventions:
+      //   (a) a single #togglePanel that toggles both ways, or
+      //   (b) a close control inside the panel (#closePanel) + a #togglePanel
+      //       launcher shown only while collapsed.
+      const isCollapsed = () =>
+        page.evaluate(() =>
+          document.getElementById("panel").classList.contains("collapsed"),
+        );
+      // ensure open first (mobile default / prior state may be collapsed)
+      if (await isCollapsed()) {
+        await page.click("#togglePanel");
+        await page.waitForTimeout(300);
+      }
+      const openState = await isCollapsed();
+      const closeSel = (await page.$("#closePanel")) ? "#closePanel" : "#togglePanel";
+      await page.click(closeSel);
       await page.waitForTimeout(400);
-      const collapsed = await page.evaluate(() =>
-        document.getElementById("panel").classList.contains("collapsed"),
-      );
+      const closedState = await isCollapsed();
       await page.click("#togglePanel");
-      add("uiToggle", collapsed, "HIDE UI で .collapsed が付く");
+      await page.waitForTimeout(300);
+      const reopenState = await isCollapsed();
+      add(
+        "uiToggle",
+        openState === false && closedState === true && reopenState === false,
+        `open→close→open = ${openState}/${closedState}/${reopenState}(期待 false/true/false)`,
+      );
     }
 
     add(
