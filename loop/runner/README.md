@@ -48,7 +48,13 @@ node selftest.mjs --skip-runtime
 
 実行時検証(`verify_runtime.mjs`)はすべて①扱い:
 `ready`(`__artReady`)/ `pageerror` / `alive`(黒・白画面検査)/ `flicker`(freeze差分 <2.0/255)/
-`sliders`(6本以上・両端掃引で生存)/ `debugViews` / `resize` / `uiToggle` / `cameraDenied`。
+`sliders`(6本以上・両端掃引で生存)/ `debugViews` / `resize` / `uiToggle` / `cameraDenied` /
+`motionResponse`(`--motion` 指定時。freeze を外し動く合成シーンで unfrozen 差分 >0.5/255)。
+
+> **メタループ #1**(blue-dissolve パイロット, PR #9): 「動きに反応する」型の時間的不変量は
+> 静止スクショの V2 では原理的に判定できず、2回連続の偽不合格を生んだ。対処として
+> 時間的挙動の担保を V1 `motionResponse` に格上げし、V2(checker_prompt.md)には
+> 「V1 pass 時、静止画で時間性が見えないことだけを理由に減点しない」規則を追加した。
 
 ## 3点同期の対応先(これを変えるときは他も見る)
 
@@ -60,4 +66,4 @@ node selftest.mjs --skip-runtime
 | `verify_order.mjs` | `loop/schemas/order_checklist.md` | `loop/templates/order_template.md` |
 | `verify_review.mjs` | `loop/schemas/review.schema.json` | `loop/templates/checker_prompt.md` |
 | `state.mjs` の書き込み検証・LIMITS | `loop/schemas/state.schema.json` / DESIGN §9 | `.claude/skills/art-loop` の内側ループ |
-| `selftest.mjs` の期待値 | 規格フィクスチャ = `fable5_papercraft-cam.html` と `prompts/fable5_papercraft-cam_order.md`(実物はこの2点のみ。DESIGN §3) | — |
+| `selftest.mjs` の期待値 | 規格フィクスチャ = `fable5_papercraft-cam.html` と `prompts/fable5_papercraft-cam_order.md`。運動応答チェックのフィクスチャ = `fable5_blue-dissolve.html`(動く合成シーンを持つ承認済み作品) | — |

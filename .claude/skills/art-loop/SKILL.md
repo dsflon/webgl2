@@ -76,6 +76,9 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
 - 準備: `python3 -m http.server 8888`(リポジトリルート)。
 - 検証: `node loop/runner/verify_runtime.mjs "http://localhost:8888/fable5_<slug>.html?fakesource=1&freeze=1" --shots loop/state/<slug>/shots`
   (作品が別名の合成入力スイッチを持つ場合は発注書の指定に従う)
+- **brief の不変量に担当軸「時間」を含む行がある場合は `--motion` を必ず付ける**
+  (運動応答チェック。fakesource の合成シーンに動く要素が必要 — 発注書 §4 で要求する)。
+  この結果(pass/fail と diff 値)は S4 で Checker に渡す。
 - 不合格 → checks の fail 内容をエラーリストとして Maker(repair)へ。
 - 合格 → `status runtime_ok`。スクショ一式(final + uDebug 主要モード + 縮小版 +
   等倍クロップ)を `loop/state/<slug>/shots/` に揃える。
@@ -85,7 +88,8 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
 - 生成側の禁止事項: このステージでの修正も Maker サブエージェント(repair)で行う。
   オーケストレータ自身が作品を直接編集しない。
 - 検証: **Checker サブエージェント**を起動する。プロンプトは
-  `loop/templates/checker_prompt.md` に SHOTS_DIR / BRIEF_PATH / REVIEW_OUT_PATH を
+  `loop/templates/checker_prompt.md` に SHOTS_DIR / BRIEF_PATH / REVIEW_OUT_PATH と
+  MOTION_CHECK_RESULT(S3 の `--motion` の結果。時間軸の不変量がない作品は「該当なし」)を
   差し込んだもの。**Maker の文脈・ソースコードを渡さない。**
   出力を `node loop/runner/verify_review.mjs <review.json> --brief <brief.json>` で機械検証
   (スキーマ不適合・verdict 矛盾は Checker に差し戻す。これは attempts を消費しない)。
