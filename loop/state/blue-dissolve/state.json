@@ -1,7 +1,7 @@
 {
   "slug": "blue-dissolve",
   "theme": "夜の人物の輪郭が青く発光する煙となって解けていく — 赤青の警察灯に照らされたサイバーパンク・スリラーの1カット",
-  "status": "needs_review",
+  "status": "submitted",
   "attempts": {
     "brief": 1,
     "order": 1,
@@ -32,14 +32,14 @@
       "hint": "注入量の変調だけで済ませないこと: 帯SDFそのものを運動場で押し込み、debug1のシルエット縁が動いた部位で実際に後退して見えることをスクリーンショットで確認する"
     }
   ],
-  "requires_human": true,
-  "blocked_reason": "不変量5(溶解が動きに反応)がV2で2回連続3点。他5項目は4-5、common全4。仮説: (a)実装は運動場で侵食を変調しているが、debug4のSDF帯幅への反映が弱く静止画で差が見えない=実装側の調整余地、かつ (b)『速く動くほど侵食が深い/静止で再構成』は本質的に時間的な不変量で、静止スクショ主体のV2では原理的に判定困難=検証器側の限界。→メタループ案件: invariant5を多フレーム差分で見るruntimeチェック化 or ルーブリックの再定義。L2ゲートとして人間の判断を仰ぐ。",
-  "resume_stage": "aesthetic",
+  "requires_human": false,
+  "blocked_reason": null,
+  "resume_stage": null,
   "cost": {
     "loops": 8,
     "approx_tokens": 290500,
     "wall_minutes": 53
   },
-  "pr_url": null,
+  "pr_url": "https://github.com/dsflon/webgl2/pull/9",
   "updated_at": "2026-07-11T13:29:34.832Z"
 }
