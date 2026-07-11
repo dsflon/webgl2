@@ -1,0 +1,2275 @@
+<!doctype html>
+<!--
+  fable5_blue-dissolve.html — WebGL2 webcam →「Blue Dissolve Cam」
+  人物の輪郭が青く発光する煙となってほどけていく、夜のサイバーパンク・スリラーの1カット。
+
+  発注書: prompts/fable5_blue-dissolve_order.md
+  参照実装(UI/カメラ/エラー経路の規約): fable5_papercraft-cam.html
+  設計ノート: loop/state/blue-dissolve/design_notes.md
+
+  様式解析の要約(不変量、優先順 1 > 3 > 2 > 4 > 5 > 6):
+  1. 溶解帯の実在 — 背景の遅い EMA 推定との色差分+中央重み事前分布からシルエット場を
+     作り、ぼかした場(擬似SDF)の q=0.5 等値線が「実体↔気体」の境界。帯上が最も明るく
+     発光し、煙はこの帯から流体の密度場へ毎フレーム実際に注入される(オーバーレイ合成ではない)。
+  3. 煙は自発光 — 密度→カラーランプ(深青#0a2a66→シアン#35c8ff→白#eaf6ff)。
+     feedback ping-pong の減衰残光+縦横分離ブラー2段の多段ブルームでにじむ。
+  2. 煙は流体 — 長辺512の Stable Fluids(semi-Lagrangian 移流+Jacobi 圧力24回+
+     vorticity confinement)。外力=運動場(フレーム差分EMA)+curl noise+弱い浮力。
+     実体内部には注入せず、内部の速度は運動場へ緩和(動く障害物として振る舞う)。
+  4. 夜のグレード — 輝度ゾーン別 split toning(影=青緑/中間=鋼青/ハイライト=冷白)、
+     シルエットSDF法線からの赤/青対向リム(Fresnel近似)、背景は映像をほぼ落とした
+     暗い書き割り+静的位置でゆっくり明滅する赤青ボケ光。
+  5. 溶解は動きに反応 — 運動場が注入量と侵食深さ(侵食場E)を変調。速い部位ほど境界が
+     内側へ後退し、静止すると縁からゆっくり実体が再構成される。
+  6. 静的グレイン — cell-hash 由来(シードはセル座標のみ・時間禁止)+暗部限定ディザ。
+
+  パイプライン図(全て毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8。
+  速度・圧力・カール等は常に [0,1] オフセット符号化なので両モードで同一シェーダ):
+    video / fakeScene(GLSL) ─► [P0 scene] cover-fit+mirror  sceneA/B RGBA8 長辺≤1280
+      ├► [P1 bg EMA]  bgA/B★ 長辺512 (fakesource時: 人物を除いた合成背景を直描き)
+      ├► [P2 field]   fieldA/B★ 512   R=silEMA G=侵食E BA=enc(運動場)
+      ├► [P3,4 blur]  softT★ 512      RG=blur(sil,E) → q=R−G が擬似SDF
+      ├► [P5 curl][P6 vel 移流+外力][P7 div][P8..31 Jacobi×24][P32 proj]  vel/prs★ 512
+      ├► [P33 den]    denA/B★ 512     移流+減衰+溶解帯からの注入
+      ├► [P34 emis]   emisT★ ≤960/2   密度ランプ+帯発光 (uDebug=7でランプ標本帯)
+      ├► [P35 fb]     fbA/B★          max(emis, prev·decay) 残光
+      ├► [P36-39]     b1(1/2) b2(1/4)★ 分離ガウスブルーム
+      └► [P40 composite] 画面(DPR≤2)  書き割り+実体グレード+対向リム+帯コア+
+                          煙加算+split toning+静的グレイン+uDebug 0..7
+
+  スライダー(発注書 §6):
+    DISSOLVE      溶解帯の幅(ぼかしσ)と侵食の深さ(E上限・侵食レート)
+    SMOKE         溶解帯からの密度注入量
+    VORTEX        渦度強化と curl noise 外乱の強さ
+    GLOW          発光ランプの明るさとブルーム・帯発光の強度
+    AFTERGLOW     feedback 残光の減衰時間(長いほど尾を引く)
+    NIGHT GRADE   split toning と背景書き割りの強さ(0で素の映像)
+    POLICE LIGHTS 赤青の対向リムと背景ボケ光の強さ
+    FILM GRAIN    静的フィルムグレインと暗部ディザ
+
+  実行方法:
+    python3 -m http.server 8888
+    → http://localhost:8888/fable5_blue-dissolve.html を開きカメラを許可
+    (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    起動直後は数秒の背景学習(LEARNING BACKGROUND 表示)。学習後に動くと輪郭が
+    煙になってほどけ、静止すると縁から実体が戻ります。
+    ?fakesource=1 … カメラの代わりに合成人物シーン(腕がゆっくり動く)で駆動(検証・標本用)
+    ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
+    DEBUG セレクタ: 0=最終 1=シルエット場 2=流体密度 3=速度場 4=溶解帯(SDF)
+    5=グレードのみ(煙なし) 6=背景推定 7=発光ランプ標本(実物のブルーム経路を通した帯)
+
+  依存: なし(単一自己完結 HTML。シルエットは背景差分方式で ML 不使用)。
+  WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Blue Dissolve Cam — WebGL2 glowing-smoke dissolve</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #050a12;
+        --ink: #dcecf8;
+        --muted: rgba(220, 236, 248, 0.66);
+        --panel: rgba(6, 14, 24, 0.82);
+        --line: rgba(220, 236, 248, 0.16);
+        --accent: #35c8ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(
+            circle at 76% 18%,
+            rgba(47, 109, 255, 0.14),
+            transparent 32%
+          ),
+          radial-gradient(
+            circle at 18% 82%,
+            rgba(255, 47, 79, 0.09),
+            transparent 30%
+          ),
+          linear-gradient(160deg, #04070d, #071120 55%, #050b14);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+      }
+
+      video {
+        position: fixed;
+        width: 1px;
+        height: 1px;
+        left: -10px;
+        top: -10px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .top-btn {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        z-index: 11;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: var(--panel);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left));
+      }
+
+      #flipCamera {
+        right: max(14px, env(safe-area-inset-right));
+        display: none;
+      }
+
+      @media (pointer: coarse) {
+        #flipCamera {
+          display: block;
+        }
+      }
+
+      #statusChip {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 11;
+        padding: 7px 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        background: var(--panel);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        pointer-events: none;
+        transition: opacity 0.6s ease;
+        white-space: nowrap;
+      }
+
+      #statusChip.hidden {
+        opacity: 0;
+      }
+
+      .panel {
+        position: fixed;
+        top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(360px, calc(100vw - 28px));
+        max-height: calc(100vh - 76px);
+        overflow: auto;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        backdrop-filter: blur(10px);
+        transition:
+          transform 0.25s ease,
+          opacity 0.25s ease;
+      }
+
+      .panel h1 {
+        margin: 0 0 6px;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--ink);
+      }
+
+      .panel p {
+        margin: 0 0 12px;
+        font-size: 10.5px;
+        line-height: 1.55;
+      }
+
+      .select-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 0 0 10px;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+
+      .select-row select {
+        flex: 1;
+        max-width: 210px;
+        padding: 5px 6px;
+        color: var(--ink);
+        background: rgba(220, 236, 248, 0.06);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        font: inherit;
+        font-size: 10.5px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 44px;
+        grid-template-areas:
+          "label out"
+          "slider slider";
+        gap: 2px 8px;
+        padding: 7px 0 2px;
+        border-top: 1px solid var(--line);
+      }
+
+      .row label {
+        grid-area: label;
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .row label span {
+        display: block;
+        font-size: 9.5px;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+
+      .row output {
+        grid-area: out;
+        justify-self: end;
+        font-size: 10.5px;
+        color: var(--accent);
+      }
+
+      .row input[type="range"] {
+        grid-area: slider;
+        width: 100%;
+        accent-color: var(--accent);
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0 2px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .buttons button {
+        flex: 1;
+        min-width: 100px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(220, 236, 248, 0.06);
+        font: inherit;
+        font-size: 10.5px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      .status {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+        font-size: 9.5px;
+        line-height: 1.7;
+        letter-spacing: 0.05em;
+      }
+
+      .badge {
+        display: inline-block;
+        margin-top: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 9px;
+        color: var(--muted);
+      }
+
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(3, 8, 14, 0.74);
+        backdrop-filter: blur(6px);
+        transition: opacity 0.3s ease;
+      }
+
+      #overlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .overlay-card {
+        max-width: 460px;
+        padding: 22px 24px;
+        text-align: center;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+
+      .overlay-card h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.16em;
+        color: var(--ink);
+      }
+
+      .overlay-card p {
+        margin: 0 0 14px;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+
+      .overlay-card button {
+        margin: 0 4px;
+        padding: 9px 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(220, 236, 248, 0.08);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      @media (max-width: 640px) {
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 54vh;
+          padding: 12px;
+        }
+
+        .panel.collapsed {
+          transform: translateY(calc(100% + 18px));
+          opacity: 0;
+        }
+      }
+
+      @media (min-width: 641px) {
+        .panel.collapsed {
+          transform: translateX(calc(-100% - 22px));
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 blue dissolve webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn" aria-expanded="true">
+      HIDE UI
+    </button>
+    <button
+      id="flipCamera"
+      type="button"
+      class="top-btn"
+      aria-label="Switch camera"
+    >
+      REAR CAM
+    </button>
+    <div id="statusChip">BOOTING</div>
+
+    <section
+      id="panel"
+      class="panel"
+      aria-label="Blue dissolve webcam controls"
+    ></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces the camera with a synthetic scene (a dark
+        // street + a centred person whose raised arms wave slowly). The full
+        // style pipeline still runs on it (offline verification, specimens).
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: fluid, background learning, erosion,
+        // afterglow decay, backdrop flicker and the fake arms all stop, and
+        // the last field keeps being displayed (deterministic still frames).
+        const FREEZE = QUERY.get("freeze") === "1";
+
+        // How long the ungated fast background-learning phase lasts (seconds
+        // of simulation time; frozen under ?freeze=1).
+        const LEARN_SECONDS = 4;
+
+        /*
+          Presets switch only the color set (emission ramp, opposing rims,
+          split-tone zones, bokeh lights) plus initial values for the two
+          look-defining sliders. Slider definitions and everything else are
+          shared. Both ramps can be judged with DEBUG = LAMP SPECIMEN.
+        */
+        const PRESETS = {
+          nightChase: {
+            label: "Night Chase",
+            ramp: ["#0a2a66", "#35c8ff", "#eaf6ff"],
+            band: "#bfeaff",
+            rimL: "#ff2f4f",
+            rimR: "#2f6dff",
+            toneShadow: "#12333a",
+            toneMid: "#274a6e",
+            toneHigh: "#dfe9f2",
+            bokehA: "#ff2c48",
+            bokehB: "#2f6dff",
+            set: { rimLight: 0.65, grade: 0.75 },
+          },
+          coldMorgue: {
+            label: "Cold Morgue",
+            ramp: ["#062e34", "#2fbfb4", "#e8fbf4"],
+            band: "#c8f2e8",
+            rimL: "#7fd8c8",
+            rimR: "#3f8fa8",
+            toneShadow: "#0d2b28",
+            toneMid: "#1e4a4a",
+            toneHigh: "#d8efe8",
+            bokehA: "#39c4b2",
+            bokehB: "#2f8fa8",
+            set: { rimLight: 0.28, grade: 0.85 },
+          },
+        };
+
+        const DEBUG_MODES = [
+          "FINAL",
+          "SILHOUETTE FIELD",
+          "SMOKE DENSITY",
+          "VELOCITY FIELD",
+          "DISSOLVE BAND (SDF)",
+          "GRADE ONLY (NO SMOKE)",
+          "BACKGROUND ESTIMATE",
+          "LAMP SPECIMEN",
+        ];
+
+        const DEFAULTS = {
+          dissolve: 0.55,
+          emission: 0.6,
+          swirl: 0.5,
+          glow: 0.6,
+          trail: 0.5,
+          grade: 0.75,
+          rimLight: 0.65,
+          grain: 0.35,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          preset: "nightChase",
+          debugView: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["dissolve", "DISSOLVE", "band width + how deep motion erodes", 0, 1, 0.01],
+          ["emission", "SMOKE", "how much gas the band releases", 0, 1, 0.01],
+          ["swirl", "VORTEX", "vorticity + curl-noise turbulence", 0, 1, 0.01],
+          ["glow", "GLOW", "emission ramp brightness + bloom", 0, 1, 0.01],
+          ["trail", "AFTERGLOW", "feedback persistence of the glow", 0, 1, 0.01],
+          ["grade", "NIGHT GRADE", "split toning + backdrop (0 = raw feed)", 0, 1, 0.01],
+          ["rimLight", "POLICE LIGHTS", "red/blue rims + background bokeh", 0, 1, 0.01],
+          ["grain", "FILM GRAIN", "static grain + shadow dither", 0, 1, 0.01],
+        ];
+
+        panel.innerHTML = `
+          <h1>FABLE5 · BLUE DISSOLVE CAM</h1>
+          <p>
+            Your outline dissolves into glowing blue gas: a slow background
+            estimate carves a silhouette, its blurred rim becomes a dissolve
+            band, and a grid fluid carries the released smoke upward. Move
+            fast to burn away; hold still to reform.
+          </p>
+          <div class="select-row">
+            <span>PRESET</span>
+            <select id="preset" aria-label="Look preset">
+              ${Object.entries(PRESETS)
+                .map(
+                  ([key, p]) =>
+                    `<option value="${key}"${
+                      key === state.preset ? " selected" : ""
+                    }>${p.label}</option>`,
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>DEBUG</span>
+            <select id="debugView" aria-label="Debug view">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input
+                    id="${key}"
+                    type="range"
+                    min="${min}"
+                    max="${max}"
+                    step="${step}"
+                    value="${state[key]}"
+                  />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>Mirror webcam</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>Pause ambient motion</span>
+            <input id="pauseAnim" type="checkbox" ${
+              state.pauseAnim ? "checked" : ""
+            } />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / RES -- / FLUID -- / BG --</div>
+            <span class="badge">WebGL2 · stable fluids · background subtraction</span>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        function applyPreset(key) {
+          state.preset = key;
+          const preset = PRESETS[key] || PRESETS.nightChase;
+          Object.entries(preset.set).forEach(([k, v]) => setSlider(k, v));
+        }
+
+        document
+          .getElementById("preset")
+          .addEventListener("change", (event) => {
+            applyPreset(event.currentTarget.value);
+          });
+
+        document
+          .getElementById("debugView")
+          .addEventListener("change", (event) => {
+            state.debugView = Number(event.currentTarget.value);
+          });
+
+        document
+          .getElementById("mirror")
+          .addEventListener("change", (event) => {
+            state.mirror = event.currentTarget.checked;
+          });
+
+        document
+          .getElementById("pauseAnim")
+          .addEventListener("change", (event) => {
+            state.pauseAnim = event.currentTarget.checked;
+          });
+
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          document.getElementById("preset").value = "nightChase";
+          applyPreset("nightChase");
+        });
+
+        togglePanel.addEventListener("click", () => {
+          const collapsed = panel.classList.toggle("collapsed");
+          togglePanel.textContent = collapsed ? "SHOW UI" : "HIDE UI";
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        });
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode =
+            state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+
+          // Front camera mirrors like a selfie preview, rear shows the world.
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          // preserveDrawingBuffer is on, so the current frame exports directly.
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-blue-dissolve-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        function hexToRgb(hex) {
+          const value = hex.replace("#", "");
+          return [
+            parseInt(value.slice(0, 2), 16) / 255,
+            parseInt(value.slice(2, 4), 16) / 255,
+            parseInt(value.slice(4, 6), 16) / 255,
+          ];
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the EMAs / fluid from stalling in 8 bits.
+        // All signed quantities are offset-encoded into [0,1] (encV / encS),
+        // so the RGBA8 fallback runs the exact same shaders, just coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0),
+            vec2( 3.0, -1.0),
+            vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hash + value noise. Grain and mottle are
+        // seeded by cell coordinates only — never by time (repo rule).
+        const CHUNK_NOISE = `
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+        `;
+
+        // Shared: [0,1] offset encoding for signed fields. Encoding clamps,
+        // which doubles as the mandatory velocity clamp (no NaN blow-ups).
+        const CHUNK_ENC = `
+          const float VMAX = 1.5;
+          const float SMAX = 3.0;
+          vec2 encV(vec2 v) { return clamp(v, -VMAX, VMAX) / (2.0 * VMAX) + 0.5; }
+          vec2 decV(vec2 e) { return (e - 0.5) * (2.0 * VMAX); }
+          float encS(float x) { return clamp(x, -SMAX, SMAX) / (2.0 * SMAX) + 0.5; }
+          float decS(float e) { return (e - 0.5) * (2.0 * SMAX); }
+        `;
+
+        // Shared: the ?fakesource=1 synthetic scene. A dark street backdrop
+        // plus a centred person (head, shoulders, torso, two raised waving
+        // arms). The background pass reuses fakeBackdrop() so background
+        // subtraction stays the single silhouette mechanism.
+        const CHUNK_FAKE = `
+          float sdSeg(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+          float fakePersonDist(vec2 p, float t) {
+            float d = 1e9;
+            // torso + shoulders + neck + head
+            d = min(d, sdSeg(p, vec2(0.5, 0.10), vec2(0.5, 0.44)) - 0.105);
+            d = smin2(d, sdSeg(p, vec2(0.40, 0.46), vec2(0.60, 0.46)) - 0.052, 0.03);
+            d = smin2(d, sdSeg(p, vec2(0.5, 0.47), vec2(0.5, 0.53)) - 0.032, 0.02);
+            d = smin2(d, length(p - vec2(0.5, 0.605)) - 0.074, 0.015);
+            // two raised arms, waving slowly (t drives the pose)
+            float a1 = 0.5 + 0.5 * sin(t * 0.85);
+            float a2 = 0.5 + 0.5 * sin(t * 0.74 + 2.1);
+            vec2 handL = vec2(0.300 - 0.085 * a1, 0.585 + 0.155 * a1);
+            vec2 handR = vec2(0.700 + 0.085 * a2, 0.585 + 0.155 * a2);
+            vec2 elbL = vec2(0.345, 0.515);
+            vec2 elbR = vec2(0.655, 0.515);
+            d = smin2(d, sdSeg(p, vec2(0.405, 0.46), elbL) - 0.036, 0.025);
+            d = smin2(d, sdSeg(p, elbL, handL) - 0.031, 0.025);
+            d = smin2(d, length(p - handL) - 0.044, 0.02);
+            d = smin2(d, sdSeg(p, vec2(0.595, 0.46), elbR) - 0.036, 0.025);
+            d = smin2(d, sdSeg(p, elbR, handR) - 0.031, 0.025);
+            d = smin2(d, length(p - handR) - 0.044, 0.02);
+            return d;
+          }
+          vec3 fakeBackdrop(vec2 uv) {
+            vec3 col = mix(
+              vec3(0.030, 0.042, 0.058),
+              vec3(0.055, 0.075, 0.095),
+              uv.y
+            );
+            // dark static building slabs
+            for (int i = 0; i < 5; ++i) {
+              float fi = float(i);
+              float x0 = fract(fi * 0.211 + 0.07);
+              float w = 0.10 + 0.12 * hash12(vec2(fi, 3.0));
+              float h = 0.35 + 0.45 * hash12(vec2(fi, 7.0));
+              float inside = step(x0, uv.x) * step(uv.x, x0 + w) * step(uv.y, h);
+              vec3 slab =
+                vec3(0.016, 0.024, 0.036) * (0.8 + 0.4 * hash12(vec2(fi, 11.0)));
+              col = mix(col, slab, inside * 0.85);
+            }
+            col = mix(vec3(0.020, 0.030, 0.038), col, smoothstep(0.06, 0.13, uv.y));
+            // faint static window dots
+            vec2 g = floor(uv * vec2(48.0, 30.0));
+            float win =
+              step(0.965, hash12(g)) * step(uv.y, 0.55) * step(0.13, uv.y);
+            col += win * vec3(0.10, 0.12, 0.13);
+            return col;
+          }
+          vec3 fakeScene(vec2 uv, float t, float aspect) {
+            vec3 col = fakeBackdrop(uv);
+            vec2 p = vec2(0.5 + (uv.x - 0.5) * aspect, uv.y);
+            float d = fakePersonDist(p, t);
+            float m = 1.0 - smoothstep(-0.004, 0.006, d);
+            vec3 body =
+              vec3(0.40, 0.41, 0.44) * (0.72 + 0.45 * smoothstep(0.05, 0.75, uv.y));
+            body *= 0.86 + 0.14 * smoothstep(-0.09, 0.0, d);
+            return mix(col, body, m);
+          }
+        `;
+
+        // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
+        // working scene buffer. Everything downstream is screen-aligned.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          uniform float uTime;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              float aspect = uResolution.x / max(uResolution.y, 1.0);
+              fragColor = vec4(fakeScene(vUv, uTime, aspect), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              fragColor = vec4(0.05, 0.06, 0.08, 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scale = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scale + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — slow background estimate (EMA ping-pong). After the learning
+        // phase, pixels with a standing silhouette stop learning so the
+        // person is not absorbed into the background. ?fakesource=1 draws
+        // the synthetic backdrop (the scene minus the person) directly.
+        const bgFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uPrev;
+          uniform sampler2D uFieldPrev;
+          uniform float uAlpha;
+          uniform int uReset;
+          uniform int uGate;
+          uniform int uFake;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeBackdrop(vUv), 1.0);
+              return;
+            }
+            vec3 cur = texture(uScene, vUv).rgb;
+            vec3 prev = texture(uPrev, vUv).rgb;
+            float sil = texture(uFieldPrev, vUv).r;
+            float gate =
+              uGate == 1 ? 1.0 - 0.95 * smoothstep(0.15, 0.55, sil) : 1.0;
+            float a = uReset == 1 ? 1.0 : uAlpha * gate;
+            fragColor = vec4(mix(prev, cur, a), 1.0);
+          }
+        `;
+
+        // P2 — the field: R = silhouette EMA (background difference with a
+        // soft center prior), G = erosion state E (deepens with motion near
+        // the current boundary, recovers when still), BA = motion field
+        // (per-pixel frame-difference flow, EMA-smoothed).
+        const fieldFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uScenePrev;
+          uniform sampler2D uBg;
+          uniform sampler2D uPrev;
+          uniform sampler2D uSoftPrev;
+          uniform vec2 uTexel;
+          uniform float uDt;
+          uniform float uAlphaSil;
+          uniform float uAlphaMot;
+          uniform float uDissolve;
+          uniform int uReset;
+          ${CHUNK_ENC}
+          float lumaf(vec3 c) {
+            return dot(c, vec3(0.299, 0.587, 0.114));
+          }
+          void main() {
+            vec3 cur = texture(uScene, vUv).rgb;
+            vec3 bg = texture(uBg, vUv).rgb;
+            vec4 prev = texture(uPrev, vUv);
+            vec2 softPrev = texture(uSoftPrev, vUv).rg;
+
+            // pseudo optical flow from the frame difference (invariant 5)
+            float l0 = lumaf(texture(uScenePrev, vUv).rgb);
+            float l1 = lumaf(cur);
+            float lx = lumaf(texture(uScene, vUv + vec2(uTexel.x, 0.0)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(uTexel.x, 0.0)).rgb);
+            float ly = lumaf(texture(uScene, vUv + vec2(0.0, uTexel.y)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(0.0, uTexel.y)).rgb);
+            vec2 grd = vec2(lx / (2.0 * uTexel.x), ly / (2.0 * uTexel.y));
+            float it = (l1 - l0) / max(uDt, 1e-3);
+            vec2 flowRaw = -it * grd / (dot(grd, grd) + 40.0);
+            flowRaw = clamp(flowRaw, vec2(-VMAX), vec2(VMAX));
+            vec2 flow = uReset == 1
+              ? vec2(0.0)
+              : mix(decV(prev.ba), flowRaw, uAlphaMot);
+            float mot01 = smoothstep(0.008, 0.20, length(flow));
+
+            // erosion state E on two time scales (invariant 5 — a single
+            // time scale is forbidden): near the current boundary E chases
+            // a motion-driven target with a fast attack EMA (τ≈0.3s =
+            // dissolve) and a slow release EMA (τ≈2s = the body slowly
+            // rebuilding from its edge once the part goes still)
+            float qPrev = clamp(softPrev.x - softPrev.y, 0.0, 1.0);
+            float wBand = 1.0 - smoothstep(0.0, 0.38, abs(qPrev - 0.5));
+            float eMax = min(1.0, 0.18 + 0.95 * uDissolve);
+            float eTarget = eMax * wBand * smoothstep(0.03, 0.40, mot01);
+            float kAtk = 1.0 - exp(-uDt / 0.30);
+            float kRel = 1.0 - exp(-uDt / 2.00);
+            float erode = mix(prev.g, eTarget, eTarget > prev.g ? kAtk : kRel);
+            erode = clamp(erode, 0.0, eMax);
+            if (uReset == 1) erode = 0.0;
+
+            // silhouette: color distance vs the slow background estimate,
+            // weighted by a soft center prior (invariant 1). The erosion
+            // state is added onto the detection threshold, so parts that
+            // moved fast genuinely lose silhouette: the SDF band is pushed
+            // inside the body and the debug1 edge visibly retreats
+            // (invariant 5 — not just an injection-amount modulation)
+            vec3 dc = cur - bg;
+            float diff = length(dc) * 0.72 + abs(lumaf(dc)) * 0.5;
+            vec2 e = (vUv - vec2(0.5, 0.46)) / vec2(0.46, 0.55);
+            float prior = mix(0.30, 1.0, 1.0 - smoothstep(0.72, 1.25, length(e)));
+            float bite = erode * (0.75 + 0.85 * uDissolve);
+            float silRaw = smoothstep(0.09 + bite, 0.24 + bite, diff * prior);
+            float sil = uReset == 1 ? silRaw : mix(prev.r, silRaw, uAlphaSil);
+
+            fragColor = vec4(sil, erode, encV(flow));
+          }
+        `;
+
+        // Separable Gaussian, all four channels (field soft-SDF + bloom).
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -10; i <= 10; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P5 — curl of the velocity field (for vorticity confinement).
+        const curlFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float vr = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).rg).y;
+            float vl = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).rg).y;
+            float vt = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).rg).x;
+            float vb = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).rg).x;
+            float c = 0.5 * ((vr - vl) - (vt - vb));
+            fragColor = vec4(encS(c), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P6 — semi-Lagrangian advection + forces: the motion field pushes
+        // gas near the body, buoyancy lifts dense smoke, curl noise adds
+        // stylized turbulence, vorticity confinement re-sharpens eddies,
+        // and the solid interior relaxes toward the body's own motion
+        // (a moving obstacle the smoke avoids).
+        const velFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uCurl;
+          uniform sampler2D uField;
+          uniform sampler2D uSoft;
+          uniform sampler2D uDen;
+          uniform vec2 uTexel;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uSwirl;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          void main() {
+            vec2 vHere = decV(texture(uVel, vUv).rg);
+            vec2 back = vUv - vHere * uDt;
+            vec2 v = decV(texture(uVel, back).rg);
+
+            vec4 f = texture(uField, vUv);
+            vec2 soft = texture(uSoft, vUv).rg;
+            float q = clamp(soft.x - soft.y, 0.0, 1.0);
+            vec2 flow = decV(f.ba);
+            float den = texture(uDen, vUv).r;
+            float mot01 = smoothstep(0.008, 0.20, length(flow));
+
+            // motion of the body drags the gas around it
+            float bodyW = smoothstep(0.08, 0.5, soft.x);
+            v += flow * 2.2 * bodyW * uDt;
+            // buoyancy: dense glowing gas rises
+            v.y += 0.85 * den * uDt;
+
+            // release velocity: the band pushes gas out along the surface
+            // normal (and upward), harder where the body moves
+            float band = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.011));
+            float sl = texture(uSoft, vUv - vec2(uTexel.x, 0.0)).r;
+            float sr = texture(uSoft, vUv + vec2(uTexel.x, 0.0)).r;
+            float sb = texture(uSoft, vUv - vec2(0.0, uTexel.y)).r;
+            float st = texture(uSoft, vUv + vec2(0.0, uTexel.y)).r;
+            vec2 gS = vec2(sr - sl, st - sb);
+            vec2 nOut = -gS / max(length(gS), 1e-4);
+            v += (nOut * 0.55 + vec2(0.0, 0.35)) * band *
+              (0.30 + 1.5 * mot01) * uDt * 3.0;
+
+            // curl noise turbulence, two octaves, only where smoke lives
+            float wSmoke = smoothstep(0.005, 0.15, den);
+            vec2 np = vUv * 3.0 + vec2(0.0, -uTime * 0.06);
+            vec2 cn = vec2(
+              vnoise(np + vec2(0.0, 0.013)) - vnoise(np - vec2(0.0, 0.013)),
+              -(vnoise(np + vec2(0.013, 0.0)) - vnoise(np - vec2(0.013, 0.0)))
+            ) / 0.026;
+            vec2 np2 = vUv * 7.0 + vec2(uTime * 0.04, 0.0);
+            cn += 0.5 * vec2(
+              vnoise(np2 + vec2(0.0, 0.011)) - vnoise(np2 - vec2(0.0, 0.011)),
+              -(vnoise(np2 + vec2(0.011, 0.0)) - vnoise(np2 - vec2(0.011, 0.0)))
+            ) / 0.022;
+            v += cn * (0.08 + 0.45 * uSwirl) * wSmoke * uDt;
+
+            // vorticity confinement
+            float cC = decS(texture(uCurl, vUv).r);
+            float cL = decS(texture(uCurl, vUv - vec2(uTexel.x, 0.0)).r);
+            float cR = decS(texture(uCurl, vUv + vec2(uTexel.x, 0.0)).r);
+            float cB = decS(texture(uCurl, vUv - vec2(0.0, uTexel.y)).r);
+            float cT = decS(texture(uCurl, vUv + vec2(0.0, uTexel.y)).r);
+            vec2 gAbs = 0.5 * vec2(abs(cR) - abs(cL), abs(cT) - abs(cB));
+            vec2 nDir = gAbs / max(length(gAbs), 1e-4);
+            v += vec2(nDir.y, -nDir.x) * cC * (uSwirl * 1.8) * uDt;
+
+            // the solid body is a moving obstacle
+            float inside = smoothstep(0.60, 0.85, q);
+            v = mix(v, flow * 1.1, inside * min(1.0, uDt * 10.0));
+
+            v *= exp(-uDt * 0.55);
+            fragColor = vec4(encV(v), 0.0, 1.0);
+          }
+        `;
+
+        // P7 — divergence of the forced velocity.
+        const divFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float vr = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).rg).x;
+            float vl = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).rg).x;
+            float vt = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).rg).y;
+            float vb = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).rg).y;
+            fragColor = vec4(encS(0.5 * ((vr - vl) + (vt - vb))), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P8..P31 — Jacobi pressure iterations (fixed count from JS,
+        // warm-started from the previous frame's pressure).
+        const jacobiFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrs;
+          uniform sampler2D uDiv;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float pl = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).r);
+            float pr = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).r);
+            float pb = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).r);
+            float pt = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).r);
+            float dv = decS(texture(uDiv, vUv).r);
+            fragColor = vec4(encS((pl + pr + pb + pt - dv) * 0.25), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P32 — subtract the pressure gradient (projection).
+        const projFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uPrs;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            vec2 v = decV(texture(uVel, vUv).rg);
+            float pl = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).r);
+            float pr = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).r);
+            float pb = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).r);
+            float pt = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).r);
+            v -= 0.5 * vec2(pr - pl, pt - pb);
+            fragColor = vec4(encV(v), 0.0, 1.0);
+          }
+        `;
+
+        // P33 — density: advect, dissipate, inject from the dissolve band
+        // only (never deep inside the body, where smoke is also culled).
+        const denFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDen;
+          uniform sampler2D uVel;
+          uniform sampler2D uField;
+          uniform sampler2D uSoft;
+          uniform float uDt;
+          uniform float uEmission;
+          uniform float uDissolve;
+          ${CHUNK_ENC}
+          void main() {
+            vec2 v = decV(texture(uVel, vUv).rg);
+            float d = texture(uDen, vUv - v * uDt).r;
+            d *= exp(-uDt * 0.30);
+
+            vec4 f = texture(uField, vUv);
+            vec2 soft = texture(uSoft, vUv).rg;
+            float q = clamp(soft.x - soft.y, 0.0, 1.0);
+            float band = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.011));
+            float mot01 = smoothstep(0.008, 0.20, length(decV(f.ba)));
+            float inj = band * (1.0 - smoothstep(0.62, 0.82, q)) *
+              (1.3 + 6.0 * mot01) * uEmission * (0.5 + 0.9 * uDissolve);
+            d += inj * uDt;
+            // no smoke deep inside the solid body
+            d *= 1.0 - smoothstep(0.72, 0.95, q) * min(1.0, uDt * 6.0);
+            fragColor = vec4(clamp(d, 0.0, 1.0), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P34 — emission: density through the glow ramp (deep blue → cyan →
+        // white) plus the dissolve-band glow, brightest where motion feeds
+        // it. uSpecimen renders the Phase-3 lamp specimen: a 0→1 density
+        // strip through the same ramp, then the real feedback/bloom chain.
+        const emisFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDen;
+          uniform sampler2D uSoft;
+          uniform sampler2D uField;
+          uniform float uGlow;
+          uniform vec3 uRampA;
+          uniform vec3 uRampB;
+          uniform vec3 uRampC;
+          uniform vec3 uBandCol;
+          uniform int uSpecimen;
+          ${CHUNK_ENC}
+          vec3 rampCol(float d) {
+            vec3 c = mix(uRampA, uRampB, smoothstep(0.0, 0.5, d));
+            return mix(c, uRampC, smoothstep(0.55, 0.95, d));
+          }
+          void main() {
+            if (uSpecimen == 1) {
+              float d = clamp((vUv.x - 0.08) / 0.84, 0.0, 1.0);
+              float strip = 1.0 - smoothstep(0.100, 0.115, abs(vUv.y - 0.5));
+              fragColor = vec4(
+                rampCol(d) * d * strip * (0.55 + 1.15 * uGlow),
+                1.0
+              );
+              return;
+            }
+            float d = texture(uDen, vUv).r;
+            vec2 soft = texture(uSoft, vUv).rg;
+            float q = clamp(soft.x - soft.y, 0.0, 1.0);
+            float mot01 =
+              smoothstep(0.008, 0.20, length(decV(texture(uField, vUv).ba)));
+            vec3 c = rampCol(d) * pow(max(d, 0.0), 0.6) * (0.7 + 1.3 * uGlow);
+            float band = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.008));
+            c += uBandCol * band * (0.45 + 1.0 * uGlow) * (0.45 + 0.8 * mot01);
+            fragColor = vec4(c, 1.0);
+          }
+        `;
+
+        // P35 — afterglow feedback: max(current, previous · decay).
+        // Under ?freeze=1 decay = 1 (dt = 0), so the buffer holds still.
+        const fbFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uEmis;
+          uniform sampler2D uPrev;
+          uniform float uDecay;
+          void main() {
+            vec3 e = texture(uEmis, vUv).rgb;
+            vec3 p = texture(uPrev, vUv).rgb * uDecay;
+            fragColor = vec4(max(e, p), 1.0);
+          }
+        `;
+
+        // P40 — final composite: dark matte backdrop with police bokeh,
+        // graded body with opposing red/blue rims (Fresnel-ish from the
+        // soft-SDF normal), the bright dissolve-band core, additive smoke
+        // (feedback + two bloom taps), split toning, static grain, debug.
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uField;
+          uniform sampler2D uSoft;
+          uniform sampler2D uDen;
+          uniform sampler2D uVel;
+          uniform sampler2D uBg;
+          uniform sampler2D uFb;
+          uniform sampler2D uB1;
+          uniform sampler2D uB2;
+          uniform vec2 uResolution;
+          uniform vec2 uSoftTexel;
+          uniform float uGrade;
+          uniform float uRim;
+          uniform float uGlow;
+          uniform float uGrain;
+          uniform float uTime;
+          uniform vec3 uRimL;
+          uniform vec3 uRimR;
+          uniform vec3 uToneS;
+          uniform vec3 uToneM;
+          uniform vec3 uToneH;
+          uniform vec3 uBokA;
+          uniform vec3 uBokB;
+          uniform vec3 uBandCol;
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          float lumaf(vec3 c) {
+            return dot(c, vec3(0.299, 0.587, 0.114));
+          }
+          // luminance-zone split toning: teal shadows, steel-blue mids,
+          // cold highlights, lifted blacks (night never goes to pure black)
+          vec3 splitTone(vec3 c) {
+            float l = lumaf(c);
+            vec3 g = pow(max(c, vec3(0.0)), vec3(1.15)) * 0.82;
+            float sw = 1.0 - smoothstep(0.0, 0.42, l);
+            float hw = smoothstep(0.55, 0.95, l);
+            float mw = clamp(1.0 - sw - hw, 0.0, 1.0);
+            vec3 tone = uToneS * sw + uToneM * mw + uToneH * hw;
+            vec3 tinted = tone * (0.25 + 1.45 * l);
+            return mix(g, tinted, 0.62) + uToneS * 0.10;
+          }
+          // the dark matte-painting backdrop: gradient + haze band + eight
+          // static bokeh lights with slow flicker (uTime freezes with dt)
+          vec3 backdrop(vec2 uv, vec3 graded) {
+            float asp = uResolution.x / uResolution.y;
+            vec2 p = vec2(uv.x * asp, uv.y);
+            vec3 col = mix(uToneS * 0.45, uToneM * 0.55, smoothstep(0.0, 1.0, uv.y));
+            col += graded * 0.14;
+            col += uToneM * 0.35 * exp(-pow((uv.y - 0.30) * 3.2, 2.0));
+            vec3 bok = vec3(0.0);
+            for (int i = 0; i < 8; ++i) {
+              float fi = float(i);
+              vec2 c = vec2(
+                hash12(vec2(fi, 1.0)) * asp,
+                0.30 + 0.55 * hash12(vec2(fi, 2.0))
+              );
+              float r = 0.05 + 0.13 * hash12(vec2(fi, 3.0));
+              vec3 lc = mix(uBokA, uBokB, step(0.5, hash12(vec2(fi, 4.0))));
+              float fl = 0.72 + 0.28 *
+                sin(uTime * (0.5 + hash12(vec2(fi, 5.0))) * 2.1 + fi * 2.4);
+              float disc = 1.0 - smoothstep(r * 0.55, r, distance(p, c));
+              bok += lc * disc * fl * (0.14 + 0.30 * hash12(vec2(fi, 6.0)));
+            }
+            col += bok * (0.35 + 1.3 * uRim);
+            return col;
+          }
+          void main() {
+            vec4 f = texture(uField, vUv);
+            vec2 soft = texture(uSoft, vUv).rg;
+            float q = clamp(soft.x - soft.y, 0.0, 1.0);
+            float den = texture(uDen, vUv).r;
+
+            // pure inspection views first (no grade / grain / vignette)
+            if (uDebug == 1) {
+              fragColor = vec4(vec3(f.r), 1.0);
+              return;
+            }
+            if (uDebug == 2) {
+              fragColor = vec4(vec3(den), 1.0);
+              return;
+            }
+            if (uDebug == 3) {
+              vec2 v = decV(texture(uVel, vUv).rg);
+              vec2 enc = clamp(v / (2.0 * VMAX) + 0.5, 0.0, 1.0);
+              fragColor = vec4(enc.x, enc.y, 0.35, 1.0);
+              return;
+            }
+            if (uDebug == 4) {
+              // dissolve-band specimen: interior level = q, erosion tinted
+              // red, the band itself highlighted in the band color
+              float band4 = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.006));
+              vec3 base = mix(vec3(0.02, 0.05, 0.10), vec3(0.25, 0.55, 0.75), q);
+              base = mix(
+                base,
+                vec3(0.85, 0.25, 0.25),
+                clamp(f.g / 0.7, 0.0, 1.0) * 0.55
+              );
+              fragColor = vec4(base + uBandCol * band4, 1.0);
+              return;
+            }
+            if (uDebug == 6) {
+              fragColor = vec4(texture(uBg, vUv).rgb, 1.0);
+              return;
+            }
+
+            vec3 smoke = texture(uFb, vUv).rgb * 0.85 +
+              texture(uB1, vUv).rgb * 0.75 +
+              texture(uB2, vUv).rgb * 0.65;
+            smoke *= 0.40 + 0.85 * uGlow;
+
+            if (uDebug == 7) {
+              // lamp specimen: only the glow chain (ramp strip + real bloom)
+              fragColor = vec4(smoke, 1.0);
+              return;
+            }
+
+            vec3 cam = texture(uScene, vUv).rgb;
+            vec3 graded = splitTone(cam);
+            vec3 bgCol = mix(cam, backdrop(vUv, graded), uGrade);
+
+            // opposing rim lights from the soft-SDF normal
+            float sl = texture(uSoft, vUv - vec2(uSoftTexel.x, 0.0)).r;
+            float sr = texture(uSoft, vUv + vec2(uSoftTexel.x, 0.0)).r;
+            float sb = texture(uSoft, vUv - vec2(0.0, uSoftTexel.y)).r;
+            float st = texture(uSoft, vUv + vec2(0.0, uSoftTexel.y)).r;
+            vec2 gradS = vec2(sr - sl, st - sb);
+            vec2 nOut = -gradS / max(length(gradS), 1e-4);
+            float rimBand =
+              smoothstep(0.5, 0.60, q) * (1.0 - smoothstep(0.60, 0.88, q));
+            vec3 rim = (
+              uRimL * pow(max(-nOut.x, 0.0), 1.4) +
+              uRimR * pow(max(nOut.x, 0.0), 1.4) +
+              (uRimL + uRimR) * 0.12 * max(nOut.y, 0.0)
+            ) * rimBand * (0.4 + 2.2 * uRim);
+
+            vec3 bodyCol = mix(cam, graded * 0.92, uGrade) +
+              rim * mix(0.35, 1.0, uGrade);
+            float bodyMask = smoothstep(0.50, 0.565, q);
+            vec3 col = mix(bgCol, bodyCol, bodyMask);
+
+            if (uDebug != 5) {
+              // dissolve-band core (crisp full-res line; also blooms via
+              // the glow chain) + the smoke itself
+              float band = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.006));
+              col += uBandCol * band * (0.35 + 0.85 * uGlow);
+              col += smoke;
+            }
+
+            // vignette
+            vec2 vq = (vUv - 0.5) * vec2(uResolution.x / uResolution.y, 1.0);
+            col *= mix(0.82, 1.0, smoothstep(1.15, 0.35, length(vq)));
+
+            // static film grain + shadow-weighted dither
+            // (cell hash — no time in the seed)
+            float g1 = hash12(floor(gl_FragCoord.xy));
+            float g2 = hash12(floor(gl_FragCoord.xy * 0.5) + 17.0);
+            float lc = lumaf(col);
+            float gAmt =
+              uGrain * (0.05 + 0.10 * (1.0 - smoothstep(0.05, 0.6, lc)));
+            col += (g1 - 0.5) * gAmt + (g2 - 0.5) * uGrain * 0.02;
+
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            const log = gl.getShaderInfoLog(shader);
+            throw new Error(`Shader compile failed: ${log}`);
+          }
+          return shader;
+        }
+
+        function createProgram(fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, fullscreenVS));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          bg: createProgram(bgFS),
+          field: createProgram(fieldFS),
+          blur: createProgram(blurFS),
+          curl: createProgram(curlFS),
+          vel: createProgram(velFS),
+          div: createProgram(divFS),
+          jacobi: createProgram(jacobiFS),
+          proj: createProgram(projFS),
+          den: createProgram(denFS),
+          emis: createProgram(emisFS),
+          composite: createProgram(compositeFS),
+          fb: createProgram(fbFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo",
+            "uResolution",
+            "uVideoSize",
+            "uMirror",
+            "uFake",
+            "uHasVideo",
+            "uTime",
+          ]),
+          bg: getLocations(programs.bg, [
+            "uScene",
+            "uPrev",
+            "uFieldPrev",
+            "uAlpha",
+            "uReset",
+            "uGate",
+            "uFake",
+          ]),
+          field: getLocations(programs.field, [
+            "uScene",
+            "uScenePrev",
+            "uBg",
+            "uPrev",
+            "uSoftPrev",
+            "uTexel",
+            "uDt",
+            "uAlphaSil",
+            "uAlphaMot",
+            "uDissolve",
+            "uReset",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          curl: getLocations(programs.curl, ["uVel", "uTexel"]),
+          vel: getLocations(programs.vel, [
+            "uVel",
+            "uCurl",
+            "uField",
+            "uSoft",
+            "uDen",
+            "uTexel",
+            "uDt",
+            "uTime",
+            "uSwirl",
+          ]),
+          div: getLocations(programs.div, ["uVel", "uTexel"]),
+          jacobi: getLocations(programs.jacobi, ["uPrs", "uDiv", "uTexel"]),
+          proj: getLocations(programs.proj, ["uVel", "uPrs", "uTexel"]),
+          den: getLocations(programs.den, [
+            "uDen",
+            "uVel",
+            "uField",
+            "uSoft",
+            "uDt",
+            "uEmission",
+            "uDissolve",
+          ]),
+          emis: getLocations(programs.emis, [
+            "uDen",
+            "uSoft",
+            "uField",
+            "uGlow",
+            "uRampA",
+            "uRampB",
+            "uRampC",
+            "uBandCol",
+            "uSpecimen",
+          ]),
+          fb: getLocations(programs.fb, ["uEmis", "uPrev", "uDecay"]),
+          composite: getLocations(programs.composite, [
+            "uScene",
+            "uField",
+            "uSoft",
+            "uDen",
+            "uVel",
+            "uBg",
+            "uFb",
+            "uB1",
+            "uB2",
+            "uResolution",
+            "uSoftTexel",
+            "uGrade",
+            "uRim",
+            "uGlow",
+            "uGrain",
+            "uTime",
+            "uRimL",
+            "uRimR",
+            "uToneS",
+            "uToneM",
+            "uToneH",
+            "uBokA",
+            "uBokB",
+            "uBandCol",
+            "uDebug",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            internal,
+            width,
+            height,
+            0,
+            format,
+            type,
+            null,
+          );
+          return tex;
+        }
+
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0,
+          );
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          2,
+          2,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          null,
+        );
+
+        let targets = null;
+        let paintW = 2;
+        let paintH = 2;
+        let fieldW = 2;
+        let fieldH = 2;
+        let glowW = 2;
+        let glowH = 2;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) {
+            Object.values(targets).forEach(destroyTarget);
+          }
+          const b1W = Math.max(2, Math.round(glowW / 2));
+          const b1H = Math.max(2, Math.round(glowH / 2));
+          const b2W = Math.max(2, Math.round(glowW / 4));
+          const b2H = Math.max(2, Math.round(glowH / 4));
+          targets = {
+            sceneA: createTarget(paintW, paintH, false),
+            sceneB: createTarget(paintW, paintH, false),
+            bgA: createTarget(fieldW, fieldH, true),
+            bgB: createTarget(fieldW, fieldH, true),
+            fieldA: createTarget(fieldW, fieldH, true),
+            fieldB: createTarget(fieldW, fieldH, true),
+            fieldTmp: createTarget(fieldW, fieldH, true),
+            softT: createTarget(fieldW, fieldH, true),
+            curlT: createTarget(fieldW, fieldH, true),
+            velA: createTarget(fieldW, fieldH, true),
+            velB: createTarget(fieldW, fieldH, true),
+            divT: createTarget(fieldW, fieldH, true),
+            prsA: createTarget(fieldW, fieldH, true),
+            prsB: createTarget(fieldW, fieldH, true),
+            denA: createTarget(fieldW, fieldH, true),
+            denB: createTarget(fieldW, fieldH, true),
+            emisT: createTarget(glowW, glowH, true),
+            fbA: createTarget(glowW, glowH, true),
+            fbB: createTarget(glowW, glowH, true),
+            b1Tmp: createTarget(b1W, b1H, true),
+            b1: createTarget(b1W, b1H, true),
+            b2Tmp: createTarget(b2W, b2H, true),
+            b2: createTarget(b2W, b2H, true),
+          };
+          needsReset = true;
+        }
+
+        // Zero the simulation state. Encoded targets must be cleared to the
+        // encoded zero (0.5), otherwise "cleared" would decode to -VMAX.
+        function clearSimTargets() {
+          clearTarget(targets.sceneA, 0.05, 0.06, 0.08, 1);
+          clearTarget(targets.sceneB, 0.05, 0.06, 0.08, 1);
+          clearTarget(targets.fieldA, 0, 0, 0.5, 0.5);
+          clearTarget(targets.fieldB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softT, 0, 0, 0, 1);
+          clearTarget(targets.velA, 0.5, 0.5, 0, 1);
+          clearTarget(targets.velB, 0.5, 0.5, 0, 1);
+          clearTarget(targets.prsA, 0.5, 0, 0, 1);
+          clearTarget(targets.prsB, 0.5, 0, 0, 1);
+          clearTarget(targets.divT, 0.5, 0, 0, 1);
+          clearTarget(targets.curlT, 0.5, 0, 0, 1);
+          clearTarget(targets.denA, 0, 0, 0, 1);
+          clearTarget(targets.denB, 0, 0, 0, 1);
+          clearTarget(targets.emisT, 0, 0, 0, 1);
+          clearTarget(targets.fbA, 0, 0, 0, 1);
+          clearTarget(targets.fbB, 0, 0, 0, 1);
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            // scene working buffer: smoke is soft, upscaling is invisible
+            const paintScale = Math.min(1, 1280 / maxSide);
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            // field + fluid grid: long side ≤ 512 (order §4)
+            const fieldScale = Math.min(1, 512 / maxSide);
+            fieldW = Math.max(8, Math.round(width * fieldScale));
+            fieldH = Math.max(8, Math.round(height * fieldScale));
+            // glow chain: half resolution, long side ≤ 960
+            const glowScale = Math.min(0.5, 960 / maxSide);
+            glowW = Math.max(4, Math.round(width * glowScale));
+            glowH = Math.max(4, Math.round(height * glowScale));
+            rebuildTargets();
+          }
+        }
+
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(
+            0,
+            0,
+            target ? target.width : canvas.width,
+            target ? target.height : canvas.height,
+          );
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        function blurPass(src, tmp, dst, sigma) {
+          renderPass(tmp, programs.blur, () => {
+            const u = locations.blur;
+            bindTexture(0, src.tex);
+            gl.uniform1i(u.uSrc, 0);
+            gl.uniform2f(u.uDir, 1 / tmp.width, 0);
+            gl.uniform1f(u.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            const u = locations.blur;
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(u.uSrc, 0);
+            gl.uniform2f(u.uDir, 0, 1 / dst.height);
+            gl.uniform1f(u.uSigma, sigma);
+          });
+        }
+
+        /* ------------------------------------------------------------------
+           Render loop
+        ------------------------------------------------------------------ */
+
+        const JACOBI_ITERATIONS = 24;
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let bgLearnT = FAKE ? LEARN_SECONDS : 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let scenePing = false;
+        let bgPing = false;
+        let fieldPing = false;
+        let denPing = false;
+        let fbPing = false;
+        let readyStamped = false;
+        let learnDoneWall = 0;
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 &&
+            video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              video,
+            );
+            return true;
+          }
+          return false;
+        }
+
+        function updateChip(learnPhase, wallNow) {
+          let text;
+          let hide = false;
+          if (FAKE) {
+            text = "SOURCE · SYNTHETIC (fakesource=1)";
+            hide = wallNow - bootWall > 4000;
+          } else if (learnPhase) {
+            const pct = Math.round((bgLearnT / LEARN_SECONDS) * 100);
+            text = `LEARNING BACKGROUND … ${pct}%`;
+            learnDoneWall = 0;
+          } else {
+            text = "BG · TRACKING";
+            if (!learnDoneWall) learnDoneWall = wallNow;
+            hide = wallNow - learnDoneWall > 4000;
+          }
+          statusChip.textContent = text;
+          statusChip.classList.toggle("hidden", hide);
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          // ?freeze=1 ⇒ dt = 0: every EMA alpha, advection step, injection,
+          // decay, flicker phase and the fake arms freeze in place.
+          const dt = FREEZE ? 0 : rawDt;
+          if (!state.pauseAnim) animTime += dt;
+          if (!FAKE && bgLearnT < LEARN_SECONDS) bgLearnT += dt;
+          const learnPhase = !FAKE && bgLearnT < LEARN_SECONDS;
+
+          const haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || haveVideo;
+
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+
+          const preset = PRESETS[state.preset] || PRESETS.nightChase;
+
+          // ping-pong bookkeeping (read prev, write cur, flip at the end)
+          const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
+          const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
+          const bgOut = bgPing ? targets.bgA : targets.bgB;
+          const bgPrev = bgPing ? targets.bgB : targets.bgA;
+          const fieldOut = fieldPing ? targets.fieldA : targets.fieldB;
+          const fieldPrev = fieldPing ? targets.fieldB : targets.fieldA;
+          const denOut = denPing ? targets.denA : targets.denB;
+          const denPrev = denPing ? targets.denB : targets.denA;
+          const fbOut = fbPing ? targets.fbA : targets.fbB;
+          const fbPrev = fbPing ? targets.fbB : targets.fbA;
+
+          const fieldTexel = [1 / fieldW, 1 / fieldH];
+
+          // P0 — scene (camera cover-fit / synthetic scene / dark idle)
+          renderPass(sceneCur, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(
+              u.uVideoSize,
+              Math.max(1, video.videoWidth),
+              Math.max(1, video.videoHeight),
+            );
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+            gl.uniform1f(u.uTime, animTime);
+          });
+
+          // P1 — background EMA (fast ungated while learning, then gated)
+          let alphaBg = learnPhase
+            ? 1 - Math.exp(-dt / 0.45)
+            : 1 - Math.exp(-dt / 22);
+          if (!floatExt && dt > 0) alphaBg = Math.max(alphaBg, 0.03);
+          renderPass(bgOut, programs.bg, () => {
+            const u = locations.bg;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, bgPrev.tex);
+            bindTexture(2, fieldPrev.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform1i(u.uFieldPrev, 2);
+            gl.uniform1f(u.uAlpha, alphaBg);
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+            gl.uniform1i(u.uGate, learnPhase ? 0 : 1);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+          });
+
+          // P2 — silhouette / erosion / motion field
+          renderPass(fieldOut, programs.field, () => {
+            const u = locations.field;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, scenePrev.tex);
+            bindTexture(2, bgOut.tex);
+            bindTexture(3, fieldPrev.tex);
+            bindTexture(4, targets.softT.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uScenePrev, 1);
+            gl.uniform1i(u.uBg, 2);
+            gl.uniform1i(u.uPrev, 3);
+            gl.uniform1i(u.uSoftPrev, 4);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAlphaSil, 1 - Math.exp(-dt * 9));
+            gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-dt * 5.5));
+            gl.uniform1f(u.uDissolve, state.dissolve);
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+          });
+
+          // P3,P4 — soft pseudo-SDF: blur (silhouette, erosion) together.
+          // DISSOLVE widens the band (and with it, how deep erosion bites).
+          const sdfSigma = 3.0 + 5.0 * state.dissolve;
+          blurPass(fieldOut, targets.fieldTmp, targets.softT, sdfSigma);
+
+          // P5 — curl of the current velocity
+          renderPass(targets.curlT, programs.curl, () => {
+            const u = locations.curl;
+            bindTexture(0, targets.velA.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P6 — advect velocity + all forces
+          renderPass(targets.velB, programs.vel, () => {
+            const u = locations.vel;
+            bindTexture(0, targets.velA.tex);
+            bindTexture(1, targets.curlT.tex);
+            bindTexture(2, fieldOut.tex);
+            bindTexture(3, targets.softT.tex);
+            bindTexture(4, denPrev.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uCurl, 1);
+            gl.uniform1i(u.uField, 2);
+            gl.uniform1i(u.uSoft, 3);
+            gl.uniform1i(u.uDen, 4);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uSwirl, state.swirl);
+          });
+
+          // P7 — divergence
+          renderPass(targets.divT, programs.div, () => {
+            const u = locations.div;
+            bindTexture(0, targets.velB.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P8..P31 — Jacobi pressure solve (fixed iteration count,
+          // warm-started from last frame's pressure; even count keeps the
+          // ping-pong parity stable across frames)
+          let prsIn = targets.prsA;
+          let prsOut = targets.prsB;
+          for (let i = 0; i < JACOBI_ITERATIONS; i++) {
+            const src = prsIn;
+            renderPass(prsOut, programs.jacobi, () => {
+              const u = locations.jacobi;
+              bindTexture(0, src.tex);
+              bindTexture(1, targets.divT.tex);
+              gl.uniform1i(u.uPrs, 0);
+              gl.uniform1i(u.uDiv, 1);
+              gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            });
+            const swap = prsIn;
+            prsIn = prsOut;
+            prsOut = swap;
+          }
+
+          // P32 — projection (velB − ∇p → velA)
+          renderPass(targets.velA, programs.proj, () => {
+            const u = locations.proj;
+            bindTexture(0, targets.velB.tex);
+            bindTexture(1, prsIn.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uPrs, 1);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P33 — density: advect + dissipate + inject from the band
+          renderPass(denOut, programs.den, () => {
+            const u = locations.den;
+            bindTexture(0, denPrev.tex);
+            bindTexture(1, targets.velA.tex);
+            bindTexture(2, fieldOut.tex);
+            bindTexture(3, targets.softT.tex);
+            gl.uniform1i(u.uDen, 0);
+            gl.uniform1i(u.uVel, 1);
+            gl.uniform1i(u.uField, 2);
+            gl.uniform1i(u.uSoft, 3);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uEmission, state.emission);
+            gl.uniform1f(u.uDissolve, state.dissolve);
+          });
+
+          // P34 — emission (density ramp + band glow, or the lamp specimen)
+          renderPass(targets.emisT, programs.emis, () => {
+            const u = locations.emis;
+            bindTexture(0, denOut.tex);
+            bindTexture(1, targets.softT.tex);
+            bindTexture(2, fieldOut.tex);
+            gl.uniform1i(u.uDen, 0);
+            gl.uniform1i(u.uSoft, 1);
+            gl.uniform1i(u.uField, 2);
+            gl.uniform1f(u.uGlow, state.glow);
+            gl.uniform3fv(u.uRampA, hexToRgb(preset.ramp[0]));
+            gl.uniform3fv(u.uRampB, hexToRgb(preset.ramp[1]));
+            gl.uniform3fv(u.uRampC, hexToRgb(preset.ramp[2]));
+            gl.uniform3fv(u.uBandCol, hexToRgb(preset.band));
+            gl.uniform1i(u.uSpecimen, state.debugView === 7 ? 1 : 0);
+          });
+
+          // P35 — afterglow feedback (AFTERGLOW sets the decay length)
+          const fbDecay = Math.exp(
+            -dt * (2.8 + (0.22 - 2.8) * state.trail),
+          );
+          renderPass(fbOut, programs.fb, () => {
+            const u = locations.fb;
+            bindTexture(0, targets.emisT.tex);
+            bindTexture(1, fbPrev.tex);
+            gl.uniform1i(u.uEmis, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform1f(u.uDecay, fbDecay);
+          });
+
+          // P36..P39 — two-stage separable bloom from the afterglow buffer
+          blurPass(fbOut, targets.b1Tmp, targets.b1, 2.4);
+          blurPass(targets.b1, targets.b2Tmp, targets.b2, 2.4);
+
+          // P40 — composite to screen
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, fieldOut.tex);
+            bindTexture(2, targets.softT.tex);
+            bindTexture(3, denOut.tex);
+            bindTexture(4, targets.velA.tex);
+            bindTexture(5, bgOut.tex);
+            bindTexture(6, fbOut.tex);
+            bindTexture(7, targets.b1.tex);
+            bindTexture(8, targets.b2.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uField, 1);
+            gl.uniform1i(u.uSoft, 2);
+            gl.uniform1i(u.uDen, 3);
+            gl.uniform1i(u.uVel, 4);
+            gl.uniform1i(u.uBg, 5);
+            gl.uniform1i(u.uFb, 6);
+            gl.uniform1i(u.uB1, 7);
+            gl.uniform1i(u.uB2, 8);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform2f(u.uSoftTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uGrade, state.grade);
+            gl.uniform1f(u.uRim, state.rimLight);
+            gl.uniform1f(u.uGlow, state.glow);
+            gl.uniform1f(u.uGrain, state.grain);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform3fv(u.uRimL, hexToRgb(preset.rimL));
+            gl.uniform3fv(u.uRimR, hexToRgb(preset.rimR));
+            gl.uniform3fv(u.uToneS, hexToRgb(preset.toneShadow));
+            gl.uniform3fv(u.uToneM, hexToRgb(preset.toneMid));
+            gl.uniform3fv(u.uToneH, hexToRgb(preset.toneHigh));
+            gl.uniform3fv(u.uBokA, hexToRgb(preset.bokehA));
+            gl.uniform3fv(u.uBokB, hexToRgb(preset.bokehB));
+            gl.uniform3fv(u.uBandCol, hexToRgb(preset.band));
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+
+          scenePing = !scenePing;
+          bgPing = !bgPing;
+          fieldPing = !fieldPing;
+          denPing = !denPing;
+          fbPing = !fbPing;
+
+          // Verification hook: first real composited frame is on screen
+          // (works under ?freeze=1 and ?fakesource=1 too).
+          if (!readyStamped && hasInput) {
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            const bgState = FAKE
+              ? "SYNTH"
+              : learnPhase
+                ? `LEARNING ${Math.round((bgLearnT / LEARN_SECONDS) * 100)}%`
+                : "TRACKING";
+            readout.textContent = `FPS ${fps.toFixed(0)} / RES ${canvas.width}×${
+              canvas.height
+            } / FLUID ${fieldW}×${fieldH} / BG ${bgState}`;
+            updateChip(learnPhase, wallNow);
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. With ?fakesource=1 the synthetic scene drives the
+           pipeline whatever the camera does, but getUserMedia still runs so
+           the three error paths (secure context / permission / no camera)
+           stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay(
+            "requesting",
+            "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.",
+          );
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay(
+              "error",
+              "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8888) or HTTPS, then reload.",
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay(
+              "error",
+              "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.",
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+
+            cameraReady = true;
+            retryCamera.disabled = false;
+            // Fresh feed ⇒ relearn the background from scratch.
+            if (!FAKE) bgLearnT = 0;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay(
+                "error",
+                "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true },
+              );
+            } else if (
+              name === "NotFoundError" ||
+              name === "OverconstrainedError"
+            ) {
+              setOverlay(
+                "error",
+                "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true },
+              );
+            } else {
+              setOverlay(
+                "error",
+                "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true },
+              );
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => {
+          startCamera();
+        });
+
+        document.addEventListener("visibilitychange", () => {
+          // Avoid a dt spike (and a fluid impulse) when the tab returns.
+          if (!document.hidden) lastNow = performance.now();
+        });
+
+        window.addEventListener("beforeunload", stopCamera);
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          startCamera();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay(
+            "error",
+            "WEBGL SETUP ERROR",
+            error && error.message
+              ? error.message
+              : "Could not initialize the renderer.",
+          );
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
