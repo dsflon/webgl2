@@ -53,25 +53,26 @@
 
 ## Phase 2 — スキーマとテンプレート(1日)
 
-- [ ] `loop/schemas/invariants.schema.json`: S0 brief の停止条件。
+- [x] `loop/schemas/invariants.schema.json`: S0 brief の停止条件。
       **列構成は「合格の実物」`prompts/fable5_papercraft-cam_order.md` の不変量表に準拠**
       (不変量 5±2・各行に 不変量/担当軸/実装原理/外した場合+優先順。
       出典は行単位または brief の参照リストのどちらかで必須 — 参照が画像の場合があるため。
       指南書 Step 1「仕様を発明せず実物から採る」の遵守)
-- [ ] `loop/schemas/review.schema.json`: V2 レビュー出力
+- [x] `loop/schemas/review.schema.json`: V2 レビュー出力
       (不変量ごとの score 1〜5 / verdict / reasons / fix_instructions[§10語彙])
-- [ ] `loop/schemas/order_checklist.md`: S1 発注書 lint 定義
+- [x] `loop/schemas/order_checklist.md`: S1 発注書 lint 定義
       (必須節・規約ブロック同梱・技術注意同梱・スライダー6〜10本・§5語彙≥3・
       検証手順同梱)と、それを機械判定する `verify_order.mjs`
-- [ ] `loop/templates/order_template.md`: 制作規約 §3.1 + §4 + §9 を同梱した穴埋めテンプレ
+- [x] `loop/templates/order_template.md`: 制作規約 §3.1 + §4 + §9 を同梱した穴埋めテンプレ
       (papercraft-cam 発注書を一般化)
-- [ ] `loop/templates/maker_prompt.md`: S2 実装者への固定指示
+- [x] `loop/templates/maker_prompt.md`: S2 実装者への固定指示
       (入力は発注書のみ・修正時はエラー原文のみに対応・指摘外を変えない)
-- [ ] `loop/templates/checker_prompt.md`: V2 レビュアーへの固定指示
+- [x] `loop/templates/checker_prompt.md`: V2 レビュアーへの固定指示
       (拒否する理由を探す・スクショ+不変量表のみ・review.schema.json で出力)
-- [ ] 破壊テスト: 不変量が3個しかない brief / スライダー4本の発注書が
-      フィールド単位で不合格になる
-- [ ] リスク認識の明記: 発注書 lint の「合格の実物」は**サンプルが1つしかない**
+- [x] 破壊テスト: 不変量が**2個**しかない brief / スライダー**5本**の発注書が
+      フィールド単位で不合格になる(注: 5±2=3〜7 のため「3個」は合格が正。
+      計画の記述を実態に合わせて修正した)
+- [x] リスク認識の明記: 発注書 lint の「合格の実物」は**サンプルが1つしかない**
       (papercraft-cam)。lint は当面「必須節の存在」など保守的なルールに留め、
       Phase 4 パイロットで2本目の発注書が通ってから厳格化する
 
@@ -80,18 +81,20 @@
 
 ## Phase 3 — オーケストレーション(スキル化。1〜2日)
 
-- [ ] `.claude/skills/art-loop/SKILL.md`: ループランナーの手順書
+- [x] `.claude/skills/art-loop/SKILL.md`: ループランナーの手順書
       — S0〜S5 の実行順序、状態ファイルの読み書き、サブエージェントの起動と
       入力の隔離(Maker に会話文脈を渡さない)、修正ループの規律(エラー原文・
       指摘箇所のみ・上限で needs_review)、実行サマリの書式
-- [ ] サーキットブレーカー実装: ステージ別 attempts 上限(S0/S1=2, S2/S3/S4=3)、
+- [x] サーキットブレーカー実装: ステージ別 attempts 上限(S0/S1=2, S2/S3/S4=3)、
       1実行タイムアウト(60分)、`cost` 記録
-- [ ] `/art-loop <テーマ>` と `/art-loop next`(themes.md から Discovery)と
+- [x] `/art-loop <テーマ>` と `/art-loop next`(themes.md から Discovery)と
       `/art-loop status`(state 一覧と needs_review Inbox 表示)
-- [ ] **モック両経路テスト**(指南書 Step 6 の受入条件):
+- [x] **モック両経路テスト**(指南書 Step 6 の受入条件):
       わざと1回目に V1 不合格となる出力を作らせ「2回目に合格」経路と、
       修正不能な欠陥で「上限超過→needs_review+理由の仮説」経路の両方を通す
-- [ ] 中断・再開テスト: S3 完了時点で実行を打ち切り、再実行が S4 から始まる
+      (selftest.mjs §G。状態機械+verify_static によるメカニクス検証。
+       スキル実走での確認は Phase 4 パイロットが兼ねる)
+- [x] 中断・再開テスト: S3 完了時点で実行を打ち切り、再実行が S4 から始まる
 
 **受入条件**: モック両経路+中断再開の3テストが通り、実行サマリ
 (ステージ別 attempts / 検証結果 / コスト / 次アクション)が出る。
