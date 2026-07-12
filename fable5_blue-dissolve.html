@@ -584,8 +584,8 @@
           ["swirl", "VORTEX", "vorticity + curl-noise turbulence", 0, 1, 0.01],
           ["glow", "GLOW", "emission ramp brightness + bloom", 0, 1, 0.01],
           ["trail", "AFTERGLOW", "feedback persistence of the glow", 0, 1, 0.01],
-          ["grade", "NIGHT GRADE", "split toning + backdrop (0 = raw feed)", 0, 1, 0.01],
-          ["rimLight", "POLICE LIGHTS", "red/blue rims + background bokeh", 0, 1, 0.01],
+          ["grade", "NIGHT GRADE", "surroundings: 0 = raw color feed, 1 = dark night backdrop", 0, 1, 0.01],
+          ["rimLight", "POLICE LIGHTS", "background bokeh (+ rims when solid)", 0, 1, 0.01],
           ["grain", "FILM GRAIN", "static grain + shadow dither", 0, 1, 0.01],
         ];
 
@@ -1425,9 +1425,9 @@
               float disc = 1.0 - smoothstep(r * 0.55, r, distance(p, c));
               bok += lc * disc * fl * (0.14 + 0.30 * hash12(vec2(fi, 6.0)));
             }
-            // gas mode removes the red/blue bokeh entirely — the density
-            // look is monochrome (POLICE LIGHTS still applies in solid mode)
-            col += bok * (0.35 + 1.3 * uRim) * (1.0 - uBody);
+            // bokeh follows POLICE LIGHTS only — the surroundings are
+            // governed by NIGHT GRADE, independent of the gas figure
+            col += bok * (0.35 + 1.3 * uRim);
             return col;
           }
           void main() {
@@ -1513,9 +1513,10 @@
               rim * mix(0.35, 1.0, uGrade);
             vec3 bodyCol = mix(solidCol, voidCol, uBody);
             float bodyMask = smoothstep(0.50, 0.565, q);
-            // gas mode: monochrome-ize and darken the backdrop so the
-            // plumes carry the image, like the raw density view
-            bgCol = mix(bgCol, vec3(lumaf(bgCol)) * 0.55, uBody);
+            // The surroundings keep their own treatment: NIGHT GRADE alone
+            // decides between the raw color feed (0) and the dark backdrop
+            // (1). Only the FIGURE is monochrome gas — going gas-body does
+            // not force the room dark.
             vec3 col = mix(bgCol, bodyCol, bodyMask);
 
             if (uDebug != 5) {
