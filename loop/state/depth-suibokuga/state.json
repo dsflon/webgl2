@@ -1,0 +1,36 @@
+{
+  "slug": "depth-suibokuga",
+  "theme": "深度の三遠を持つ水墨山水 — 遠くの被写体ほど淡く滲む",
+  "status": "needs_review",
+  "attempts": {
+    "brief": 1,
+    "order": 1,
+    "implement": 1,
+    "runtime": 1,
+    "aesthetic": 3
+  },
+  "last_error": [
+    {
+      "path": "common.artifact_free",
+      "rule": "aesthetic.common_below_4",
+      "severity": "error",
+      "message": "artifact_free=3 (要 ≥4)。無彩色の墨階調(inv4)・遠近の墨減衰(inv1)・境界の墨溜まり(inv2)・静的グレイン(inv3)・深度分離(inv5)はいずれも各スクリーンショットで反証でき 4 点。ただし crop.png で最近景である顔・髪シルエット外周に、背景で説明できない明るいエッジハロ(グロー/マット)が等倍で明瞭に見え、後処理の誤魔化しの兆候かつ near=輪郭明瞭の様式と矛盾するため artifact_free を 3 とし verdict は fail。修正方向: 前景シルエットのエッジグロー/ブルーム強度を 0 方向へ下げ、depth-conditioned dilution の bleed 半径(sigma)を近景(小depth)画素で縮小して最近景の輪郭を鋭く保ち、代わりに高コントラスト境界の edge_darkening 量を約1.5倍に上げて縁が明ハロでなく暗く溜まるようにする。",
+      "fix_instructions": [
+        "crop.png で確認: 最近景の顔・髪シルエット外周に、背景より明るい淡色のエッジハロ(グロー/マット)が等倍で残存。これは後処理の誤魔化しに見え『近景=輪郭明瞭』とも矛盾する。この明環を除去すること。",
+        "エッジグロー/リム強度を 0 方向へ下げる(明るいリムを出す加算・オーバーシュート項を near で切る)。",
+        "近景(depth大)の bleed 半径を縮小し、にじみ場が silhouette 外へ明色をにじませないようにする。",
+        "edge_darkening を約1.5倍にして境界を明ではなく暗で締める(墨のにじみは縁が暗くなるのが正)。"
+      ]
+    }
+  ],
+  "requires_human": true,
+  "blocked_reason": "S4 収束途中でサーキットブレーカー(60分)超過・aesthetic attempts 3/3 到達。到達点: 5不変量すべて≥4 + style_holds=4 + subject_readable=4。最後まで残った未達は artifact_free=3(近景シルエット外周の明環)1軸のみ。最終修正で原因(finalFS の interior 持ち上げ項がシルエット外周で誤発火)を特定・除去し、オーケストレータ目視では明環はほぼ解消。ただし Checker による2連続パスは未取得。要人間: (1) 最終 crop の明環が許容範囲かの趣味判断→OKなら Checker 再走で aesthetic_ok 化可能 (2) 不変量表の真偽照合 (3) 実推論経路(LiteRT.js 実.tflite)のスパイク=環境制約で全行程未検証",
+  "resume_stage": "aesthetic",
+  "cost": {
+    "loops": 7,
+    "approx_tokens": 878000,
+    "wall_minutes": 303
+  },
+  "pr_url": null,
+  "updated_at": "2026-07-12T15:35:22.039Z"
+}

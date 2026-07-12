@@ -1,0 +1,1926 @@
+<!doctype html>
+<!--
+  fable5_depth-suibokuga.html — WebGL2 webcam → 深度三遠の水墨山水
+
+  発注書: prompts/fable5_depth-suibokuga_order.md
+  ディレクション規約: AI_DIRECTION_GUIDE.md / ML 指南: LITERT_GUIDE.md
+  参照実装: fable5_papercraft-cam.html(カメラ・UI・エラー経路・状態チップの規約を踏襲)
+
+  ■ 概要
+    Web カメラ映像をリアルタイムに水墨山水画として描画する。単眼深度推定で奥行きを推定し、
+    深度を「三遠」(遠・中・近)の墨の階調に写像する。近景ほど墨は濃く輪郭が明瞭、遠景ほど
+    墨は淡く輪郭が大気に溶ける(空気遠近)。被写体の形態は白→黒の階調境界で顔料が縁に溜まる
+    水墨のにじみに置き換わり、紙の繊維に沿った粒状ムラが物質感を作る。
+
+  ■ 様式解析の要約(視覚的不変量、優先順 1>2>4>3>5)
+    1. 深度に応じて墨の濃度と輪郭の明瞭さが減衰し、遠景ほど淡く大気に溶ける(depth-conditioned
+       dilution / 三遠の空気遠近)。輝度だけでは遠い暗部と近い暗部を区別できない。
+    2. 白→黒の階調境界で顔料が縁に溜まり内側が抜ける水墨のにじみ(threshold diffusion の反復
+       拡散 + edge darkening)。
+    4. 墨は無彩色〜わずかな冷暖のみ、白紙・清・淡・重・濃・焦の段階的階調(輝度ゾーン別 split
+       toning)。
+    3. 紙の繊維に沿った顔料の粒状ムラ(cell-hash 由来の静的グレイン paper granulation。時間
+       シード禁止)。
+    5. 被写体が前後に動くと所属する「遠」が変わり、墨が遅れて滑らかに追従(depth EMA ping-pong)。
+
+  ■ パイプライン図(コンポジットは毎フレーム、深度推論のみ非同期分離)
+    video ─►[P0 scene] cover-fit + mirror(UV反転)              RGBA8  paint(長辺≤1408)
+      深度供給:
+        実推論 → LiteRT.js 独立ループ(256px角入力・in-flight 1)→ 正規化 u8 → depthRaw(R8)
+        合成   → ?fakesource=1 / モデル失敗時 → シェーダ内 synthDepth()(供給元差し替え1点)
+    [P2 ema]   depthRaw or synth → depth EMA ping-pong           R16F  proc(長辺~320)
+    [P3 ink]   scene + depthEMA → 墨密度場(輝度+勾配+深度希釈)   R16F  ink(長辺~760)
+    [P4/P5]    inkRaw を分離ガウスで反復拡散(H,V)×2 → inkSoft    R16F  ink
+    [P6 final] scene + depthEMA + inkRaw + inkSoft → 画面
+               depth-conditioned dilution + edge darkening + split toning(墨の五彩)
+               + paper granulation(cell-hash)+ vignette
+    uDebug: RAW DEPTH / SMOOTH DEPTH / INK / FINAL(既定)
+
+  ■ 実行方法
+    python3 -m http.server 8888
+    → http://localhost:8888/fable5_depth-suibokuga.html を開きカメラを許可
+    (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    初回は深度モデルのダウンロードが走ります(ネット到達不可時は合成深度で継続)。
+    ?fakesource=1 … 推論の代わりに合成深度場で全パスを駆動(検証・標本用)
+    ?freeze=1     … 時間駆動アニメーション(合成前景の漂い)を停止し決定的静止フレームを出す
+
+  ■ スライダーの説明
+    Ink strength    墨化の全体強度(写真 ↔ 墨)
+    Sanyen dilution 深度による遠方の墨の希釈(三遠の効き)
+    Depth calm      深度 EMA の時定数(追従の速さ ↔ 落ち着き)
+    Bleed radius    にじみ(threshold diffusion)の反復量
+    Edge darkening  にじみ境界の顔料溜まりの暗さ
+    Paper grain     紙の粒状(paper granulation)量
+    Sumi five-tones split toning の階調分割(墨の五彩の効き)
+    Paper warmth    紙と墨の冷暖(冷=青墨 ↔ 暖=茶墨)
+
+  ■ 依存(リポジトリ規約の ML 例外・LITERT_GUIDE §8 の許可リスト)
+    @litertjs/core(CDN・バージョンピン留め)+ Depth-Anything-V2-Small .tflite(候補)。
+    実推論経路は本サンドボックスで未検証(要人間スパイク)。機械検証は ?fakesource=1 の
+    合成深度で通す。描画は WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Sumi Sansui — WebGL2 depth-driven ink landscape</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #ece6d8;
+        --ink: #201d18;
+        --muted: rgba(32, 29, 24, 0.66);
+        --panel: rgba(243, 238, 227, 0.86);
+        --line: rgba(32, 29, 24, 0.18);
+        --accent: #4a4a52;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 72% 18%, rgba(120, 120, 130, 0.1), transparent 34%),
+          linear-gradient(150deg, #f2ede2, #e6dad0 55%, #ded4c6);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+      }
+
+      video {
+        position: fixed;
+        width: 1px;
+        height: 1px;
+        left: -10px;
+        top: -10px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .top-btn {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        z-index: 11;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: var(--panel);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left));
+      }
+
+      #flipCamera {
+        right: max(14px, env(safe-area-inset-right));
+        display: none;
+      }
+
+      @media (pointer: coarse) {
+        #flipCamera {
+          display: block;
+        }
+      }
+
+      #depthStatusChip {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 11;
+        padding: 7px 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        background: var(--panel);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        pointer-events: none;
+        transition: opacity 0.6s ease;
+        white-space: nowrap;
+      }
+
+      #depthStatusChip.hidden {
+        opacity: 0;
+      }
+
+      .panel {
+        position: fixed;
+        top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(360px, calc(100vw - 28px));
+        max-height: calc(100vh - 76px);
+        overflow: auto;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        backdrop-filter: blur(10px);
+        transition:
+          transform 0.25s ease,
+          opacity 0.25s ease;
+      }
+
+      .panel h1 {
+        margin: 0 0 6px;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--ink);
+      }
+
+      .panel p {
+        margin: 0 0 12px;
+        font-size: 10.5px;
+        line-height: 1.55;
+      }
+
+      .select-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 0 0 10px;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+
+      .select-row select {
+        flex: 1;
+        max-width: 210px;
+        padding: 5px 6px;
+        color: var(--ink);
+        background: rgba(32, 29, 24, 0.05);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        font: inherit;
+        font-size: 10.5px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 48px;
+        grid-template-areas:
+          "label out"
+          "slider slider";
+        gap: 2px 8px;
+        padding: 7px 0 2px;
+        border-top: 1px solid var(--line);
+      }
+
+      .row label {
+        grid-area: label;
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .row label span {
+        display: block;
+        font-size: 9.5px;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+
+      .row output {
+        grid-area: out;
+        justify-self: end;
+        font-size: 10.5px;
+        color: var(--accent);
+      }
+
+      .row input[type="range"] {
+        grid-area: slider;
+        width: 100%;
+        accent-color: var(--accent);
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0 2px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .buttons button {
+        flex: 1;
+        min-width: 100px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(32, 29, 24, 0.05);
+        font: inherit;
+        font-size: 10.5px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      .status {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+        font-size: 9.5px;
+        line-height: 1.7;
+        letter-spacing: 0.05em;
+      }
+
+      .badge {
+        display: inline-block;
+        margin-top: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 9px;
+        color: var(--muted);
+      }
+
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(20, 18, 14, 0.62);
+        backdrop-filter: blur(6px);
+        transition: opacity 0.3s ease;
+      }
+
+      #overlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .overlay-card {
+        max-width: 460px;
+        padding: 22px 24px;
+        text-align: center;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+
+      .overlay-card h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.16em;
+        color: var(--ink);
+      }
+
+      .overlay-card p {
+        margin: 0 0 14px;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+
+      .overlay-card .bar {
+        height: 6px;
+        margin: 0 0 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .overlay-card .bar i {
+        display: block;
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+        transition: width 0.2s ease;
+      }
+
+      .overlay-card button {
+        margin: 0 4px;
+        padding: 9px 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(32, 29, 24, 0.08);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+
+      @media (max-width: 640px) {
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 54vh;
+          padding: 12px;
+        }
+
+        .panel.collapsed {
+          transform: translateY(calc(100% + 18px));
+          opacity: 0;
+        }
+      }
+
+      @media (min-width: 641px) {
+        .panel.collapsed {
+          transform: translateX(calc(-100% - 22px));
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 depth-driven ink landscape webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn" aria-expanded="true">
+      HIDE UI
+    </button>
+    <button
+      id="flipCamera"
+      type="button"
+      class="top-btn"
+      aria-label="Switch camera"
+    >
+      REAR CAM
+    </button>
+    <div id="depthStatusChip">DEPTH · BOOTING</div>
+
+    <section id="panel" class="panel" aria-label="Sumi sansui webcam controls"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <div class="bar" id="overlayBar" hidden><i id="overlayBarFill"></i></div>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+        <button id="retryModel" type="button" hidden>RETRY DOWNLOAD</button>
+        <button id="continueSynth" type="button" hidden>CONTINUE OFFLINE</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const depthStatusChip = document.getElementById("depthStatusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const overlayBar = document.getElementById("overlayBar");
+        const overlayBarFill = document.getElementById("overlayBarFill");
+        const retryCamera = document.getElementById("retryCamera");
+        const retryModel = document.getElementById("retryModel");
+        const continueSynth = document.getElementById("continueSynth");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 — drive the whole style pipeline from a synthetic
+        // depth field instead of real inference (offline verification,
+        // specimen, debugging). The ONLY branch point is the depth source
+        // (the EMA pass), never the style passes downstream.
+        const SYNTH_SOURCE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 — stop time-driven animation (the drifting synthetic
+        // foreground) for deterministic still frames (repo hook convention).
+        const FREEZE = QUERY.get("freeze") === "1";
+
+        /* ------------------------------------------------------------------
+           ML dependency (LITERT_GUIDE §8 allowlist). Versions are pinned.
+           NOTE: the real-inference path is UNVERIFIED in this sandbox (no
+           HF/CDN reachability). Model URL + I/O spec are defensive candidates
+           pending a human spike (§4.7). Machine verification runs entirely on
+           ?fakesource=1 synthetic depth.
+        ------------------------------------------------------------------ */
+        const LITERT_CORE =
+          "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/dist/index.js";
+        const LITERT_WASM =
+          "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/wasm/";
+        const MODEL_URL =
+          "https://huggingface.co/litert-community/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.tflite";
+        const INFER_SIZE = 256; // 256px square offscreen (LITERT §4.4 / §M8)
+
+        /* ------------------------------------------------------------------
+           State & UI
+        ------------------------------------------------------------------ */
+
+        // Debug views (order fixed by the order document §4).
+        const DEBUG_MODES = ["RAW DEPTH", "SMOOTH DEPTH", "INK", "FINAL"];
+        const DEBUG_FINAL = 3;
+
+        const DEFAULTS = {
+          inkStrength: 0.8,
+          depthDilution: 0.7,
+          depthCalm: 0.6,
+          bleedRadius: 0.5,
+          edgeDark: 0.55,
+          paperGrain: 0.4,
+          toneSplit: 0.6,
+          paperWarm: 0.1,
+        };
+
+        // "写真らしさ ↔ 様式の強さ" presets (order §6). Values applied to sliders.
+        const PRESETS = {
+          heiho: {
+            label: "Heiho 平遠 (wide & pale)",
+            inkStrength: 0.65,
+            depthDilution: 0.85,
+            depthCalm: 0.7,
+            bleedRadius: 0.4,
+            edgeDark: 0.4,
+            paperGrain: 0.35,
+            toneSplit: 0.45,
+            paperWarm: 0.0,
+          },
+          shinen: {
+            label: "Shinen 深遠 (deep contrast)",
+            inkStrength: 0.9,
+            depthDilution: 0.55,
+            depthCalm: 0.55,
+            bleedRadius: 0.45,
+            edgeDark: 0.7,
+            paperGrain: 0.4,
+            toneSplit: 0.8,
+            paperWarm: -0.15,
+          },
+          hatsuboku: {
+            label: "Hatsuboku 溌墨 (splashed ink)",
+            inkStrength: 0.85,
+            depthDilution: 0.6,
+            depthCalm: 0.5,
+            bleedRadius: 0.85,
+            edgeDark: 0.75,
+            paperGrain: 0.5,
+            toneSplit: 0.55,
+            paperWarm: 0.15,
+          },
+        };
+
+        const state = {
+          ...DEFAULTS,
+          preset: "heiho",
+          debugView: DEBUG_FINAL,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        // [key, label, hint, min, max, step] — id === key (order §6).
+        const uiRows = [
+          ["inkStrength", "Ink strength", "photo ↔ ink wash", 0, 1, 0.01],
+          [
+            "depthDilution",
+            "Sanyen dilution",
+            "far-distance ink dilution (three-distance)",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "depthCalm",
+            "Depth calm",
+            "depth EMA time constant (steady ↔ responsive)",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "bleedRadius",
+            "Bleed radius",
+            "threshold-diffusion iterations",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "edgeDark",
+            "Edge darkening",
+            "pigment pooling at wet edges",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "paperGrain",
+            "Paper grain",
+            "paper-fiber granulation",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "toneSplit",
+            "Sumi five-tones",
+            "split-toning tonal steps",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "paperWarm",
+            "Paper warmth",
+            "cool blue-ink ↔ warm brown-ink",
+            -1,
+            1,
+            0.01,
+          ],
+        ];
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        panel.innerHTML = `
+          <h1>FABLE5 · SUMI SANSUI</h1>
+          <p>
+            Monocular depth mapped onto the three distances of ink-wash
+            landscape: near forms carry dense, sharp sumi; far forms dilute
+            and dissolve into atmosphere. Wet edges pool pigment, split-toning
+            gives the five ink tones, and static paper grain adds fiber.
+          </p>
+          <div class="select-row">
+            <span>PRESET</span>
+            <select id="preset" aria-label="Look preset">
+              ${Object.entries(PRESETS)
+                .map(
+                  ([key, p]) =>
+                    `<option value="${key}"${
+                      key === state.preset ? " selected" : ""
+                    }>${p.label}</option>`,
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>DEBUG VIEW</span>
+            <select id="debugView" aria-label="Debug view">
+              ${DEBUG_MODES.map(
+                (label, i) =>
+                  `<option value="${i}"${
+                    i === state.debugView ? " selected" : ""
+                  }>${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input
+                    id="${key}"
+                    type="range"
+                    min="${min}"
+                    max="${max}"
+                    step="${step}"
+                    value="${state[key]}"
+                  />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>Mirror webcam</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>Pause drift</span>
+            <input id="pauseAnim" type="checkbox" ${
+              state.pauseAnim ? "checked" : ""
+            } />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / RES -- / INFER -- / DEPTH --</div>
+            <div id="depthStatusRow">DEPTH · BOOTING</div>
+            <span class="badge">WebGL2 · LiteRT.js depth · sumi sansui</span>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function syncSliders() {
+          uiRows.forEach(([key]) => {
+            document.getElementById(key).value = state[key];
+            document.getElementById(`${key}Out`).textContent = formatValue(
+              state[key],
+            );
+          });
+        }
+
+        document.getElementById("preset").addEventListener("change", (event) => {
+          state.preset = event.currentTarget.value;
+          const p = PRESETS[state.preset];
+          uiRows.forEach(([key]) => {
+            if (key in p) state[key] = p[key];
+          });
+          syncSliders();
+        });
+
+        document
+          .getElementById("debugView")
+          .addEventListener("change", (event) => {
+            state.debugView = Number(event.currentTarget.value);
+          });
+
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+
+        document
+          .getElementById("pauseAnim")
+          .addEventListener("change", (event) => {
+            state.pauseAnim = event.currentTarget.checked;
+          });
+
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.assign(state, DEFAULTS);
+          syncSliders();
+        });
+
+        togglePanel.addEventListener("click", () => {
+          const collapsed = panel.classList.toggle("collapsed");
+          togglePanel.textContent = collapsed ? "SHOW UI" : "HIDE UI";
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        });
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode =
+            state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          // preserveDrawingBuffer is on, so the current frame exports directly.
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-sumi-sansui-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        let overlayKind = "requesting";
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayKind = kind;
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          retryModel.hidden = !buttons.retryModel;
+          continueSynth.hidden = !buttons.continueSynth;
+          overlayBar.hidden = !buttons.progress;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // R16F render targets keep the depth EMA and ink diffusion off 8 bits.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0),
+            vec2( 3.0, -1.0),
+            vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // P0 — webcam cover-fit + mirror into the working scene buffer.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform int uMirror;
+          void main() {
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scl = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scl + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P2 — depth EMA ping-pong. Reads the raw inference upload
+        // (top-down, unmirrored) OR the synthetic field. This shader is the
+        // SINGLE place the fakesource / offline branch lives (uSynth).
+        const emaFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uRaw;
+          uniform sampler2D uPrev;
+          uniform float uAlpha;
+          uniform float uTime;
+          uniform int uMirror;
+          uniform int uSynth;
+          uniform int uHasDepth;
+
+          // Synthetic depth (near = large, far = small): a smooth near→far
+          // vertical gradient + a distant ridge + a foreground bank + a
+          // drifting foreground silhouette. The silhouette sweeps L↔R so the
+          // temporal invariant (#5) is exercised under ?fakesource=1.
+          float synthDepth(vec2 uv, float t) {
+            float base = mix(0.80, 0.16, uv.y);          // sky far ↔ ground near
+            float ridge = 0.34 + 0.05 * sin(uv.x * 6.2831);
+            base = max(base, (uv.y > ridge ? 0.0 : 0.30));
+            float bank = 1.0 - smoothstep(0.0, 0.24, uv.y);
+            base = max(base, bank * 0.86);               // near foreground bank
+            float cx = 0.5 + 0.26 * sin(t * 0.5);        // drifting silhouette
+            float d = distance((uv - vec2(cx, 0.52)) * vec2(1.0, 1.35), vec2(0.0));
+            float fig = 1.0 - smoothstep(0.13, 0.30, d);
+            base = max(base, fig * 0.94);
+            return clamp(base, 0.0, 1.0);
+          }
+
+          void main() {
+            float cur;
+            if (uSynth == 1) {
+              cur = synthDepth(vUv, uTime);
+            } else {
+              // typed-array upload is top-down & unmirrored; match the scene
+              // mirror here (tech notes 10/15).
+              vec2 suv = vec2(uMirror == 1 ? 1.0 - vUv.x : vUv.x, 1.0 - vUv.y);
+              cur = texture(uRaw, suv).r;
+            }
+            float prev = texture(uPrev, vUv).r;
+            float d = uHasDepth == 1 ? mix(prev, cur, uAlpha) : 0.5;
+            fragColor = vec4(d, 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P3 — ink density field: subject darkness + structure gradient,
+        // then depth-conditioned dilution (far → less ink).
+        const inkFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uFlat;
+          uniform sampler2D uDepth;
+          uniform vec2 uTexel;
+          uniform float uDilution;
+          uniform float uDepthMix;
+          float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            vec3 c = texture(uFlat, vUv).rgb;
+            float L = luma(c);
+            float lx1 = luma(texture(uFlat, vUv + vec2(uTexel.x, 0.0)).rgb);
+            float lx0 = luma(texture(uFlat, vUv - vec2(uTexel.x, 0.0)).rgb);
+            float ly1 = luma(texture(uFlat, vUv + vec2(0.0, uTexel.y)).rgb);
+            float ly0 = luma(texture(uFlat, vUv - vec2(0.0, uTexel.y)).rgb);
+            float edge = length(vec2(lx1 - lx0, ly1 - ly0));
+            // black-point + gain: keep paper clean while pushing dark subjects
+            // toward 焦 (true black) so the five tones span the full range.
+            float darkness = clamp((1.0 - L - 0.06) * 1.35, 0.0, 1.0);
+            float raw = clamp(darkness * 1.05 + edge * 1.5, 0.0, 1.0);
+            float dep = mix(0.5, texture(uDepth, vUv).r, uDepthMix);
+            float farness = clamp(1.0 - dep, 0.0, 1.0);
+            // steeper depth→opacity slope; far end drops to ~0.35 (three-distance).
+            float dil = 1.0 - uDilution * pow(farness, 0.85) * 0.9;
+            fragColor = vec4(raw * dil, 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P4/P5 — separable Gaussian used as an iterated diffusion kernel
+        // (threshold diffusion / にじみ). Run H then V, twice.
+        // Depth-scaled radius (uDepth): near pixels (large depth) diffuse over a
+        // much smaller sigma so the bright near interior does NOT bleed its low
+        // ink outward past the silhouette (invariant #1, near = sharp contour);
+        // far pixels keep the full bleed for the atmospheric dissolve. This is
+        // the depth-conditioned side of the halo fix (order §2 invariant #1).
+        const diffuseFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform sampler2D uDepth;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            float dCenter = texture(uDepth, vUv).r;
+            // Depth-scaled radius: near pixels (large depth) diffuse over a much
+            // SMALLER sigma so the bright near interior (face/paper, very low
+            // ink) does NOT bleed outward past the silhouette — that outward
+            // bleed was the light halo/mat. Far pixels keep the full bleed for
+            // atmospheric dissolve. Near stays sharp (invariant #1).
+            float sig = max(0.35, uSigma * mix(1.0, 0.28, dCenter));
+            float acc = 0.0;
+            float wsum = 0.0;
+            const int R = 12;
+            for (int i = -R; i <= R; ++i) {
+              float x = float(i);
+              vec2 uv = vUv + uDir * x;
+              float w = exp(-0.5 * x * x / (sig * sig));
+              acc += texture(uSrc, uv).r * w;
+              wsum += w;
+            }
+            fragColor = vec4(acc / max(wsum, 1e-4), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P6 — final sumi composite: depth-conditioned dilution (sharp↔diffused
+        // by farness), edge darkening (pigment pooling), split toning to the
+        // five ink tones, paper granulation, vignette. Depth is never shown
+        // raw here except in uDebug (LITERT §M1).
+        const finalFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uFlat;
+          uniform sampler2D uDepthRaw;
+          uniform sampler2D uDepth;
+          uniform sampler2D uInkRaw;
+          uniform sampler2D uInkSoft;
+          uniform vec2 uTexel;
+          uniform vec2 uResolution;
+          uniform float uInkStrength;
+          uniform float uDilution;
+          uniform float uEdgeDark;
+          uniform float uPaperGrain;
+          uniform float uToneSplit;
+          uniform float uPaperWarm;
+          uniform float uBleed;
+          uniform float uDepthMix;
+          uniform int uDebug;
+          uniform int uMirror;
+
+          float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+
+          // Soft-quantize a tone into six sumi steps (白紙・清・淡・重・濃・焦).
+          float quant5(float t) {
+            return floor(clamp(t, 0.0, 1.0) * 5.0 + 0.5) / 5.0;
+          }
+
+          void main() {
+            vec3 cam = texture(uFlat, vUv).rgb;
+            float dep = mix(0.5, texture(uDepth, vUv).r, uDepthMix);
+            float farness = clamp(1.0 - dep, 0.0, 1.0);
+            float fcurve = pow(farness, 0.85);
+
+            // Edge sharpness by depth: near crisp (1.0), far dissolved (0.2).
+            // This single knob both sharpens near contours and dissolves far
+            // ones — and, crucially, removes the near outward bloom that read
+            // as a light halo around the face. (invariant #1)
+            float edgeStrength = mix(0.2, 1.0, dep);
+
+            float inkSharp = texture(uInkRaw, vUv).r;
+            float inkBlur = texture(uInkSoft, vUv).r;
+            // depth-conditioned dilution: near keeps the SHARP ink field so no
+            // diffused overshoot spills past the silhouette (halo removed);
+            // far dissolves fully into the blurred field (atmosphere).
+            float diffAmt = clamp((1.0 - edgeStrength) * (0.6 + 0.5 * uDilution)
+                                  + uBleed * 0.12 * (1.0 - edgeStrength), 0.0, 1.0);
+            float ink = mix(inkSharp, inkBlur, diffAmt);
+
+            // edge darkening: pigment pools where the diffused field has a
+            // gradient; scaled by edgeStrength so near edges pool sharply and
+            // far edges dissolve rather than ring.
+            float gx = texture(uInkSoft, vUv + vec2(uTexel.x, 0.0)).r
+                     - texture(uInkSoft, vUv - vec2(uTexel.x, 0.0)).r;
+            float gy = texture(uInkSoft, vUv + vec2(0.0, uTexel.y)).r
+                     - texture(uInkSoft, vUv - vec2(0.0, uTexel.y)).r;
+            float grad = length(vec2(gx, gy));
+            float pool = grad * (0.6 + 1.6 * uEdgeDark) * edgeStrength;
+            // interior lifts (内側が抜ける): dense ink with low gradient. Gated
+            // by the SHARP ink too, so the lift only hollows the TRUE interior
+            // of a subject (where the un-blurred ink is genuinely dense) and NOT
+            // the ring just OUTSIDE a dark silhouette — there the blurred field
+            // is mid-range only because the silhouette bled into it, and the old
+            // blur-only gate lifted that ring into a light halo/mat. (artifact_free)
+            float interior = smoothstep(0.28, 0.72, inkBlur)
+                           * smoothstep(0.5, 0.78, inkSharp)
+                           * (1.0 - clamp(grad * 6.0, 0.0, 1.0));
+            float k = clamp(ink + pool - interior * 0.14 * uEdgeDark, 0.0, 1.0);
+            // three-distance opacity fade: far end drops to ~0.35 …
+            k *= 1.0 - uDilution * fcurve * 0.9;
+            // … plus a depth→brightness ramp so the far horizon reads paler.
+            k *= 1.0 - farness * farness * 0.25;
+
+            // paper granulation — static, seeded by pixel coords only.
+            float fib = vnoise(gl_FragCoord.xy * vec2(0.5, 0.9)) * 0.6
+                      + hash12(gl_FragCoord.xy) * 0.4;
+            float grain = fib - 0.5;
+            k *= 1.0 + grain * uPaperGrain * 0.5 * smoothstep(0.05, 0.6, k);
+            k = clamp(k, 0.0, 1.0);
+
+            // tone contrast expansion: deepen the dark end so near ink reaches
+            // 焦 (true black) instead of stalling at mid-gray.
+            float kc = clamp((k - 0.02) * 1.28, 0.0, 1.0);
+
+            // split toning → sumi five tones with cool/warm bias.
+            float tone = 1.0 - kc;                      // 1 paper .. 0 焦
+            float toned = mix(tone, quant5(tone), uToneSplit);
+            float w = uPaperWarm * 0.5 + 0.5;           // 0 cool .. 1 warm
+            vec3 paperCol = mix(vec3(0.90, 0.925, 0.955), vec3(0.965, 0.945, 0.90), w);
+            // darkest anchor lowered to ~0.06 so 焦 is a real black end.
+            vec3 inkCol = mix(vec3(0.045, 0.055, 0.075), vec3(0.075, 0.06, 0.045), w);
+            vec3 sumi = mix(inkCol, paperCol, toned);
+            // zone split-toning (invariant #4): shadows lean faintly cool
+            // (blue), highlights faintly warm (yellow), kept low-chroma.
+            float shadowW = 1.0 - smoothstep(0.0, 0.5, toned);
+            float highW = smoothstep(0.5, 1.0, toned);
+            vec3 coolTint = vec3(-0.006, 0.0, 0.012);
+            vec3 warmTint = vec3(0.012, 0.006, -0.010);
+            sumi += (coolTint * shadowW + warmTint * highW) * uToneSplit;
+            sumi *= 1.0 + grain * uPaperGrain * 0.06;
+            sumi = clamp(sumi, 0.0, 1.0);
+
+            // Split toning weights by chroma: sumi is achromatic, so the ink
+            // axis first desaturates the photo, then low-chroma pixels pull
+            // hardest into the five-tone palette (invariant #4). High-chroma
+            // subjects keep a faint trace so they stay legible.
+            float sat = max(max(cam.r, cam.g), cam.b)
+                      - min(min(cam.r, cam.g), cam.b);
+            vec3 photo = mix(cam, vec3(luma(cam)), uInkStrength);
+            float pull = uInkStrength * mix(1.0, 0.82, smoothstep(0.15, 0.5, sat));
+            vec3 col = mix(photo, sumi, pull);
+
+            // gentle vignette (static).
+            vec2 q = (vUv - 0.5) * vec2(uResolution.x / uResolution.y, 1.0);
+            col *= mix(0.9, 1.0, smoothstep(1.1, 0.4, length(q)));
+
+            if (uDebug == 0) {
+              vec2 ruv = vec2(uMirror == 1 ? 1.0 - vUv.x : vUv.x, 1.0 - vUv.y);
+              col = vec3(texture(uDepthRaw, ruv).r);
+            } else if (uDebug == 1) {
+              col = vec3(texture(uDepth, vUv).r);
+            } else if (uDebug == 2) {
+              col = vec3(1.0 - k);
+            }
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            const log = gl.getShaderInfoLog(shader);
+            throw new Error(`Shader compile failed: ${log}`);
+          }
+          return shader;
+        }
+
+        function createProgram(fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, fullscreenVS));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          ema: createProgram(emaFS),
+          ink: createProgram(inkFS),
+          diffuse: createProgram(diffuseFS),
+          final: createProgram(finalFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo",
+            "uResolution",
+            "uVideoSize",
+            "uMirror",
+          ]),
+          ema: getLocations(programs.ema, [
+            "uRaw",
+            "uPrev",
+            "uAlpha",
+            "uTime",
+            "uMirror",
+            "uSynth",
+            "uHasDepth",
+          ]),
+          ink: getLocations(programs.ink, [
+            "uFlat",
+            "uDepth",
+            "uTexel",
+            "uDilution",
+            "uDepthMix",
+          ]),
+          diffuse: getLocations(programs.diffuse, [
+            "uSrc",
+            "uDepth",
+            "uDir",
+            "uSigma",
+          ]),
+          final: getLocations(programs.final, [
+            "uFlat",
+            "uDepthRaw",
+            "uDepth",
+            "uInkRaw",
+            "uInkSoft",
+            "uTexel",
+            "uResolution",
+            "uInkStrength",
+            "uDilution",
+            "uEdgeDark",
+            "uPaperGrain",
+            "uToneSplit",
+            "uPaperWarm",
+            "uBleed",
+            "uDepthMix",
+            "uDebug",
+            "uMirror",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type, data) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            internal,
+            width,
+            height,
+            0,
+            format,
+            type,
+            data || null,
+          );
+          return tex;
+        }
+
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.R16F : gl.RGBA8;
+          const format = useFloat && floatExt ? gl.RED : gl.RGBA;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, format, type);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0,
+          );
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+
+        const videoTexture = createTexture(
+          2,
+          2,
+          gl.RGBA,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+        );
+
+        // Raw depth upload target (R8, resized to the model output on arrival).
+        const depthRawTex = createTexture(
+          1,
+          1,
+          gl.R8,
+          gl.RED,
+          gl.UNSIGNED_BYTE,
+          new Uint8Array([128]),
+        );
+
+        let targets = null;
+        let paintW = 2;
+        let paintH = 2;
+        let procW = 2;
+        let procH = 2;
+        let inkW = 2;
+        let inkH = 2;
+        let emaNeedsReset = true;
+
+        function rebuildTargets() {
+          if (targets) {
+            Object.values(targets).forEach(destroyTarget);
+          }
+          targets = {
+            scene: createTarget(paintW, paintH, false),
+            emaA: createTarget(procW, procH, true),
+            emaB: createTarget(procW, procH, true),
+            inkRaw: createTarget(inkW, inkH, true),
+            inkA: createTarget(inkW, inkH, true),
+            inkB: createTarget(inkW, inkH, true),
+            blurTmp: createTarget(inkW, inkH, true),
+          };
+          emaNeedsReset = true;
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const paintScale = Math.min(1, 1408 / Math.max(width, height));
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            const procScale = 320 / Math.max(width, height);
+            procW = Math.max(2, Math.round(width * procScale));
+            procH = Math.max(2, Math.round(height * procScale));
+            const inkScale = Math.min(1, 760 / Math.max(width, height));
+            inkW = Math.max(2, Math.round(width * inkScale));
+            inkH = Math.max(2, Math.round(height * inkScale));
+            rebuildTargets();
+          }
+        }
+
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(
+            0,
+            0,
+            target ? target.width : canvas.width,
+            target ? target.height : canvas.height,
+          );
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        // One separable diffusion pass (H then V) src → dst via blurTmp.
+        // depthTex drives the depth-scaled radius so near ink diffuses less and
+        // does not bleed outward past the silhouette (removes the light halo).
+        function diffusePass(src, dst, sigma, depthTex) {
+          renderPass(targets.blurTmp, programs.diffuse, () => {
+            const u = locations.diffuse;
+            bindTexture(0, src.tex);
+            bindTexture(1, depthTex);
+            gl.uniform1i(u.uSrc, 0);
+            gl.uniform1i(u.uDepth, 1);
+            gl.uniform2f(u.uDir, 1 / targets.blurTmp.width, 0);
+            gl.uniform1f(u.uSigma, sigma);
+          });
+          renderPass(dst, programs.diffuse, () => {
+            const u = locations.diffuse;
+            bindTexture(0, targets.blurTmp.tex);
+            bindTexture(1, depthTex);
+            gl.uniform1i(u.uSrc, 0);
+            gl.uniform1i(u.uDepth, 1);
+            gl.uniform2f(u.uDir, 0, 1 / dst.height);
+            gl.uniform1f(u.uSigma, sigma);
+          });
+        }
+
+        /* ------------------------------------------------------------------
+           Depth engine — Depth Anything V2 small (.tflite) via LiteRT.js.
+           Inference runs in its own async loop, decoupled from rAF, in-flight
+           max 1 (LITERT §4.3). All Tensors freed in try/finally (§4.4).
+
+           IMPORTANT: this path is UNVERIFIED here (no HF/CDN reachability).
+           Model URL + I/O are defensive candidates; any failure falls back to
+           the synthetic depth field so the piece never stalls (§4.5 / §M5).
+        ------------------------------------------------------------------ */
+
+        const inferCanvas = document.createElement("canvas");
+        inferCanvas.width = INFER_SIZE;
+        inferCanvas.height = INFER_SIZE;
+        const inferCtx = inferCanvas.getContext("2d", {
+          willReadFrequently: true,
+        });
+
+        const depth = {
+          lib: null,
+          model: null,
+          backend: SYNTH_SOURCE ? "SYNTH" : "BOOTING", // BOOTING|WEBGPU|WASM|OFFLINE|SYNTH
+          hz: 0,
+          hasDepth: SYNTH_SOURCE,
+          useSynth: SYNTH_SOURCE, // synthetic-source branch flag (single point)
+          texW: 0,
+          texH: 0,
+          emaMin: null,
+          emaMax: null,
+          firstDepthAt: SYNTH_SOURCE ? performance.now() : 0,
+          failCount: 0,
+          inferBusy: false,
+        };
+
+        const depthStatusRow = document.getElementById("depthStatusRow");
+
+        function updateDepthStatus() {
+          let text;
+          if (depth.backend === "SYNTH") {
+            text = "DEPTH · SYNTHETIC (fakesource=1)";
+          } else if (depth.backend === "BOOTING") {
+            text = "DEPTH · BOOTING";
+          } else if (depth.backend === "OFFLINE") {
+            text = "DEPTH · OFFLINE (synthetic fallback)";
+          } else {
+            text = `DEPTH · ${depth.backend} ${depth.hz.toFixed(1)}Hz`;
+          }
+          depthStatusChip.textContent = text;
+          if (depthStatusRow) depthStatusRow.textContent = text;
+        }
+
+        function goOffline(err) {
+          if (err) console.warn("depth offline:", err);
+          depth.backend = "OFFLINE";
+          depth.useSynth = true; // fall back to synthetic depth source
+          depth.hasDepth = true;
+          if (!depth.firstDepthAt) depth.firstDepthAt = performance.now();
+          updateDepthStatus();
+          setOverlay(
+            "error",
+            "MODEL LOAD FAILED",
+            "Could not download or compile the depth model. Running on synthetic depth so the ink still flows. Retry the download, or keep the offline look.",
+            { retryModel: true, continueSynth: true },
+          );
+        }
+
+        async function initModel() {
+          if (SYNTH_SOURCE) return; // fakesource: never touch the network
+          depth.backend = "BOOTING";
+          updateDepthStatus();
+          try {
+            const lib = await import(LITERT_CORE);
+            depth.lib = lib;
+            await lib.loadLiteRt(LITERT_WASM);
+            // Prefer webgpu; explicitly demote to wasm on failure (§4.2).
+            let backend = "wasm";
+            if (navigator.gpu) {
+              try {
+                depth.model = await lib.loadAndCompile(MODEL_URL, {
+                  accelerator: "webgpu",
+                });
+                backend = "webgpu";
+              } catch (e) {
+                console.warn("webgpu compile failed, demoting to wasm", e);
+                depth.model = null;
+              }
+            }
+            if (!depth.model) {
+              depth.model = await lib.loadAndCompile(MODEL_URL, {
+                accelerator: "wasm",
+              });
+              backend = "wasm";
+            }
+            depth.backend = backend.toUpperCase();
+            updateDepthStatus();
+            inferLoop();
+          } catch (err) {
+            goOffline(err);
+          }
+        }
+
+        function sleep(ms) {
+          return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+
+        function drawInferFrame() {
+          // Same cover-fit crop as the scene pass, never mirrored: the shaders
+          // apply one shared UV flip to color and depth alike.
+          const cw = inferCanvas.width;
+          const ch = inferCanvas.height;
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          const ca = cw / ch;
+          const va = vw / vh;
+          let sw;
+          let sh;
+          if (va > ca) {
+            sh = vh;
+            sw = vh * ca;
+          } else {
+            sw = vw;
+            sh = vw / ca;
+          }
+          inferCtx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, cw, ch);
+        }
+
+        let normBuf = null;
+
+        // Defensive pre/post-processing for a Depth-Anything-style model:
+        // NCHW float32, /255 then ImageNet standardization; single-channel
+        // inverse-depth output min-max normalized to u8. Exact shape/dtype
+        // must be confirmed by a human spike (§4.7 / §M7).
+        function preprocess(imageData) {
+          const { data, width, height } = imageData;
+          const n = width * height;
+          const out = new Float32Array(3 * n);
+          const mean = [0.485, 0.456, 0.406];
+          const std = [0.229, 0.224, 0.225];
+          for (let i = 0; i < n; i++) {
+            out[i] = (data[i * 4] / 255 - mean[0]) / std[0]; // R plane
+            out[n + i] = (data[i * 4 + 1] / 255 - mean[1]) / std[1]; // G plane
+            out[2 * n + i] = (data[i * 4 + 2] / 255 - mean[2]) / std[2]; // B plane
+          }
+          return out;
+        }
+
+        function postprocess(raw, w, h) {
+          let mn = Infinity;
+          let mx = -Infinity;
+          for (let i = 0; i < raw.length; i++) {
+            const v = raw[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+          }
+          const range = Math.max(1e-6, mx - mn);
+          // Temporal normalization: EMA the range so layers do not pop.
+          if (depth.emaMin === null) {
+            depth.emaMin = mn;
+            depth.emaMax = mx;
+          } else {
+            depth.emaMin += (mn - depth.emaMin) * 0.25;
+            depth.emaMax += (mx - depth.emaMax) * 0.25;
+          }
+          const lo = depth.emaMin;
+          const rng = Math.max(1e-6, depth.emaMax - lo);
+          const count = w * h;
+          if (!normBuf || normBuf.length !== count) normBuf = new Uint8Array(count);
+          for (let i = 0; i < count; i++) {
+            let v = (raw[i] - lo) / rng;
+            v = v < 0 ? 0 : v > 1 ? 1 : v;
+            normBuf[i] = (v * 255) | 0;
+          }
+          return normBuf;
+        }
+
+        async function runInference() {
+          drawInferFrame();
+          const id = inferCtx.getImageData(0, 0, INFER_SIZE, INFER_SIZE);
+          const f32 = preprocess(id);
+          let input = null;
+          let gpuIn = null;
+          let outputs = null;
+          let cpuOut = null;
+          try {
+            input = new depth.lib.Tensor(f32, [1, 3, INFER_SIZE, INFER_SIZE]);
+            gpuIn =
+              depth.backend === "WEBGPU" ? await input.moveTo("webgpu") : input;
+            outputs = await depth.model.run(gpuIn);
+            const first = Array.isArray(outputs) ? outputs[0] : outputs;
+            cpuOut = await first.moveTo("wasm");
+            const arr = cpuOut.toTypedArray();
+            const dims = cpuOut.shape || [1, 1, INFER_SIZE, INFER_SIZE];
+            const h = dims[dims.length - 2];
+            const w = dims[dims.length - 1];
+            return { buf: postprocess(arr, w, h), w, h };
+          } finally {
+            // Free every Tensor even on the exception path (§4.4 / §M4).
+            if (gpuIn && gpuIn !== input) {
+              try {
+                gpuIn.delete();
+              } catch (_) {}
+            }
+            if (input) {
+              try {
+                input.delete();
+              } catch (_) {}
+            }
+            if (cpuOut) {
+              try {
+                cpuOut.delete();
+              } catch (_) {}
+            }
+            if (outputs) {
+              const list = Array.isArray(outputs) ? outputs : [outputs];
+              list.forEach((t) => {
+                try {
+                  if (t && t.delete) t.delete();
+                } catch (_) {}
+              });
+            }
+          }
+        }
+
+        function uploadDepth(buf, w, h) {
+          gl.bindTexture(gl.TEXTURE_2D, depthRawTex);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (depth.texW !== w || depth.texH !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, buf);
+            depth.texW = w;
+            depth.texH = h;
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, buf);
+          }
+          depth.hasDepth = true;
+          if (!depth.firstDepthAt) depth.firstDepthAt = performance.now();
+        }
+
+        async function inferLoop() {
+          for (;;) {
+            const canRun =
+              depth.model &&
+              !depth.useSynth &&
+              !depth.inferBusy &&
+              !document.hidden &&
+              cameraReady &&
+              video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+              video.videoWidth > 0;
+            if (!canRun) {
+              await sleep(120);
+              continue;
+            }
+            depth.inferBusy = true;
+            try {
+              const t0 = performance.now();
+              const res = await runInference();
+              uploadDepth(res.buf, res.w, res.h);
+              const ms = Math.max(1, performance.now() - t0);
+              depth.hz = depth.hz ? depth.hz * 0.7 + (1000 / ms) * 0.3 : 1000 / ms;
+              depth.failCount = 0;
+              updateDepthStatus();
+            } catch (err) {
+              depth.failCount++;
+              console.warn("inference failed", err);
+              if (depth.failCount >= 5) goOffline(err); // persistent → offline
+              await sleep(800);
+            } finally {
+              depth.inferBusy = false;
+            }
+            await sleep(15); // in-flight stays at most 1
+          }
+        }
+
+        /* ------------------------------------------------------------------
+           Render loop
+        ------------------------------------------------------------------ */
+
+        let stream = null;
+        let cameraReady = false;
+        let animationTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let depthMix = 0;
+        let emaPing = false;
+        let readyStamped = false;
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 &&
+            video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        function frame(now) {
+          resize();
+
+          const dt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          if (!state.pauseAnim) animationTime += dt;
+
+          const haveVideo = uploadVideoFrame();
+
+          const wantDepth = depth.hasDepth ? 1 : 0;
+          if (FREEZE) depthMix = wantDepth;
+          else depthMix += (wantDepth - depthMix) * Math.min(1, dt * 1.4);
+
+          const useSynth = depth.useSynth ? 1 : 0;
+
+          // P0 — scene (neutral gray until the camera delivers frames).
+          if (haveVideo) {
+            renderPass(targets.scene, programs.scene, () => {
+              const u = locations.scene;
+              bindTexture(0, videoTexture);
+              gl.uniform1i(u.uVideo, 0);
+              gl.uniform2f(u.uResolution, paintW, paintH);
+              gl.uniform2f(u.uVideoSize, video.videoWidth, video.videoHeight);
+              gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            });
+          } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targets.scene.fbo);
+            gl.viewport(0, 0, targets.scene.width, targets.scene.height);
+            gl.clearColor(0.55, 0.55, 0.55, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+          }
+
+          // P2 — depth EMA (ping-pong, dt-based time constant = Depth calm).
+          const emaPrev = emaPing ? targets.emaB : targets.emaA;
+          const emaOut = emaPing ? targets.emaA : targets.emaB;
+          emaPing = !emaPing;
+          const tau = 0.05 + Math.pow(state.depthCalm, 1.5) * 1.6;
+          let alpha = 1 - Math.exp(-dt / tau);
+          if (!floatExt) alpha = Math.max(alpha, 0.25);
+          if (emaNeedsReset) {
+            alpha = 1;
+            emaNeedsReset = false;
+          }
+          renderPass(emaOut, programs.ema, () => {
+            const u = locations.ema;
+            bindTexture(0, depthRawTex);
+            bindTexture(1, emaPrev.tex);
+            gl.uniform1i(u.uRaw, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform1f(u.uAlpha, alpha);
+            gl.uniform1f(u.uTime, animationTime);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uSynth, useSynth);
+            gl.uniform1i(u.uHasDepth, depth.hasDepth ? 1 : 0);
+          });
+
+          // P3 — ink density field (subject darkness + gradient, depth-diluted).
+          renderPass(targets.inkRaw, programs.ink, () => {
+            const u = locations.ink;
+            bindTexture(0, targets.scene.tex);
+            bindTexture(1, emaOut.tex);
+            gl.uniform1i(u.uFlat, 0);
+            gl.uniform1i(u.uDepth, 1);
+            gl.uniform2f(u.uTexel, 1 / inkW, 1 / inkH);
+            gl.uniform1f(u.uDilution, state.depthDilution);
+            gl.uniform1f(u.uDepthMix, depthMix);
+          });
+
+          // P4/P5 — iterated diffusion (にじみ). Two H+V rounds, ping-pong.
+          const sigma = 0.6 + state.bleedRadius * 6.0;
+          diffusePass(targets.inkRaw, targets.inkA, sigma, emaOut.tex);
+          diffusePass(targets.inkA, targets.inkB, sigma, emaOut.tex);
+          const inkSoft = targets.inkB;
+
+          // P6 — final sumi composite to screen.
+          renderPass(null, programs.final, () => {
+            const u = locations.final;
+            bindTexture(0, targets.scene.tex);
+            bindTexture(1, depthRawTex);
+            bindTexture(2, emaOut.tex);
+            bindTexture(3, targets.inkRaw.tex);
+            bindTexture(4, inkSoft.tex);
+            gl.uniform1i(u.uFlat, 0);
+            gl.uniform1i(u.uDepthRaw, 1);
+            gl.uniform1i(u.uDepth, 2);
+            gl.uniform1i(u.uInkRaw, 3);
+            gl.uniform1i(u.uInkSoft, 4);
+            gl.uniform2f(u.uTexel, 1 / inkW, 1 / inkH);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform1f(u.uInkStrength, state.inkStrength);
+            gl.uniform1f(u.uDilution, state.depthDilution);
+            gl.uniform1f(u.uEdgeDark, state.edgeDark);
+            gl.uniform1f(u.uPaperGrain, state.paperGrain);
+            gl.uniform1f(u.uToneSplit, state.toneSplit);
+            gl.uniform1f(u.uPaperWarm, state.paperWarm);
+            gl.uniform1f(u.uBleed, state.bleedRadius);
+            gl.uniform1f(u.uDepthMix, depthMix);
+            gl.uniform1i(u.uDebug, state.debugView);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // Verification hook: first composited frame is on screen.
+          if (!readyStamped && (depth.firstDepthAt || depth.hasDepth)) {
+            readyStamped = true;
+            window.__artReady = true;
+          }
+          if (depth.firstDepthAt) {
+            const since = now - depth.firstDepthAt;
+            depthStatusChip.classList.toggle("hidden", since > 4000);
+          }
+
+          fpsFrames++;
+          if (now - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (now - fpsLast);
+            fpsLast = now;
+            fpsFrames = 0;
+            const inferTxt =
+              depth.backend === "WEBGPU" || depth.backend === "WASM"
+                ? `${depth.hz.toFixed(1)}Hz`
+                : "--";
+            readout.textContent = `FPS ${fps.toFixed(0)} / RES ${canvas.width}×${
+              canvas.height
+            } / INFER ${inferTxt} / DEPTH ${depth.backend}`;
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay(
+            "requesting",
+            "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.",
+          );
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay(
+              "error",
+              "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8888) or HTTPS, then reload.",
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay(
+              "error",
+              "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.",
+            );
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+
+            cameraReady = true;
+            retryCamera.disabled = false;
+            // Don't wipe a model-error overlay that raced in while the camera
+            // prompt was up; resurface it instead.
+            if (overlayKind === "requesting") {
+              if (depth.backend === "OFFLINE") {
+                setOverlay(
+                  "error",
+                  "MODEL LOAD FAILED",
+                  "Could not download or compile the depth model. Running on synthetic depth so the ink still flows. Retry the download, or keep the offline look.",
+                  { retryModel: true, continueSynth: true },
+                );
+              } else {
+                setOverlay("hidden", "", "");
+              }
+            }
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay(
+                "error",
+                "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true },
+              );
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay(
+                "error",
+                "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true },
+              );
+            } else {
+              setOverlay(
+                "error",
+                "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true },
+              );
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => {
+          startCamera();
+        });
+
+        retryModel.addEventListener("click", () => {
+          setOverlay("hidden", "", "");
+          depth.useSynth = SYNTH_SOURCE; // stop synthetic fallback, retry real
+          depth.model = null;
+          initModel();
+        });
+
+        continueSynth.addEventListener("click", () => {
+          // Keep the synthetic-depth fallback; just dismiss the overlay.
+          depth.useSynth = true;
+          depth.hasDepth = true;
+          updateDepthStatus();
+          setOverlay("hidden", "", "");
+        });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+
+        window.addEventListener("beforeunload", stopCamera);
+
+        try {
+          resize();
+          updateDepthStatus();
+          startCamera();
+          initModel();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay(
+            "error",
+            "WEBGL SETUP ERROR",
+            error && error.message
+              ? error.message
+              : "Could not initialize the renderer.",
+          );
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>

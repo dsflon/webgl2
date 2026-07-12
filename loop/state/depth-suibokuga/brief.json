@@ -1,0 +1,78 @@
+{
+  "slug": "depth-suibokuga",
+  "theme": "深度の三遠を持つ水墨山水 — 遠くの被写体ほど淡く滲む",
+  "references": [
+    {
+      "type": "style",
+      "name": "水墨山水画・郭熙 三遠法",
+      "description": "高遠・深遠・平遠の三遠。遠景ほど墨が淡く輪郭が大気に溶け、近景ほど濃く明瞭。焦・濃・重・淡・清の墨の五彩"
+    },
+    {
+      "type": "artwork",
+      "name": "本リポジトリの既存水墨作品",
+      "description": "suibokuga_fluid / suibokuga_particle の墨のにじみ・紙の質感・無彩色階調を採取元とする"
+    }
+  ],
+  "signals": {
+    "survive": ["被写体の形態(シルエット)", "奥行きの順序(深度)", "明暗の階調"],
+    "replaced": ["色(墨の無彩色五彩へ写像)", "テクスチャ(紙とにじみへ)"]
+  },
+  "vocabulary": [
+    "monocular depth estimation",
+    "depth-conditioned dilution",
+    "depth EMA ping-pong",
+    "quantile",
+    "threshold diffusion",
+    "edge darkening",
+    "paper granulation",
+    "cell-hash",
+    "split toning"
+  ],
+  "invariants": [
+    {
+      "id": 1,
+      "invariant": "深度に応じて墨の濃度と輪郭の明瞭さが減衰し、遠景ほど淡く輪郭が大気に溶ける(三遠の空気遠近)",
+      "axis": "場/知覚",
+      "principle": "monocular depth estimation の深度で墨の不透明度とエッジ強度を depth-conditioned dilution により遠方ほど減衰",
+      "if_missing": "輝度だけでは遠い暗部と近い暗部を区別できず、奥行きのない平面的な墨絵になる",
+      "source": "郭熙『林泉高致』三遠法"
+    },
+    {
+      "id": 2,
+      "invariant": "白から黒への階調境界で顔料が縁に溜まって暗くなり、内側が抜ける水墨のにじみ",
+      "axis": "マーク/物質",
+      "principle": "threshold diffusion による反復拡散と、勾配で境界を暗くする edge darkening",
+      "if_missing": "のっぺりした連続濃淡になり、墨のにじみ(渇筆・破墨)に見えない"
+    },
+    {
+      "id": 3,
+      "invariant": "紙の繊維に沿った顔料の粒状ムラが、にじみの中に不均一な物質感を作る",
+      "axis": "物質",
+      "principle": "cell-hash 由来の静的グレインを紙の谷に溜める paper granulation(時間シード禁止)",
+      "if_missing": "均一で乾いたデジタル的な面になりプラスチックに見える"
+    },
+    {
+      "id": 4,
+      "invariant": "墨は無彩色〜わずかな冷暖のみで、白紙・清・淡・重・濃・焦の段階的な階調を持つ",
+      "axis": "色",
+      "principle": "輝度ゾーン別 split toning で墨の五彩へ写像し、彩度の低い画素ほど強く寄せる",
+      "if_missing": "均一グレーで墨の階調(五彩)が死に、濃淡の抑揚が消える"
+    },
+    {
+      "id": 5,
+      "invariant": "被写体が前後に動くと所属する『遠』が変わり、墨の濃度と滲みが遅れて滑らかに追従する",
+      "axis": "時間/知覚",
+      "principle": "depth EMA ping-pong で深度を平滑化し、quantile 層への帰属を安定遷移させる",
+      "if_missing": "深度がちらついて墨が毎フレーム震える、または追従せず一枚絵と区別がつかない"
+    }
+  ],
+  "priority": [1, 2, 4, 3, 5],
+  "ml": {
+    "needed": true,
+    "signal": "depth",
+    "runtime": "litert",
+    "model": "Depth-Anything-V2-Small (.tflite 候補 — 発注前スパイク未実施。実モデルURL/入出力は要人間検証)",
+    "justification": "深度が無いと三遠(遠景ほど淡く滲む空気遠近)が作れず、輝度だけでは遠い暗部と近い暗部を区別できないため、ただの平面的な墨絵になる",
+    "fakesource": "手前から奥への滑らかな深度勾配に前景シルエットの段差を重ねた合成深度場(?fakesource=1)で全パスを駆動し、前景シルエットを左右に動かして時間軸(不変量5)も検証できる"
+  }
+}

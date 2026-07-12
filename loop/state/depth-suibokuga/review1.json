@@ -1,0 +1,68 @@
+{
+  "artifact": {
+    "file": "fable5_depth-suibokuga.html",
+    "screenshots": [
+      "reduced.png",
+      "crop.png",
+      "final.png",
+      "debug-0-raw-depth.png",
+      "debug-1-smooth-depth.png",
+      "debug-2-ink.png",
+      "debug-3-final.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 3,
+      "evidence": "reduced.png では遠景の空(上部)が最も淡く、近景の草(下部)が濃く粒状で、空気遠近の兆候はある。debug-1-smooth-depth.png も上=暗(遠)→下=明(近)+中央の明るい楕円(前景シルエット)という妥当な深度場を示す。しかし crop.png で近景であるはずの顔・髪の輪郭が light halo を伴って soft に滲んでおり『近景ほど濃く明瞭』が成立していない。左右の木は smooth-depth 上ほぼ同一深度(horizon 帯)なのに右の木だけ淡いなど、明度差が深度ではなく元シーンの輝度に由来している疑いが残り、depth-conditioned dilution が濃度と輪郭の両方を支配しているとは反証できない。",
+      "reject_reasons": [
+        "近景(顔)の輪郭が soft halo で滲み、near=明瞭 が破れている",
+        "地面プレーンに near→far の明度ランプがほとんど見えない",
+        "淡濃差の多くが深度でなく元シーン輝度に見え、depth 支配を反証できない"
+      ],
+      "fix_instructions": [
+        "depth-conditioned dilution の深度→墨不透明度カーブの傾きを強め、遠景(depth小)側の不透明度をさらに下げる(far-end opacity を約 0.6→0.35)",
+        "edge 強度を深度で lerp し near=1.0 / far=0.2 とし、近景のエッジをシャープに・遠景をより溶かす。同時に顔周りの light halo(明るいリング)を除去して near の輪郭を明瞭化する",
+        "depth→brightness の寄与を上げ、地面プレーンの horizon 付近をさらに淡くして near→far の明度ランプを可視化する"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "crop.png で髪の輪郭に暗い縁取り(顔料の縁溜まり)と相対的に明るい内側、debug-2-ink.png・final.png で草の三角・襟のパッチ・木の輪郭にも暗い縁が確認でき、edge darkening(縁が暗く内側が抜ける)は明確に存在する。値境界に沿って粒状の暗い縁が出ておりのっぺりした連続濃淡ではない。"
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "crop.png・debug-2-ink.png で髪・草・シャツの暗部に明瞭な粒状ムラがあり、白い空はほぼ平滑で粒が墨のある谷に溜まる挙動(paper granulation)を示す。V1 freeze で flicker mean|Δ|=0.000 のため時間シード無し(静的グレイン)も裏付けられ、if_missing のプラスチック的均一面には陥っていない。"
+    },
+    {
+      "invariant_id": 4,
+      "score": 3,
+      "evidence": "reduced.png/final.png は基本無彩色で、白(空・顔)・淡(地面)・中(シャツ・木)・濃(髪)の階調区分自体はあり均一グレーではない。しかし最暗部が中間〜やや暗いグレー止まりで焦・濃の黒端(真の墨黒)が欠落し、五彩の暗部側が死んでいる。襟の暖色は元シーン要素で、輝度ゾーン別 split toning による冷暖差は画面上に視認できない。",
+      "reject_reasons": [
+        "焦・濃の最暗端が中間グレーで頭打ち、真の黒が無い",
+        "split toning の冷暖差(暗部寒色・明部暖色)が確認できない"
+      ],
+      "fix_instructions": [
+        "最暗ゾーンの出力アンカーを下げ、焦を復活させる(最暗ゾーン出力を約 0.25→0.08 まで深く)し全体の tone マッピングのコントラストを上げる",
+        "quantile による輝度ゾーン分割を強め、白紙・清・淡・重・濃・焦の段差を 3〜4段から 5段へ明確化する",
+        "split toning を弱く導入: 暗部にわずかな寒色(青寄り +2〜3)、明部にわずかな暖色(黄寄り)を彩度低いまま加える"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "静止画のため時間的追従は直接判定不可(限界)。V1 運動応答チェックが pass(freeze flicker mean|Δ|=0.000、動くシーンで motionResponse 6.732>0.5、EMA ping-pong 実装確認)。構造的証拠として debug-1-smooth-depth.png が受動的に後退する背景勾配から前景シルエット(中央の明るい楕円)を明瞭に分離しており、動きの大きい前景への妥当な深度分離=quantile 層帰属の安定基盤がある。ただし debug-0-raw-depth.png は一様グレーで生深度のデバッグ表示が捕捉できていない点は要確認。"
+    }
+  ],
+  "common": {
+    "style_holds": 3,
+    "subject_readable": 4,
+    "artifact_free": 3
+  },
+  "verdict": "fail",
+  "summary": "深度場は実在し(debug-1)前景分離も妥当、edge darkening(inv2)と静的 paper granulation(inv3)は成立、時間軸(inv5)も V1 pass と構造分離で担保。ただし全体が washed-out で真の墨黒が無く五彩の暗部が死に(inv4=3)、近景の顔が light halo で滲み near=明瞭 が破れ地面の depth 明度ランプも弱い(inv1=3)。縮小時のコントラスト不足で水墨感が弱く(style_holds=3)、顔周りの halo と全体のぼかしが後処理近似に見える(artifact_free=3)。暗部を深めコントラストを上げ、near のエッジをシャープ化し halo を除去することが最優先。よって fail。"
+}
