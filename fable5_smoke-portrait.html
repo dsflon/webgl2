@@ -1139,11 +1139,11 @@
             // motion of the body drags the gas around it
             float bodyW = smoothstep(0.08, 0.5, soft.x);
             v += flow * 2.2 * bodyW * uDt;
-            // buoyancy: dense glowing gas rises
-            v.y += 0.85 * den * uDt;
+            // buoyancy: gentle — smoke should hang and curl, not shoot up
+            v.y += 0.32 * den * uDt;
 
             // release velocity: the band pushes gas out along the surface
-            // normal (and upward), harder where the body moves
+            // normal (mostly sideways, only a little up), softer overall
             float band = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.011));
             float sl = texture(uSoft, vUv - vec2(uTexel.x, 0.0)).r;
             float sr = texture(uSoft, vUv + vec2(uTexel.x, 0.0)).r;
@@ -1151,22 +1151,23 @@
             float st = texture(uSoft, vUv + vec2(0.0, uTexel.y)).r;
             vec2 gS = vec2(sr - sl, st - sb);
             vec2 nOut = -gS / max(length(gS), 1e-4);
-            v += (nOut * 0.55 + vec2(0.0, 0.35)) * band *
-              (0.30 + 1.5 * mot01) * uDt * 3.0;
+            v += (nOut * 0.5 + vec2(0.0, 0.12)) * band *
+              (0.25 + 1.2 * mot01) * uDt * 1.5;
 
-            // curl noise turbulence, two octaves, only where smoke lives
+            // curl noise turbulence, two octaves, only where smoke lives —
+            // this (not buoyancy) is what should dominate the smoke's motion
             float wSmoke = smoothstep(0.005, 0.15, den);
-            vec2 np = vUv * 3.0 + vec2(0.0, -uTime * 0.06);
+            vec2 np = vUv * 3.0 + vec2(0.0, -uTime * 0.045);
             vec2 cn = vec2(
               vnoise(np + vec2(0.0, 0.013)) - vnoise(np - vec2(0.0, 0.013)),
               -(vnoise(np + vec2(0.013, 0.0)) - vnoise(np - vec2(0.013, 0.0)))
             ) / 0.026;
-            vec2 np2 = vUv * 7.0 + vec2(uTime * 0.04, 0.0);
+            vec2 np2 = vUv * 7.0 + vec2(uTime * 0.03, 0.0);
             cn += 0.5 * vec2(
               vnoise(np2 + vec2(0.0, 0.011)) - vnoise(np2 - vec2(0.0, 0.011)),
               -(vnoise(np2 + vec2(0.011, 0.0)) - vnoise(np2 - vec2(0.011, 0.0)))
             ) / 0.022;
-            v += cn * (0.08 + 0.45 * uSwirl) * wSmoke * uDt;
+            v += cn * (0.14 + 0.7 * uSwirl) * wSmoke * uDt;
 
             // vorticity confinement
             float cC = decS(texture(uCurl, vUv).r);
@@ -1182,7 +1183,8 @@
             float inside = smoothstep(0.60, 0.85, q);
             v = mix(v, flow * 1.1, inside * min(1.0, uDt * 10.0));
 
-            v *= exp(-uDt * 0.55);
+            // stronger damping: smoke settles and lingers instead of racing
+            v *= exp(-uDt * 0.95);
             fragColor = vec4(encV(v), 0.0, 1.0);
           }
         `;
@@ -1297,13 +1299,15 @@
             // contrast (dark features + local edges) so the face is legible.
             // uPortrait scales the feature contrast; the fill stays so the
             // human shape holds even at low PORTRAIT.
-            float fill = 0.28 * interior;
+            // This fluid layer is now the SMOKE (the crisp face is drawn in
+            // the composite from the full-res camera). Keep a lighter body so
+            // the smoke drifts and curls instead of reading as a solid slab.
+            float fill = 0.14 * interior;
             float feat = interior *
-              clamp(1.15 * dark * dark + 1.2 * edge, 0.0, 1.0) * uPortrait;
+              clamp(0.8 * dark * dark + 0.9 * edge, 0.0, 1.0) * uPortrait;
             float target = clamp(fill + feat, 0.0, 1.0);
-            // re-stamp (max) keeps the face crisp while advection animates
-            // the surrounding smoke
-            d = mix(d, max(d, target), 0.92);
+            // gentler re-stamp lets advection animate the smoke more
+            d = mix(d, max(d, target), 0.62);
 
             fragColor = vec4(clamp(d, 0.0, 1.0), 0.0, 0.0, 1.0);
           }
@@ -1401,6 +1405,7 @@
           uniform float uRim;
           uniform float uGlow;
           uniform float uGrain;
+          uniform float uPortrait;
           uniform float uBody;
           uniform float uTime;
           uniform vec3 uRimL;
@@ -1454,25 +1459,50 @@
               return;
             }
 
-            // FINAL — smoke portrait. The crisp density holds the face; the
-            // feedback + two bloom taps add a soft, tamed halo (kept well
-            // out of white so it never dazzles). Everything is monochrome
-            // smoke on near-black, like the density view but finished.
+            // FINAL — smoke portrait, built from two decoupled layers:
+            //   PORTRAIT: a crisp, stable, full-resolution rendering of the
+            //     figure straight from the camera (so the face reads sharply,
+            //     unaffected by the fluid's motion)
+            //   SMOKE: the slow, curling fluid density drifting around it
+            vec2 soft = texture(uSoft, vUv).rg;
+            float q = clamp(soft.x - soft.y, 0.0, 1.0);
+            float interior = smoothstep(0.46, 0.62, q);
+
+            // full-res unsharp: center luma minus a small blur → feature lines
+            vec2 px = 1.0 / uResolution;
+            vec3 cam = texture(uScene, vUv).rgb;
+            float lC = lumaf(cam);
+            float lBlur =
+              lumaf(texture(uScene, vUv + vec2(px.x, 0.0) * 1.5).rgb) +
+              lumaf(texture(uScene, vUv - vec2(px.x, 0.0) * 1.5).rgb) +
+              lumaf(texture(uScene, vUv + vec2(0.0, px.y) * 1.5).rgb) +
+              lumaf(texture(uScene, vUv - vec2(0.0, px.y) * 1.5).rgb);
+            lBlur *= 0.25;
+            float detail = clamp(abs(lC - lBlur) * 9.0, 0.0, 1.0);
+            float dark = 1.0 - lC;
+            // soft grey body + brighter feature lines (eyes/nose/mouth/hair)
+            float portrait = interior *
+              clamp(0.34 + 0.5 * dark + 1.7 * detail, 0.0, 1.0) *
+              (0.4 + 0.6 * uPortrait);
+
+            // smoke layer: fluid density + a tamed feedback/bloom halo
             float fb = texture(uFb, vUv).r;
             float b1 = texture(uB1, vUv).r;
             float b2 = texture(uB2, vUv).r;
-            // max() lets the crisp density win wherever the figure is dense
-            // (the face), so the halo only shows AROUND it and never fills the
-            // dark feature gaps (eyes, mouth) that make the face readable
             float halo = max(fb, 0.6 * b1 + 0.5 * b2);
-            float s = max(den, halo * (0.22 + 0.35 * uGlow));
+            float smoke = max(den, halo * (0.22 + 0.35 * uGlow));
+
+            // combine: the portrait sets the readable figure; smoke can only
+            // add brightness on top (drifting wisps), so it never erases the
+            // face — it veils it
+            float s = max(portrait, smoke * 0.85);
 
             // gentle tone curve: thick smoke saturates softly, never to 1.0
-            s = 1.0 - exp(-s * (1.15 + 1.5 * uGlow));
+            s = 1.0 - exp(-s * (1.15 + 1.4 * uGlow));
             // slight S-curve deepens the darks so features separate
             s = clamp(s, 0.0, 1.0);
             s = smoothstep(0.0, 1.0, s) * 0.5 + s * 0.5;
-            s = pow(s, 0.92) * 0.94;
+            s = pow(s, 0.92) * 0.95;
 
             // faint cool base so black isn't dead; smoke a hair cool-white
             vec3 base = uToneS * 0.16;
@@ -1629,6 +1659,7 @@
             "uRim",
             "uGlow",
             "uGrain",
+            "uPortrait",
             "uBody",
             "uTime",
             "uRimL",
@@ -2145,6 +2176,7 @@
             gl.uniform1f(u.uRim, state.rimLight);
             gl.uniform1f(u.uGlow, state.glow);
             gl.uniform1f(u.uGrain, state.grain);
+            gl.uniform1f(u.uPortrait, state.portrait);
             gl.uniform1f(u.uBody, state.body);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform3fv(u.uRimL, hexToRgb(preset.rimL));
