@@ -22,3 +22,4 @@
 [https://dsflon.github.io/webgl2/fable5_van-gogh.html](https://dsflon.github.io/webgl2/fable5_van-gogh.html)
 [https://dsflon.github.io/webgl2/fable5_papercraft-cam.html](https://dsflon.github.io/webgl2/fable5_papercraft-cam.html)
 [https://dsflon.github.io/webgl2/fable5_blue-dissolve.html](https://dsflon.github.io/webgl2/fable5_blue-dissolve.html)
+[https://dsflon.github.io/webgl2/fable5_smoke-portrait.html](https://dsflon.github.io/webgl2/fable5_smoke-portrait.html)
