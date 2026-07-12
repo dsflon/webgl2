@@ -443,7 +443,7 @@
       id="togglePanel"
       type="button"
       class="top-btn hidden"
-      aria-label="Show controls"
+      aria-label="コントローラーを開く"
       aria-expanded="true"
     >
       ☰
@@ -452,11 +452,11 @@
       id="flipCamera"
       type="button"
       class="top-btn"
-      aria-label="Switch camera"
+      aria-label="カメラ切替"
     >
-      REAR CAM
+      背面カメラ
     </button>
-    <div id="statusChip">BOOTING</div>
+    <div id="statusChip">起動中</div>
 
     <section
       id="panel"
@@ -515,7 +515,7 @@
         */
         const PRESETS = {
           nightChase: {
-            label: "Night Chase",
+            label: "標準グレー",
             // Exhaust-like smoke: desaturated cool grays, faint blue only at
             // the thinnest edge. The red/blue rims still come from the
             // off-screen police lights (rimL/rimR), not from the gas itself.
@@ -529,7 +529,7 @@
             set: { rimLight: 0.65, grade: 0.75 },
           },
           coldMorgue: {
-            label: "Cold Morgue",
+            label: "冷たい青緑",
             ramp: ["#062e34", "#2fbfb4", "#e8fbf4"],
             band: "#c8f2e8",
             rimL: "#7fd8c8",
@@ -542,10 +542,10 @@
         };
 
         const DEBUG_MODES = [
-          "FINAL",
-          "SILHOUETTE FIELD",
-          "SMOKE DENSITY",
-          "VELOCITY FIELD",
+          "最終",
+          "シルエット場",
+          "煙の密度",
+          "速度場",
         ];
 
         const DEFAULTS = {
@@ -572,29 +572,28 @@
         };
 
         const uiRows = [
-          ["portrait", "PORTRAIT", "how strongly the face/features read as smoke", 0, 1, 0.01],
-          ["dissolve", "EDGE PLUME", "smoke released along the moving silhouette rim", 0, 1, 0.01],
-          ["emission", "SMOKE", "overall rim-plume amount", 0, 1, 0.01],
-          ["swirl", "VORTEX", "vorticity + curl-noise turbulence", 0, 1, 0.01],
-          ["glow", "GLOW", "soft halo / bloom around the smoke", 0, 1, 0.01],
-          ["trail", "AFTERGLOW", "how long the smoke trails persist", 0, 1, 0.01],
-          ["grain", "FILM GRAIN", "static grain + shadow dither", 0, 1, 0.01],
+          ["portrait", "肖像の強さ", "顔・特徴を煙としてどれだけくっきり出すか", 0, 1, 0.01],
+          ["dissolve", "縁のたなびき", "動く輪郭の縁から立つ煙", 0, 1, 0.01],
+          ["emission", "煙の量", "縁から出る煙の全体量", 0, 1, 0.01],
+          ["swirl", "渦", "渦度+カールノイズの乱流", 0, 1, 0.01],
+          ["glow", "にじみ", "煙まわりの柔らかいハロー", 0, 1, 0.01],
+          ["trail", "残像", "煙の尾が残る長さ", 0, 1, 0.01],
+          ["grain", "フィルム粒子", "静的グレイン+暗部ディザ", 0, 1, 0.01],
         ];
 
         panel.innerHTML = `
-          <button id="closePanel" type="button" aria-label="Hide controls">✕</button>
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
           <div class="panel-body">
-          <h1>FABLE5 · SMOKE PORTRAIT CAM</h1>
+          <h1>FABLE5 · 煙の肖像 CAM</h1>
           <p>
-            You, rendered entirely as smoke. A slow background estimate finds
-            your silhouette; inside it the camera's shading and edges are
-            turned into smoke density, so your face and expression read as
-            drifting grey vapour. Move to send plumes off the rim; hold still
-            to let the portrait settle. Monochrome, on black.
+            あなた自身を、まるごと煙で描きます。ゆっくりした背景推定でシルエットを
+            見つけ、その内側でカメラの陰影とエッジを煙の濃さに変換するので、顔や表情が
+            たなびく灰色の煙として立ち上がります。動くと縁から煙がたなびき、静止すると
+            肖像が落ち着きます。モノクロ・黒背景。
           </p>
           <div class="select-row">
-            <span>PRESET</span>
-            <select id="preset" aria-label="Look preset">
+            <span>プリセット</span>
+            <select id="preset" aria-label="プリセット">
               ${Object.entries(PRESETS)
                 .map(
                   ([key, p]) =>
@@ -606,8 +605,8 @@
             </select>
           </div>
           <div class="select-row">
-            <span>DEBUG</span>
-            <select id="debugView" aria-label="Debug view">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
               ${DEBUG_MODES.map(
                 (label, i) => `<option value="${i}">${label}</option>`,
               ).join("")}
@@ -635,22 +634,22 @@
             )
             .join("")}
           <label class="check-row">
-            <span>Mirror webcam</span>
+            <span>左右反転(鏡)</span>
             <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
           </label>
           <label class="check-row">
-            <span>Pause ambient motion</span>
+            <span>ゆらぎを停止</span>
             <input id="pauseAnim" type="checkbox" ${
               state.pauseAnim ? "checked" : ""
             } />
           </label>
           <div class="buttons">
-            <button id="savePng" type="button">SAVE PNG</button>
-            <button id="resetLook" type="button">RESET LOOK</button>
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
           </div>
           <div class="status">
-            <div id="readout">FPS -- / RES -- / FLUID -- / BG --</div>
-            <span class="badge">WebGL2 · stable fluids · background subtraction</span>
+            <div id="readout">FPS -- / 解像度 -- / 流体 -- / 背景 --</div>
+            <span class="badge">WebGL2 · 流体シミュレーション · 背景差分</span>
           </div>
           </div>
         `;
@@ -729,7 +728,7 @@
           state.facingMode =
             state.facingMode === "user" ? "environment" : "user";
           flipCameraBtn.textContent =
-            state.facingMode === "user" ? "REAR CAM" : "FRONT CAM";
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
 
           // Front camera mirrors like a selfie preview, rear shows the world.
           state.mirror = state.facingMode === "user";
@@ -1478,11 +1477,11 @@
               lumaf(texture(uScene, vUv + vec2(0.0, px.y) * 1.5).rgb) +
               lumaf(texture(uScene, vUv - vec2(0.0, px.y) * 1.5).rgb);
             lBlur *= 0.25;
-            float detail = clamp(abs(lC - lBlur) * 9.0, 0.0, 1.0);
+            float detail = clamp(abs(lC - lBlur) * 11.0, 0.0, 1.0);
             float dark = 1.0 - lC;
-            // soft grey body + brighter feature lines (eyes/nose/mouth/hair)
+            // darker body + strong, bright feature lines (eyes/nose/mouth/hair)
             float portrait = interior *
-              clamp(0.34 + 0.5 * dark + 1.7 * detail, 0.0, 1.0) *
+              clamp(0.26 + 0.6 * dark + 2.3 * detail, 0.0, 1.0) *
               (0.4 + 0.6 * uPortrait);
 
             // smoke layer: fluid density + a tamed feedback/bloom halo
@@ -1497,12 +1496,12 @@
             // face — it veils it
             float s = max(portrait, smoke * 0.85);
 
-            // gentle tone curve: thick smoke saturates softly, never to 1.0
-            s = 1.0 - exp(-s * (1.15 + 1.4 * uGlow));
-            // slight S-curve deepens the darks so features separate
+            // tone curve + strong contrast so the figure separates crisply
+            // from the black and the feature lines punch through
+            s = 1.0 - exp(-s * (1.25 + 1.4 * uGlow));
             s = clamp(s, 0.0, 1.0);
-            s = smoothstep(0.0, 1.0, s) * 0.5 + s * 0.5;
-            s = pow(s, 0.92) * 0.95;
+            s = smoothstep(0.07, 0.82, s);   // crush darks, lift highlights
+            s = pow(s, 0.95);
 
             // faint cool base so black isn't dead; smoke a hair cool-white
             vec3 base = uToneS * 0.16;
@@ -1917,14 +1916,14 @@
           let text;
           let hide = false;
           if (FAKE) {
-            text = "SOURCE · SYNTHETIC (fakesource=1)";
+            text = "入力 · 合成 (fakesource=1)";
             hide = wallNow - bootWall > 4000;
           } else if (learnPhase) {
             const pct = Math.round((bgLearnT / LEARN_SECONDS) * 100);
-            text = `LEARNING BACKGROUND … ${pct}%`;
+            text = `背景を学習中 … ${pct}%`;
             learnDoneWall = 0;
           } else {
-            text = "BG · TRACKING";
+            text = "背景 · 追従中";
             if (!learnDoneWall) learnDoneWall = wallNow;
             hide = wallNow - learnDoneWall > 4000;
           }
@@ -2208,13 +2207,13 @@
             fpsLast = wallNow;
             fpsFrames = 0;
             const bgState = FAKE
-              ? "SYNTH"
+              ? "合成"
               : learnPhase
-                ? `LEARNING ${Math.round((bgLearnT / LEARN_SECONDS) * 100)}%`
-                : "TRACKING";
-            readout.textContent = `FPS ${fps.toFixed(0)} / RES ${canvas.width}×${
+                ? `学習中 ${Math.round((bgLearnT / LEARN_SECONDS) * 100)}%`
+                : "追従中";
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
               canvas.height
-            } / FLUID ${fieldW}×${fieldH} / BG ${bgState}`;
+            } / 流体 ${fieldW}×${fieldH} / 背景 ${bgState}`;
             updateChip(learnPhase, wallNow);
           }
 
