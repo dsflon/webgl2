@@ -25,8 +25,10 @@ const RESERVED = [
   "active",
 ];
 
+// LITERT_GUIDE.md §8 と同期(3点同期: 本リスト / LITERT_GUIDE §8 / 制作規約 §4)
 const EXTERNAL_ALLOWLIST = [
   /^https:\/\/cdn\.jsdelivr\.net\/npm\/@huggingface\/transformers/,
+  /^https:\/\/cdn\.jsdelivr\.net\/npm\/@litertjs\//,
   /^https:\/\/huggingface\.co\//,
 ];
 
@@ -191,7 +193,7 @@ export function verifyStatic(source) {
         "deps.external",
         "deps.external_url",
         `許可リスト外の外部URL: ${url}`,
-        "単一自己完結 HTML が規約。外部依存は ML モデル(transformers.js / HF Hub)のみ許可",
+        "単一自己完結 HTML が規約。外部依存は ML(transformers.js / LiteRT.js / HF Hub)のみ許可(LITERT_GUIDE.md §8)",
         lineOf(source, m.index),
       );
     }
