@@ -210,7 +210,10 @@
         z-index: 10;
         width: min(360px, calc(100vw - 28px));
         max-height: calc(100vh - 76px);
-        overflow: auto;
+        /* Non-scrolling shell: the ✕ is pinned here; .panel-body scrolls. */
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
         padding: 13px 14px 14px;
         color: var(--muted);
         background: var(--panel);
@@ -220,6 +223,13 @@
         transition:
           transform 0.25s ease,
           opacity 0.25s ease;
+      }
+
+      /* Scrollable content; the ✕ (child of .panel) stays put above it. */
+      .panel-body {
+        overflow-y: auto;
+        flex: 1 1 auto;
+        min-height: 0;
       }
 
       .panel h1 {
@@ -573,6 +583,7 @@
 
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="Hide controls">✕</button>
+          <div class="panel-body">
           <h1>FABLE5 · SMOKE PORTRAIT CAM</h1>
           <p>
             You, rendered entirely as smoke. A slow background estimate finds
@@ -640,6 +651,7 @@
           <div class="status">
             <div id="readout">FPS -- / RES -- / FLUID -- / BG --</div>
             <span class="badge">WebGL2 · stable fluids · background subtraction</span>
+          </div>
           </div>
         `;
 
@@ -1271,21 +1283,27 @@
             // interior portrait: inside the silhouette, turn the camera into
             // smoke density. Dark features (eyes, brows, nostrils, mouth,
             // hair) read as thick smoke; local contrast sharpens the face.
-            float interior = smoothstep(0.50, 0.70, q);
+            // Reach closer to the rim so the whole body fills as a figure.
+            float interior = smoothstep(0.44, 0.60, q);
             vec3 cam = texture(uScene, vUv).rgb;
             float l = lumaf(cam);
             float lx = lumaf(texture(uScene, vUv + vec2(uTexel.x, 0.0)).rgb) -
               lumaf(texture(uScene, vUv - vec2(uTexel.x, 0.0)).rgb);
             float ly = lumaf(texture(uScene, vUv + vec2(0.0, uTexel.y)).rgb) -
               lumaf(texture(uScene, vUv - vec2(0.0, uTexel.y)).rgb);
-            float edge = clamp(length(vec2(lx, ly)) * 3.0, 0.0, 1.0);
+            float edge = clamp(length(vec2(lx, ly)) * 4.5, 0.0, 1.0);
             float dark = 1.0 - l;
-            // faint volume fill so the body reads, plus feature-weighted dark
-            float target = interior *
-              clamp(0.16 + 0.9 * dark * dark + 0.6 * edge, 0.0, 1.0) * uPortrait;
-            // re-stamp (max) keeps the face legible while advection animates
-            // the surrounding smoke; a light lerp lets it breathe
-            d = mix(d, max(d, target), 0.85);
+            // body volume fill (reads as a solid figure) + strong feature
+            // contrast (dark features + local edges) so the face is legible.
+            // uPortrait scales the feature contrast; the fill stays so the
+            // human shape holds even at low PORTRAIT.
+            float fill = 0.28 * interior;
+            float feat = interior *
+              clamp(1.15 * dark * dark + 1.2 * edge, 0.0, 1.0) * uPortrait;
+            float target = clamp(fill + feat, 0.0, 1.0);
+            // re-stamp (max) keeps the face crisp while advection animates
+            // the surrounding smoke
+            d = mix(d, max(d, target), 0.92);
 
             fragColor = vec4(clamp(d, 0.0, 1.0), 0.0, 0.0, 1.0);
           }
@@ -1443,12 +1461,18 @@
             float fb = texture(uFb, vUv).r;
             float b1 = texture(uB1, vUv).r;
             float b2 = texture(uB2, vUv).r;
+            // max() lets the crisp density win wherever the figure is dense
+            // (the face), so the halo only shows AROUND it and never fills the
+            // dark feature gaps (eyes, mouth) that make the face readable
             float halo = max(fb, 0.6 * b1 + 0.5 * b2);
-            float s = max(den, halo * (0.30 + 0.45 * uGlow));
+            float s = max(den, halo * (0.22 + 0.35 * uGlow));
 
             // gentle tone curve: thick smoke saturates softly, never to 1.0
             s = 1.0 - exp(-s * (1.15 + 1.5 * uGlow));
-            s = pow(clamp(s, 0.0, 1.0), 0.9) * 0.92;
+            // slight S-curve deepens the darks so features separate
+            s = clamp(s, 0.0, 1.0);
+            s = smoothstep(0.0, 1.0, s) * 0.5 + s * 0.5;
+            s = pow(s, 0.92) * 0.94;
 
             // faint cool base so black isn't dead; smoke a hair cool-white
             vec3 base = uToneS * 0.16;
