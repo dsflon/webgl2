@@ -37,7 +37,8 @@
       └► [P40 composite] 画面(DPR≤2)  書き割り+実体グレード+対向リム+帯コア+
                           煙加算+split toning+静的グレイン+uDebug 0..7
 
-  スライダー(発注書 §6):
+  スライダー(発注書 §6+V3フィードバック):
+    GAS BODY      ガス人間モード(1=黒い切り抜きの空洞+煙のプルーム主体 / 0=実体グレード)
     DISSOLVE      溶解帯の幅(ぼかしσ)と侵食の深さ(E上限・侵食レート)
     SMOKE         溶解帯からの密度注入量
     VORTEX        渦度強化と curl noise 外乱の強さ
@@ -556,6 +557,7 @@
         ];
 
         const DEFAULTS = {
+          body: 0.8,
           dissolve: 0.55,
           emission: 0.6,
           swirl: 0.5,
@@ -576,6 +578,7 @@
         };
 
         const uiRows = [
+          ["body", "GAS BODY", "1 = hollow gas figure, 0 = solid graded body", 0, 1, 0.01],
           ["dissolve", "DISSOLVE", "band width + how deep motion erodes", 0, 1, 0.01],
           ["emission", "SMOKE", "how much gas the band releases", 0, 1, 0.01],
           ["swirl", "VORTEX", "vorticity + curl-noise turbulence", 0, 1, 0.01],
@@ -590,10 +593,11 @@
           <button id="closePanel" type="button" aria-label="Hide controls">✕</button>
           <h1>FABLE5 · BLUE DISSOLVE CAM</h1>
           <p>
-            Your outline dissolves into glowing exhaust-like gas: a slow
-            background estimate carves a silhouette, its blurred rim becomes a
-            dissolve band, and a grid fluid carries the released smoke upward.
-            Move fast to burn away; hold still to reform.
+            A gas human: your figure becomes a hollow cut-out wrapped in
+            exhaust-like smoke plumes. A slow background estimate carves the
+            silhouette, its rim releases gas into a grid fluid, and the body
+            itself stays a dark void. Move fast to burn away; hold still to
+            reform. GAS BODY = 0 returns the solid graded figure.
           </p>
           <div class="select-row">
             <span>PRESET</span>
@@ -1295,6 +1299,7 @@
           uniform vec3 uRampB;
           uniform vec3 uRampC;
           uniform vec3 uBandCol;
+          uniform float uBody;
           uniform int uSpecimen;
           ${CHUNK_ENC}
           vec3 rampCol(float d) {
@@ -1316,9 +1321,16 @@
             float q = clamp(soft.x - soft.y, 0.0, 1.0);
             float mot01 =
               smoothstep(0.008, 0.20, length(decV(texture(uField, vUv).ba)));
-            vec3 c = rampCol(d) * pow(max(d, 0.0), 0.6) * (0.7 + 1.3 * uGlow);
+            // Gas-body mode: near-linear density response keeps the plume
+            // structure crisp (like the raw density view) instead of the
+            // milky pow(d, 0.6) lift, and the band's white glow steps back
+            // so the smoke — not a neon tube — carries the figure.
+            float ex = mix(0.6, 1.0, uBody);
+            vec3 c = rampCol(d) * pow(max(d, 0.0), ex) *
+              (0.7 + 1.3 * uGlow) * (1.0 + 0.35 * uBody);
             float band = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.008));
-            c += uBandCol * band * (0.45 + 1.0 * uGlow) * (0.45 + 0.8 * mot01);
+            c += uBandCol * band * (0.45 + 1.0 * uGlow) *
+              (0.45 + 0.8 * mot01) * mix(1.0, 0.30, uBody);
             fragColor = vec4(c, 1.0);
           }
         `;
@@ -1362,6 +1374,7 @@
           uniform float uRim;
           uniform float uGlow;
           uniform float uGrain;
+          uniform float uBody;
           uniform float uTime;
           uniform vec3 uRimL;
           uniform vec3 uRimR;
@@ -1453,9 +1466,12 @@
               return;
             }
 
-            vec3 smoke = texture(uFb, vUv).rgb * 0.85 +
-              texture(uB1, vUv).rgb * 0.75 +
-              texture(uB2, vUv).rgb * 0.65;
+            // Gas-body mode leans on the crisp feedback layer (the plume
+            // STRUCTURE that makes the density view read as a gas figure)
+            // and tames the blooms that wash it out.
+            vec3 smoke = texture(uFb, vUv).rgb * (0.85 + 0.95 * uBody) +
+              (texture(uB1, vUv).rgb * 0.75 + texture(uB2, vUv).rgb * 0.65) *
+                (1.0 - 0.45 * uBody);
             smoke *= 0.40 + 0.85 * uGlow;
 
             if (uDebug == 7) {
@@ -1483,16 +1499,23 @@
               (uRimL + uRimR) * 0.12 * max(nOut.y, 0.0)
             ) * rimBand * (0.4 + 2.2 * uRim);
 
-            vec3 bodyCol = mix(cam, graded * 0.92, uGrade) +
+            // Gas human: the body interior becomes a dark cut-out void —
+            // slightly below the backdrop, with only a whisper of the graded
+            // camera so the figure still reads as a person, not a hole.
+            vec3 voidCol = uToneS * 0.10 + graded * 0.07;
+            vec3 solidCol = mix(cam, graded * 0.92, uGrade) +
               rim * mix(0.35, 1.0, uGrade);
+            vec3 bodyCol = mix(solidCol, voidCol + rim * 0.55, uBody);
             float bodyMask = smoothstep(0.50, 0.565, q);
-            vec3 col = mix(bgCol, bodyCol, bodyMask);
+            // darken the backdrop a touch in gas mode so the plumes carry
+            vec3 col = mix(bgCol * (1.0 - 0.20 * uBody), bodyCol, bodyMask);
 
             if (uDebug != 5) {
-              // dissolve-band core (crisp full-res line; also blooms via
-              // the glow chain) + the smoke itself
+              // dissolve-band core: neon tube when solid, faint pale seam
+              // when the figure is gas
               float band = exp(-pow(q - 0.5, 2.0) / (2.0 * 0.006));
-              col += uBandCol * band * (0.35 + 0.85 * uGlow);
+              col += uBandCol * band * (0.35 + 0.85 * uGlow) *
+                mix(1.0, 0.28, uBody);
               col += smoke;
             }
 
@@ -1625,6 +1648,7 @@
             "uRampB",
             "uRampC",
             "uBandCol",
+            "uBody",
             "uSpecimen",
           ]),
           fb: getLocations(programs.fb, ["uEmis", "uPrev", "uDecay"]),
@@ -1644,6 +1668,7 @@
             "uRim",
             "uGlow",
             "uGrain",
+            "uBody",
             "uTime",
             "uRimL",
             "uRimR",
@@ -2109,6 +2134,7 @@
             gl.uniform3fv(u.uRampB, hexToRgb(preset.ramp[1]));
             gl.uniform3fv(u.uRampC, hexToRgb(preset.ramp[2]));
             gl.uniform3fv(u.uBandCol, hexToRgb(preset.band));
+            gl.uniform1f(u.uBody, state.body);
             gl.uniform1i(u.uSpecimen, state.debugView === 7 ? 1 : 0);
           });
 
@@ -2156,6 +2182,7 @@
             gl.uniform1f(u.uRim, state.rimLight);
             gl.uniform1f(u.uGlow, state.glow);
             gl.uniform1f(u.uGrain, state.grain);
+            gl.uniform1f(u.uBody, state.body);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform3fv(u.uRimL, hexToRgb(preset.rimL));
             gl.uniform3fv(u.uRimR, hexToRgb(preset.rimR));
