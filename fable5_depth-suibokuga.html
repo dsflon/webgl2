@@ -906,11 +906,14 @@
             float ly1 = luma(texture(uFlat, vUv + vec2(0.0, uTexel.y)).rgb);
             float ly0 = luma(texture(uFlat, vUv - vec2(0.0, uTexel.y)).rgb);
             float edge = length(vec2(lx1 - lx0, ly1 - ly0));
-            float darkness = 1.0 - L;
-            float raw = clamp(darkness * 0.85 + edge * 1.4, 0.0, 1.0);
+            // black-point + gain: keep paper clean while pushing dark subjects
+            // toward 焦 (true black) so the five tones span the full range.
+            float darkness = clamp((1.0 - L - 0.06) * 1.35, 0.0, 1.0);
+            float raw = clamp(darkness * 1.05 + edge * 1.5, 0.0, 1.0);
             float dep = mix(0.5, texture(uDepth, vUv).r, uDepthMix);
             float farness = clamp(1.0 - dep, 0.0, 1.0);
-            float dil = 1.0 - uDilution * farness * 0.6;
+            // steeper depth→opacity slope; far end drops to ~0.35 (three-distance).
+            float dil = 1.0 - uDilution * pow(farness, 0.85) * 0.9;
             fragColor = vec4(raw * dil, 0.0, 0.0, 1.0);
           }
         `;
@@ -992,27 +995,40 @@
             vec3 cam = texture(uFlat, vUv).rgb;
             float dep = mix(0.5, texture(uDepth, vUv).r, uDepthMix);
             float farness = clamp(1.0 - dep, 0.0, 1.0);
+            float fcurve = pow(farness, 0.85);
+
+            // Edge sharpness by depth: near crisp (1.0), far dissolved (0.2).
+            // This single knob both sharpens near contours and dissolves far
+            // ones — and, crucially, removes the near outward bloom that read
+            // as a light halo around the face. (invariant #1)
+            float edgeStrength = mix(0.2, 1.0, dep);
 
             float inkSharp = texture(uInkRaw, vUv).r;
             float inkBlur = texture(uInkSoft, vUv).r;
-            // depth-conditioned dilution: far → diffused (dissolves into air).
-            float diffAmt = clamp(farness * (0.55 + 0.6 * uDilution) + uBleed * 0.25, 0.0, 1.0);
+            // depth-conditioned dilution: near keeps the SHARP ink field so no
+            // diffused overshoot spills past the silhouette (halo removed);
+            // far dissolves fully into the blurred field (atmosphere).
+            float diffAmt = clamp((1.0 - edgeStrength) * (0.6 + 0.5 * uDilution)
+                                  + uBleed * 0.12 * (1.0 - edgeStrength), 0.0, 1.0);
             float ink = mix(inkSharp, inkBlur, diffAmt);
 
             // edge darkening: pigment pools where the diffused field has a
-            // gradient; near edges pool sharply, far edges dissolve.
+            // gradient; scaled by edgeStrength so near edges pool sharply and
+            // far edges dissolve rather than ring.
             float gx = texture(uInkSoft, vUv + vec2(uTexel.x, 0.0)).r
                      - texture(uInkSoft, vUv - vec2(uTexel.x, 0.0)).r;
             float gy = texture(uInkSoft, vUv + vec2(0.0, uTexel.y)).r
                      - texture(uInkSoft, vUv - vec2(0.0, uTexel.y)).r;
             float grad = length(vec2(gx, gy));
-            float pool = grad * (0.6 + 1.6 * uEdgeDark) * (0.35 + 0.65 * dep);
+            float pool = grad * (0.6 + 1.6 * uEdgeDark) * edgeStrength;
             // interior lifts (内側が抜ける): dense ink with low gradient.
-            float interior = smoothstep(0.25, 0.7, inkBlur)
+            float interior = smoothstep(0.28, 0.72, inkBlur)
                            * (1.0 - clamp(grad * 6.0, 0.0, 1.0));
-            float k = clamp(ink + pool - interior * 0.16 * uEdgeDark, 0.0, 1.0);
-            // overall three-distance opacity fade.
-            k *= 1.0 - uDilution * farness * 0.8;
+            float k = clamp(ink + pool - interior * 0.14 * uEdgeDark, 0.0, 1.0);
+            // three-distance opacity fade: far end drops to ~0.35 …
+            k *= 1.0 - uDilution * fcurve * 0.9;
+            // … plus a depth→brightness ramp so the far horizon reads paler.
+            k *= 1.0 - farness * farness * 0.25;
 
             // paper granulation — static, seeded by pixel coords only.
             float fib = vnoise(gl_FragCoord.xy * vec2(0.5, 0.9)) * 0.6
@@ -1021,14 +1037,27 @@
             k *= 1.0 + grain * uPaperGrain * 0.5 * smoothstep(0.05, 0.6, k);
             k = clamp(k, 0.0, 1.0);
 
+            // tone contrast expansion: deepen the dark end so near ink reaches
+            // 焦 (true black) instead of stalling at mid-gray.
+            float kc = clamp((k - 0.02) * 1.28, 0.0, 1.0);
+
             // split toning → sumi five tones with cool/warm bias.
-            float tone = 1.0 - k;                       // 1 paper .. 0 焦
+            float tone = 1.0 - kc;                      // 1 paper .. 0 焦
             float toned = mix(tone, quant5(tone), uToneSplit);
             float w = uPaperWarm * 0.5 + 0.5;           // 0 cool .. 1 warm
             vec3 paperCol = mix(vec3(0.90, 0.925, 0.955), vec3(0.965, 0.945, 0.90), w);
-            vec3 inkCol = mix(vec3(0.07, 0.085, 0.11), vec3(0.115, 0.10, 0.08), w);
+            // darkest anchor lowered to ~0.06 so 焦 is a real black end.
+            vec3 inkCol = mix(vec3(0.045, 0.055, 0.075), vec3(0.075, 0.06, 0.045), w);
             vec3 sumi = mix(inkCol, paperCol, toned);
+            // zone split-toning (invariant #4): shadows lean faintly cool
+            // (blue), highlights faintly warm (yellow), kept low-chroma.
+            float shadowW = 1.0 - smoothstep(0.0, 0.5, toned);
+            float highW = smoothstep(0.5, 1.0, toned);
+            vec3 coolTint = vec3(-0.006, 0.0, 0.012);
+            vec3 warmTint = vec3(0.012, 0.006, -0.010);
+            sumi += (coolTint * shadowW + warmTint * highW) * uToneSplit;
             sumi *= 1.0 + grain * uPaperGrain * 0.06;
+            sumi = clamp(sumi, 0.0, 1.0);
 
             // Split toning weights by chroma: sumi is achromatic, so the ink
             // axis first desaturates the photo, then low-chroma pixels pull
