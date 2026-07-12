@@ -44,8 +44,8 @@
     VORTEX        渦度強化と curl noise 外乱の強さ
     GLOW          発光ランプの明るさとブルーム・帯発光の強度
     AFTERGLOW     feedback 残光の減衰時間(長いほど尾を引く)
-    NIGHT GRADE   split toning と背景書き割りの強さ(0で素の映像)
-    POLICE LIGHTS 赤青の対向リムと背景ボケ光の強さ
+    NIGHT GRADE   周りの表現(0=素のカラー映像 / 1=夜の暗い書き割り)
+    RIM LIGHT     赤青の対向リムの強さ(実体モードのみ)
     FILM GRAIN    静的フィルムグレインと暗部ディザ
 
   実行方法:
@@ -509,7 +509,7 @@
 
         /*
           Presets switch only the color set (emission ramp, opposing rims,
-          split-tone zones, bokeh lights) plus initial values for the two
+          split-tone zones) plus initial values for the two
           look-defining sliders. Slider definitions and everything else are
           shared. Both ramps can be judged with DEBUG = LAMP SPECIMEN.
         */
@@ -526,8 +526,6 @@
             toneShadow: "#12333a",
             toneMid: "#274a6e",
             toneHigh: "#dfe9f2",
-            bokehA: "#ff2c48",
-            bokehB: "#2f6dff",
             set: { rimLight: 0.65, grade: 0.75 },
           },
           coldMorgue: {
@@ -539,8 +537,6 @@
             toneShadow: "#0d2b28",
             toneMid: "#1e4a4a",
             toneHigh: "#d8efe8",
-            bokehA: "#39c4b2",
-            bokehB: "#2f8fa8",
             set: { rimLight: 0.28, grade: 0.85 },
           },
         };
@@ -585,7 +581,7 @@
           ["glow", "GLOW", "emission ramp brightness + bloom", 0, 1, 0.01],
           ["trail", "AFTERGLOW", "feedback persistence of the glow", 0, 1, 0.01],
           ["grade", "NIGHT GRADE", "surroundings: 0 = raw color feed, 1 = dark night backdrop", 0, 1, 0.01],
-          ["rimLight", "POLICE LIGHTS", "background bokeh (+ rims when solid)", 0, 1, 0.01],
+          ["rimLight", "RIM LIGHT", "red/blue edge rims (solid mode only)", 0, 1, 0.01],
           ["grain", "FILM GRAIN", "static grain + shadow dither", 0, 1, 0.01],
         ];
 
@@ -1352,7 +1348,7 @@
           }
         `;
 
-        // P40 — final composite: dark matte backdrop with police bokeh,
+        // P40 — final composite: dark matte backdrop,
         // graded body with opposing red/blue rims (Fresnel-ish from the
         // soft-SDF normal), the bright dissolve-band core, additive smoke
         // (feedback + two bloom taps), split toning, static grain, debug.
@@ -1382,8 +1378,6 @@
           uniform vec3 uToneS;
           uniform vec3 uToneM;
           uniform vec3 uToneH;
-          uniform vec3 uBokA;
-          uniform vec3 uBokB;
           uniform vec3 uBandCol;
           uniform int uDebug;
           ${CHUNK_NOISE}
@@ -1403,31 +1397,11 @@
             vec3 tinted = tone * (0.25 + 1.45 * l);
             return mix(g, tinted, 0.62) + uToneS * 0.10;
           }
-          // the dark matte-painting backdrop: gradient + haze band + eight
-          // static bokeh lights with slow flicker (uTime freezes with dt)
+          // the dark matte-painting backdrop: gradient + haze band
           vec3 backdrop(vec2 uv, vec3 graded) {
-            float asp = uResolution.x / uResolution.y;
-            vec2 p = vec2(uv.x * asp, uv.y);
             vec3 col = mix(uToneS * 0.45, uToneM * 0.55, smoothstep(0.0, 1.0, uv.y));
             col += graded * 0.14;
             col += uToneM * 0.35 * exp(-pow((uv.y - 0.30) * 3.2, 2.0));
-            vec3 bok = vec3(0.0);
-            for (int i = 0; i < 8; ++i) {
-              float fi = float(i);
-              vec2 c = vec2(
-                hash12(vec2(fi, 1.0)) * asp,
-                0.30 + 0.55 * hash12(vec2(fi, 2.0))
-              );
-              float r = 0.05 + 0.13 * hash12(vec2(fi, 3.0));
-              vec3 lc = mix(uBokA, uBokB, step(0.5, hash12(vec2(fi, 4.0))));
-              float fl = 0.72 + 0.28 *
-                sin(uTime * (0.5 + hash12(vec2(fi, 5.0))) * 2.1 + fi * 2.4);
-              float disc = 1.0 - smoothstep(r * 0.55, r, distance(p, c));
-              bok += lc * disc * fl * (0.14 + 0.30 * hash12(vec2(fi, 6.0)));
-            }
-            // bokeh follows POLICE LIGHTS only — the surroundings are
-            // governed by NIGHT GRADE, independent of the gas figure
-            col += bok * (0.35 + 1.3 * uRim);
             return col;
           }
           void main() {
@@ -1684,8 +1658,6 @@
             "uToneS",
             "uToneM",
             "uToneH",
-            "uBokA",
-            "uBokB",
             "uBandCol",
             "uDebug",
           ]),
@@ -2198,8 +2170,6 @@
             gl.uniform3fv(u.uToneS, hexToRgb(preset.toneShadow));
             gl.uniform3fv(u.uToneM, hexToRgb(preset.toneMid));
             gl.uniform3fv(u.uToneH, hexToRgb(preset.toneHigh));
-            gl.uniform3fv(u.uBokA, hexToRgb(preset.bokehA));
-            gl.uniform3fv(u.uBokB, hexToRgb(preset.bokehB));
             gl.uniform3fv(u.uBandCol, hexToRgb(preset.band));
             gl.uniform1i(u.uDebug, state.debugView);
           });
