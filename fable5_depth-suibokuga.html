@@ -920,24 +920,38 @@
 
         // P4/P5 — separable Gaussian used as an iterated diffusion kernel
         // (threshold diffusion / にじみ). Run H then V, twice.
+        // Depth-scaled radius (uDepth): near pixels (large depth) diffuse over a
+        // much smaller sigma so the bright near interior does NOT bleed its low
+        // ink outward past the silhouette (invariant #1, near = sharp contour);
+        // far pixels keep the full bleed for the atmospheric dissolve. This is
+        // the depth-conditioned side of the halo fix (order §2 invariant #1).
         const diffuseFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
           out vec4 fragColor;
           uniform sampler2D uSrc;
+          uniform sampler2D uDepth;
           uniform vec2 uDir;
           uniform float uSigma;
           void main() {
+            float dCenter = texture(uDepth, vUv).r;
+            // Depth-scaled radius: near pixels (large depth) diffuse over a much
+            // SMALLER sigma so the bright near interior (face/paper, very low
+            // ink) does NOT bleed outward past the silhouette — that outward
+            // bleed was the light halo/mat. Far pixels keep the full bleed for
+            // atmospheric dissolve. Near stays sharp (invariant #1).
+            float sig = max(0.35, uSigma * mix(1.0, 0.28, dCenter));
             float acc = 0.0;
             float wsum = 0.0;
             const int R = 12;
             for (int i = -R; i <= R; ++i) {
               float x = float(i);
-              float w = exp(-0.5 * x * x / (uSigma * uSigma));
-              acc += texture(uSrc, vUv + uDir * x).r * w;
+              vec2 uv = vUv + uDir * x;
+              float w = exp(-0.5 * x * x / (sig * sig));
+              acc += texture(uSrc, uv).r * w;
               wsum += w;
             }
-            fragColor = vec4(acc / wsum, 0.0, 0.0, 1.0);
+            fragColor = vec4(acc / max(wsum, 1e-4), 0.0, 0.0, 1.0);
           }
         `;
 
@@ -1021,8 +1035,14 @@
                      - texture(uInkSoft, vUv - vec2(0.0, uTexel.y)).r;
             float grad = length(vec2(gx, gy));
             float pool = grad * (0.6 + 1.6 * uEdgeDark) * edgeStrength;
-            // interior lifts (内側が抜ける): dense ink with low gradient.
+            // interior lifts (内側が抜ける): dense ink with low gradient. Gated
+            // by the SHARP ink too, so the lift only hollows the TRUE interior
+            // of a subject (where the un-blurred ink is genuinely dense) and NOT
+            // the ring just OUTSIDE a dark silhouette — there the blurred field
+            // is mid-range only because the silhouette bled into it, and the old
+            // blur-only gate lifted that ring into a light halo/mat. (artifact_free)
             float interior = smoothstep(0.28, 0.72, inkBlur)
+                           * smoothstep(0.5, 0.78, inkSharp)
                            * (1.0 - clamp(grad * 6.0, 0.0, 1.0));
             float k = clamp(ink + pool - interior * 0.14 * uEdgeDark, 0.0, 1.0);
             // three-distance opacity fade: far end drops to ~0.35 …
@@ -1146,7 +1166,12 @@
             "uDilution",
             "uDepthMix",
           ]),
-          diffuse: getLocations(programs.diffuse, ["uSrc", "uDir", "uSigma"]),
+          diffuse: getLocations(programs.diffuse, [
+            "uSrc",
+            "uDepth",
+            "uDir",
+            "uSigma",
+          ]),
           final: getLocations(programs.final, [
             "uFlat",
             "uDepthRaw",
@@ -1297,18 +1322,24 @@
         }
 
         // One separable diffusion pass (H then V) src → dst via blurTmp.
-        function diffusePass(src, dst, sigma) {
+        // depthTex drives the depth-scaled radius so near ink diffuses less and
+        // does not bleed outward past the silhouette (removes the light halo).
+        function diffusePass(src, dst, sigma, depthTex) {
           renderPass(targets.blurTmp, programs.diffuse, () => {
             const u = locations.diffuse;
             bindTexture(0, src.tex);
+            bindTexture(1, depthTex);
             gl.uniform1i(u.uSrc, 0);
+            gl.uniform1i(u.uDepth, 1);
             gl.uniform2f(u.uDir, 1 / targets.blurTmp.width, 0);
             gl.uniform1f(u.uSigma, sigma);
           });
           renderPass(dst, programs.diffuse, () => {
             const u = locations.diffuse;
             bindTexture(0, targets.blurTmp.tex);
+            bindTexture(1, depthTex);
             gl.uniform1i(u.uSrc, 0);
+            gl.uniform1i(u.uDepth, 1);
             gl.uniform2f(u.uDir, 0, 1 / dst.height);
             gl.uniform1f(u.uSigma, sigma);
           });
@@ -1687,8 +1718,8 @@
 
           // P4/P5 — iterated diffusion (にじみ). Two H+V rounds, ping-pong.
           const sigma = 0.6 + state.bleedRadius * 6.0;
-          diffusePass(targets.inkRaw, targets.inkA, sigma);
-          diffusePass(targets.inkA, targets.inkB, sigma);
+          diffusePass(targets.inkRaw, targets.inkA, sigma, emaOut.tex);
+          diffusePass(targets.inkA, targets.inkB, sigma, emaOut.tex);
           const inkSoft = targets.inkB;
 
           // P6 — final sumi composite to screen.

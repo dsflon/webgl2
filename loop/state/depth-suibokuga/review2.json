@@ -1,0 +1,64 @@
+{
+  "artifact": {
+    "file": "fable5_depth-suibokuga.html",
+    "screenshots": [
+      "reduced.png",
+      "crop.png",
+      "final.png",
+      "debug-0-raw-depth.png",
+      "debug-1-smooth-depth.png",
+      "debug-2-ink.png",
+      "debug-3-final.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "reduced.png で右の木(遠)は淡く大気に溶け、左の木(近・大きい)は濃く輪郭が明瞭、地平線付近も淡くフェードしており、遠近で墨濃度と輪郭明瞭さが減衰している。debug-1-smooth-depth.png に上=遠(暗)→下=近(明)の勾配と中央前景の明ellipseがあり、この減衰が深度駆動である裏付けが取れる。左右の木が別深度で濃さが逆転しているため輝度のみの平面ではないと反証できた。",
+      "reject_reasons": [
+        "近景である顔シルエットの縁が淡いハロで柔らかく溶けており、near=輪郭明瞭の要件と局所的に矛盾する"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "debug-2-ink.png で髪の冠部の縁と草の穂先に暗い顔料溜まり(edge darkening)が確認でき、reduced.png でも草の穂先が縁で暗く溜まる。顔は明るく抜けた核(内側が抜ける)を持ち、目・鼻・口が暗い墨線で縁取られており、閾値拡散と勾配境界の暗化が存在すると反証できた。",
+      "reject_reasons": [
+        "顔シルエット外周は暗い縁取りでなく明るいハロで、この部分の縁効果は墨溜まりでなくブラー/グロー近似に見える"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "reduced.png/final.png の草・胴体・地面・髪の中間〜暗部に不均一な粒状ムラが確認でき、V1 freeze で mean|Δ|=0.000 のため時間シードでない静的グレイン(cell-hash)であることが担保されている。にじみのある墨面に物質感が乗っておりプラスチック的均一面ではないと反証できた。",
+      "reject_reasons": [
+        "顔など明部の大面は完全に平滑で粒状が乗らず、局所的にプラスチック的に見える"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "reduced.png/final.png は無彩色で、白紙(空・顔ハイライト)→清淡(野原)→重(木)→濃(胴)→焦(髪の黒)まで段階的な墨階調が読み取れ、均一グレーで抑揚が死んだ状態ではないと反証できた。彩度は事実上ゼロで墨の五彩の写像として成立している。",
+      "reject_reasons": [
+        "冷暖のsplit toningはほぼ視認できず中立グレーに寄っており、五彩の温度差は最小限"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "静止画から時間挙動は直接判定できないが、V1 運動応答が pass(freeze で flicker mean|Δ|=0.000、動シーンで motionResponse mean|Δ|=10.466>0.5)であり EMA ping-pong 実装も確認済み。構造的証拠として debug-1-smooth-depth.png に前景(中央の明ellipse)が背景勾配から妥当に分離されており、層帰属の安定遷移の基盤が存在する。限界: 静止画のため滑らかな遅延追従そのものは本レビューでは確認していない。",
+      "reject_reasons": [
+        "debug-0-raw-depth.png がほぼ平坦なグレーで構造が見えず、生深度可視化の妥当性は画像だけでは検証不能(fakesource合成のため許容)"
+      ]
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 3
+  },
+  "verdict": "fail",
+  "summary": "無彩色の墨階調(inv4)・遠近の墨減衰(inv1)・境界の墨溜まり(inv2)・静的グレイン(inv3)・深度分離(inv5)はいずれも各スクリーンショットで反証でき 4 点。ただし crop.png で最近景である顔・髪シルエット外周に、背景で説明できない明るいエッジハロ(グロー/マット)が等倍で明瞭に見え、後処理の誤魔化しの兆候かつ near=輪郭明瞭の様式と矛盾するため artifact_free を 3 とし verdict は fail。修正方向: 前景シルエットのエッジグロー/ブルーム強度を 0 方向へ下げ、depth-conditioned dilution の bleed 半径(sigma)を近景(小depth)画素で縮小して最近景の輪郭を鋭く保ち、代わりに高コントラスト境界の edge_darkening 量を約1.5倍に上げて縁が明ハロでなく暗く溜まるようにする。"
+}
