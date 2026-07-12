@@ -6,6 +6,7 @@ main への PR として提出するシステムの設計書。
 
 - 方法論: [loop/LOOP_ENGINEERING_GUIDE.md](./LOOP_ENGINEERING_GUIDE.md)(以下「指南書」)
 - 品質の下位層(プロンプト・ハーネス): [AI_DIRECTION_GUIDE.md](../AI_DIRECTION_GUIDE.md)(以下「制作規約」)
+- ML(意味信号)の使用判断と実装パターン: [LITERT_GUIDE.md](../LITERT_GUIDE.md)(S0 の `ml` 判断が依存)
 - 実装手順: [loop/IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)
 
 > 指南書 §1.1 の言葉で言えば、このリポジトリには既に
@@ -143,7 +144,7 @@ V1/V2 の結果サマリ・needs_review 事項(§8 Inbox)。
 
 | # | ステージ | 入力 | 出力 | 完了条件(検証) | 失敗時 |
 | --- | --- | --- | --- | --- | --- |
-| S0 | brief(様式解析) | テーマ1行 | `loop/state/<slug>/brief.json`(不変量表・参照作品・生き残らせる信号・技法語彙) | `invariants.schema.json` 適合(5±2個。列構成は発注書の実物に準拠: 不変量/担当軸/実装原理/外した場合+優先順。出典は行単位または brief の参照リストで必須) | 再試行→needs_review |
+| S0 | brief(様式解析) | テーマ1行 | `loop/state/<slug>/brief.json`(不変量表・参照作品・生き残らせる信号・技法語彙・ML使用判断 = LITERT_GUIDE §2.1) | `invariants.schema.json` 適合(5±2個。列構成は発注書の実物に準拠: 不変量/担当軸/実装原理/外した場合+優先順。出典は行単位または brief の参照リストで必須) | 再試行→needs_review |
 | S1 | order(発注書生成) | brief | `prompts/<slug>_order.md` | 発注書 lint(必須節・規約ブロック・技術注意・スライダー6〜10・§5語彙≥3) | 再試行→needs_review |
 | S2 | implement(実装) | 発注書 | `fable5_<slug>.html` | V1 静的 lint 全合格 | 修正ループ→needs_review |
 | S3 | runtime(動作検証) | S2 の HTML | スクショ一式+検証レポート | V1 実行時検証 全合格 | 修正ループ→needs_review |

@@ -165,6 +165,14 @@ const validBrief = {
     { id: 6, invariant: "紙の繊維グレインとレイヤーごとの色ムラが物質感を作る", axis: "物質", principle: "cell-hash 由来の静的グレイン(時間シード禁止)", if_missing: "プラスチックに見える" },
   ],
   priority: [1, 2, 4, 3, 5, 6],
+  ml: {
+    needed: true,
+    signal: "depth",
+    runtime: "transformers",
+    model: "onnx-community/depth-anything-v2-small",
+    justification: "深度が無いと空間の離散化(紙層)が消え、ただの色面ポスタライズになる",
+    fakesource: "遠近勾配+段差を持つ合成深度場(?fakedepth=1)で全パスを駆動できる",
+  },
 };
 {
   const { verifyBrief } = await import("./verify_brief.mjs");
@@ -193,6 +201,20 @@ const validBrief = {
   check(
     "F brief principle without vocab → semantic.principle_without_vocab",
     verifyBrief(noVocab).findings.some((f) => f.rule === "semantic.principle_without_vocab"),
+  );
+  const noMl = structuredClone(validBrief);
+  delete noMl.ml;
+  check(
+    "F brief without ml → schema.required (ML判断の明示は必須)",
+    verifyBrief(noMl).findings.some((f) => f.rule === "schema.required"),
+  );
+  const mlIncomplete = structuredClone(validBrief);
+  mlIncomplete.ml = { needed: true, signal: "depth" };
+  check(
+    "F brief ml.needed:true without model/fakesource → schema.required",
+    verifyBrief(mlIncomplete).findings.some(
+      (f) => f.rule === "schema.required" && f.path.includes("ml"),
+    ),
   );
 }
 {
