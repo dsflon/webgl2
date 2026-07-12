@@ -139,8 +139,44 @@
         cursor: pointer;
       }
 
+      /* Launcher (reopen) button — shown only while the panel is collapsed. */
       #togglePanel {
         left: max(14px, env(safe-area-inset-left));
+        width: 38px;
+        padding: 8px 0;
+        font-size: 15px;
+        line-height: 1;
+        text-align: center;
+      }
+
+      #togglePanel.hidden {
+        display: none;
+      }
+
+      /* Close (✕) control docked to the dialog's top-right corner. */
+      #closePanel {
+        position: absolute;
+        top: 9px;
+        right: 9px;
+        z-index: 2;
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        background: rgba(220, 236, 248, 0.06);
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      #closePanel:hover {
+        background: rgba(220, 236, 248, 0.14);
       }
 
       #flipCamera {
@@ -197,6 +233,7 @@
 
       .panel h1 {
         margin: 0 0 6px;
+        padding-right: 30px;
         font-size: 13px;
         letter-spacing: 0.14em;
         color: var(--ink);
@@ -401,8 +438,14 @@
     <canvas id="gl" aria-label="WebGL2 blue dissolve webcam"></canvas>
     <video id="video" playsinline muted autoplay></video>
 
-    <button id="togglePanel" type="button" class="top-btn" aria-expanded="true">
-      HIDE UI
+    <button
+      id="togglePanel"
+      type="button"
+      class="top-btn hidden"
+      aria-label="Show controls"
+      aria-expanded="true"
+    >
+      ☰
     </button>
     <button
       id="flipCamera"
@@ -472,8 +515,11 @@
         const PRESETS = {
           nightChase: {
             label: "Night Chase",
-            ramp: ["#0a2a66", "#35c8ff", "#eaf6ff"],
-            band: "#bfeaff",
+            // Exhaust-like smoke: desaturated cool grays, faint blue only at
+            // the thinnest edge. The red/blue rims still come from the
+            // off-screen police lights (rimL/rimR), not from the gas itself.
+            ramp: ["#2b2926", "#8a8781", "#f0efec"],
+            band: "#ddd9d2",
             rimL: "#ff2f4f",
             rimR: "#2f6dff",
             toneShadow: "#12333a",
@@ -541,12 +587,13 @@
         ];
 
         panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="Hide controls">✕</button>
           <h1>FABLE5 · BLUE DISSOLVE CAM</h1>
           <p>
-            Your outline dissolves into glowing blue gas: a slow background
-            estimate carves a silhouette, its blurred rim becomes a dissolve
-            band, and a grid fluid carries the released smoke upward. Move
-            fast to burn away; hold still to reform.
+            Your outline dissolves into glowing exhaust-like gas: a slow
+            background estimate carves a silhouette, its blurred rim becomes a
+            dissolve band, and a grid fluid carries the released smoke upward.
+            Move fast to burn away; hold still to reform.
           </p>
           <div class="select-row">
             <span>PRESET</span>
@@ -663,11 +710,22 @@
           applyPreset("nightChase");
         });
 
-        togglePanel.addEventListener("click", () => {
-          const collapsed = panel.classList.toggle("collapsed");
-          togglePanel.textContent = collapsed ? "SHOW UI" : "HIDE UI";
+        // Panel visibility: the ✕ inside the dialog closes it; a small ☰
+        // launcher (shown only while collapsed) reopens it.
+        const closePanel = document.getElementById("closePanel");
+
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
           togglePanel.setAttribute("aria-expanded", String(!collapsed));
-        });
+        }
+
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+
+        // Mobile starts with the controls collapsed to keep the frame clear.
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
 
         flipCameraBtn.addEventListener("click", () => {
           state.facingMode =
