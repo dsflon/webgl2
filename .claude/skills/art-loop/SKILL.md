@@ -49,13 +49,8 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
 
 - 生成: テーマから `loop/state/<slug>/brief.json` を作る。中身は
   `loop/schemas/invariants.schema.json` のとおり(references / signals / vocabulary /
-  invariants 5±2 / priority / ml)。vocabulary は制作規約 §5 の正式名称から選ぶ。
+  invariants 5±2 / priority)。vocabulary は制作規約 §5 の正式名称から選ぶ。
   不変量は「実装可能な構造の言葉」で書き、各 principle に vocabulary の語を含める。
-- **ml(意味信号)の判断**: `LITERT_GUIDE.md` §2.1 の判定フロー(3問)を必ず通し、
-  結果を `ml` フィールドに書く。**「使わない」も明示的な判断**(`ml: { needed: false }`)。
-  needed:true の場合は §2.2 の信号カタログから**1信号のみ**選び、§3 の頻度基準で
-  ランタイム(litert / transformers)を決め、justification(その信号が無いと何が
-  見えなくなるか1文)と fakesource(合成信号の仕様)まで埋める。
 - 検証: `node loop/runner/verify_brief.mjs loop/state/<slug>/brief.json`
 - 合格 → `status briefed`
 
@@ -64,8 +59,6 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
 - 生成: `loop/templates/order_template.md` を brief.json で埋めて
   `prompts/fable5_<slug>_order.md` に書く。構造の実物は
   `prompts/fable5_papercraft-cam_order.md`(困ったらこれに寄せる)。
-  brief.ml は発注書 §4 の「意味信号(ML)」節へ転記する(needed:true なら
-  LITERT_GUIDE §4 実装パターン・§4.7 スパイク要求・§6 予防指示の該当行を含める)。
 - 検証: `node loop/runner/verify_order.mjs prompts/fable5_<slug>_order.md`(--legacy 禁止)
 - 合格 → `status ordered`
 

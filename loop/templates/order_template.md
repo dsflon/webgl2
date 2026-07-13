@@ -43,21 +43,6 @@ Phase 1 ではこの表を独自の再解析で置き換えず、復唱と実装
 {技法ごとの具体指定。パス構成の出発点、外部依存(MLモデル等)の有無と
 ?fakesource=1 の実装方針、uDebug のモード割り当て}
 
-### 意味信号(ML)— brief.ml の転記(S0 判定済み。変更禁止)
-
-{brief.ml.needed=false の場合:
-「本作は ML を使わない(S0 判定済み)。実装で独自に ML 依存を追加しないこと。」}
-
-{brief.ml.needed=true の場合、以下で固定する:
-- 信号: {brief.ml.signal}(1作品1信号 — LITERT_GUIDE.md §2.2)
-- ランタイム: {brief.ml.runtime}(選定理由: {LITERT_GUIDE §3 の頻度基準}。変更禁止)
-- モデル: {brief.ml.model} — 入出力の形状・dtype・正規化・URL・ライセンスは
-  Phase 2 のスパイク(LITERT_GUIDE §4.7)で実測し、本節に転記してから Phase 3 へ進むこと
-- 実装パターン: LITERT_GUIDE §4 に従うこと(推論と描画の非同期分離・in-flight 1件・
-  推論結果の EMA ping-pong・全 Tensor の delete() 保証・状態チップ・
-  MODEL LOAD FAILED + RETRY 経路・モデル失敗でも作品を止めない)
-- ?fakesource=1 の合成信号: {brief.ml.fakesource}}
-
 ## 5. 進め方(フェーズ制・厳守)
 
 - Phase 1: 不変量表の復唱+実装上の懸念点の列挙(コードを書かない)
@@ -85,8 +70,7 @@ Phase 1 ではこの表を独自の再解析で置き換えず、復唱と実装
 
 ### 成果物の形
 - 単一の自己完結 HTML。外部ライブラリ・ビルド工程・外部アセット禁止
-  (例外: ML モデル・ランタイムのみ CDN 可 — 許可リストは LITERT_GUIDE.md §8。
-  本作の許可: {なし | 具体的な依存名とバージョン})。
+  (例外: ML モデルのみ CDN 可。本作の許可: {なし | 具体的な依存名})。
 - WebGL2 / GLSL ES 3.00。WebGL1 フォールバック不要。
 - ファイル冒頭に HTML コメントで: 作品概要 / 実行方法 / 様式解析の要約 /
   パイプライン図 / 全スライダーの説明 を書くこと。
