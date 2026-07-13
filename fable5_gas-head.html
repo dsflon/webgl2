@@ -237,6 +237,14 @@
         // ?freeze=1 makes dt = 0: fluid, buoyancy, curl, the fake figure drift
         // and the detection EMA all stop (deterministic still frame).
         const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
+        // KNOWN orientation (person in the TOP ~60% of image space, top-left
+        // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
+        // With the Y-flip fixed, the gas must appear in the TOP of the screen;
+        // if it appears at the bottom the flip is wrong. This lets us exercise
+        // the seg path in this offline environment (no camera / MediaPipe).
+        const FAKESEG = QUERY.get("fakeseg") === "1";
 
         const DEBUG_MODES = [
           "最終",
@@ -616,10 +624,26 @@
             if (uSource == 0) {
               rawMask = fakeMask(vUv, uCx, uCy, uAspect);
             } else if (uSource == 1) {
+              // Real-camera segmentation mask. Coordinate convention matched to
+              // overflowing_aura_4taigyo_v2.html so the mask overlaps the real
+              // person pixel-for-pixel with the P0 background:
+              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
+              //     to the P0 scene (both mirror the same way, so a mirrored
+              //     scene and its mask stay in register).
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — same crop as P0
+              //     (uSegScale is computed exactly like the scene's scale).
+              //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
+              //     image-space, top-left origin, and segTexture is uploaded
+              //     UNPACK_FLIP_Y=false, whereas the video texture is uploaded
+              //     UNPACK_FLIP_Y=true (upright). The explicit 1.0 - y here is
+              //     the mask-side equivalent of overflowing_aura's
+              //     texture(u_person, vec2(camUV.x, 1.0 - camUV.y)) — without it
+              //     the mask lands upside-down and the gas only lands where the
+              //     mask happens to overlap (looks like "only the face").
               vec2 uv = vUv;
               if (uMirror == 1) uv.x = 1.0 - uv.x;
               vec2 suv = (uv - 0.5) * uSegScale + 0.5;
-              rawMask = texture(uSeg, suv).r;
+              rawMask = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
             }
             vec4 prev = texture(uPrev, vUv);
             float mask = uReset == 1 ? rawMask
@@ -834,7 +858,10 @@
             // plume survives and billows (invariant 2). Bounded steady state →
             // no whiteout (invariant 4).
             float up = clamp((vUv.y - 0.28) / 0.62, 0.0, 1.0);
-            float diss = mix(1.55, 0.22, up) + 0.30 * (1.0 - uSmoke);
+            // dissipation kept gentle and fairly uniform so the WHOLE mask
+            // (head included) fills with gas; still slightly weaker up high so
+            // the risen plume above the body survives (invariant 2).
+            float diss = mix(0.9, 0.32, up) + 0.30 * (1.0 - uSmoke);
             d *= exp(-uDt * diss);
 
             // injection over the (softened) person mask, weighted toward the
@@ -847,8 +874,11 @@
             float mott = fbm(vUv * 6.0 + vec2(0.0, -uTime * 0.14));
             mott += 0.6 * fbm(vUv * 13.0 + vec2(uTime * 0.06, -uTime * 0.18));
             mott = pow(clamp(mott / 1.6, 0.0, 1.0), 2.1);
-            float srcW = cover * (0.55 + 1.05 * (1.0 - up));
-            float inj = uPresent * uSmoke * (0.20 + 1.6 * mott) * srcW;
+            // strong minimum gain across the whole mask so every part of the
+            // body (including head / upper torso) gets enough density to read
+            // as full-body gas; a mild extra boost low down feeds the plume.
+            float srcW = cover * (0.85 + 0.5 * (1.0 - up));
+            float inj = uPresent * uSmoke * (0.35 + 1.5 * mott) * srcW;
             // strong taper where density is already moderate so the field never
             // saturates to a flat white blob — it keeps grey-level granular
             // variation (invariant 3) while advected/rising structure survives
@@ -1315,6 +1345,29 @@
           }
         }
 
+        // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
+        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
+        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the
+        // real mask. Person occupies the TOP ~60% of the image, centered band —
+        // so a correct Y-flip renders the gas in the TOP of the screen.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const inTop = y < h * 0.6;          // image top = head/upper body
+              const inBand = x > w * 0.22 && x < w * 0.78;
+              arr[y * w + x] = inTop && inBand ? 255 : 0;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+        }
+
         function uploadSegMask(mask) {
           const w = mask.width, h = mask.height;
           const f = mask.getAsFloat32Array();
@@ -1409,6 +1462,7 @@
           } else if (mpState !== "ready") {
             det.tpresent = 0;
           }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
           const k = FREEZE ? 0 : 1 - Math.exp(-dt * 6);
           det.cx += (det.tcx - det.cx) * k;
           det.cy += (det.tcy - det.cy) * k;
@@ -1449,7 +1503,10 @@
           if (doReset) clearSimTargets();
 
           const aspect = canvas.width / Math.max(canvas.height, 1);
-          const source = FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2);
+          // FAKESEG forces the real-camera seg path (uSource==1) with the
+          // synthetic mask so the Y-flip can be validated offline.
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
 
           const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
           const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
@@ -1734,6 +1791,7 @@
 
         try {
           resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
           // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
           // scene drives the whole pipeline regardless of the camera (the video
           // texture is never sampled, MediaPipe stays untouched), so the camera
