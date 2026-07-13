@@ -15,6 +15,9 @@
        写った人物でも全面真っ白にならない。
     5. 追従 — 人物マスクと運動場を EMA 平滑化。身体の動きが煙をなびかせる外力になる。
     6. 頑健性 — MediaPipe ロード中/未検出/オフラインでも実背景で待機。?fakesource=1 で全駆動。
+    7. モバイル — 検知は ImageSegmenter のみ(Pose 撤去)。推論は 288px 縮小コピーに対して実行、
+       推論時間に応じて間引き(33〜250ms)、GPU デリゲートの出力破綻(全0/全1)が続けば CPU に
+       自動再生成。ステータスチップに 推論ms・デリゲート を表示(実機診断用)。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
     入力: カメラ映像 / fakeScene(GLSL 背景+人型) / MediaPipe seg マスク(uint8 tex, EMA)
@@ -1409,14 +1412,31 @@
         const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
         const SEG_MODEL =
           "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
-        const POSE_MODEL =
-          "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
         let mpSegmenter = null;
-        let mpPose = null;
         let mpState = "idle"; // idle | loading | ready | error
         let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
         let segU8 = new Uint8Array(4);
+        // Inference reads a SMALL offscreen copy of the video, never the full
+        // 1280x720 frame: the mask is consumed at fluid resolution (≤512)
+        // anyway, and a ~288px input is 10-20x cheaper — the difference
+        // between a phone that keeps up and one that janks to a crawl.
+        const SEG_MAX_SIDE = 288;
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;   // EMA of inference ms → adaptive cadence + readout
+        let segBadRun = 0;  // consecutive degenerate masks (GPU-health check)
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
 
         async function loadMediaPipe() {
           if (FAKE || mpState === "loading" || mpState === "ready") return;
@@ -1424,35 +1444,40 @@
           mpProgress = 0.05;
           try {
             const mod = await import(/* @vite-ignore */ MP_PKG);
-            const { FilesetResolver, ImageSegmenter, PoseLandmarker } = mod;
-            mpProgress = 0.25;
-            const vision = await FilesetResolver.forVisionTasks(MP_WASM);
-            mpProgress = 0.5;
-            const segOpts = (delegate) => ({
-              baseOptions: { modelAssetPath: SEG_MODEL, delegate },
-              runningMode: "VIDEO",
-              outputCategoryMask: false,
-              outputConfidenceMasks: true,
-            });
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
             try {
-              mpSegmenter = await ImageSegmenter.createFromOptions(vision, segOpts("GPU"));
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
             } catch (_e) {
-              mpSegmenter = await ImageSegmenter.createFromOptions(vision, segOpts("CPU"));
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
             }
-            mpProgress = 0.8;
-            // No forced delegate — let MediaPipe pick GPU/CPU (matches the
-            // proven overflowing_aura demo; forcing GPU can throw on some GPUs).
-            mpPose = await PoseLandmarker.createFromOptions(vision, {
-              baseOptions: { modelAssetPath: POSE_MODEL },
-              runningMode: "VIDEO",
-              numPoses: 1,
-            });
             mpProgress = 1;
             mpState = "ready";
           } catch (error) {
             console.error("MediaPipe load failed", error);
             mpState = "error";
           }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("gas-head: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
         }
 
         // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
@@ -1478,12 +1503,16 @@
           det.segReady = true;
         }
 
+        // Uploads the confidence mask and returns its mean coverage (0..1).
         function uploadSegMask(mask) {
           const w = mask.width, h = mask.height;
           const f = mask.getAsFloat32Array();
           if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
+          let sum = 0;
           for (let i = 0; i < w * h; i++) {
-            segU8[i] = Math.max(0, Math.min(255, (f[i] * 255) | 0));
+            const v = Math.max(0, Math.min(255, (f[i] * 255) | 0));
+            segU8[i] = v;
+            sum += v;
           }
           gl.bindTexture(gl.TEXTURE_2D, segTexture);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -1495,25 +1524,41 @@
             gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, segU8);
           }
           det.segReady = true;
+          return sum / (w * h * 255);
         }
 
         // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
         // UNTESTED in this environment (network + swiftshader).
         function runDetection(now) {
-          if (video.readyState < 2 || video.videoWidth === 0) return;
-          let sawPerson = false;
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
           try {
-            const seg = mpSegmenter.segmentForVideo(video, now);
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
             const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
-            if (cm) { uploadSegMask(cm); sawPerson = true; }
+            if (cm) {
+              const cover = uploadSegMask(cm);
+              // presence from real coverage — the gas turns off when nobody
+              // is in frame instead of clinging to a stale mask.
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
             if (seg && seg.close) seg.close();
-          } catch (_e) { /* keep last mask */ }
-          try {
-            const pr = mpPose.detectForVideo(video, now);
-            const lm = pr && pr.landmarks && pr.landmarks[0];
-            if (lm && lm.length) sawPerson = true;
-          } catch (_e) { /* pose optional */ }
-          det.tpresent = det.segReady && sawPerson ? 1 : (det.segReady ? 1 : 0);
+          } catch (_e) {
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
+          }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
         }
 
         let detTimer = 0;
@@ -1521,7 +1566,11 @@
           if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
             runDetection(performance.now());
           }
-          detTimer = setTimeout(detectionTick, 33);
+          // Adaptive cadence: inference must never own the main thread. Slow
+          // devices (phones, CPU delegate) detect less often and the mask EMA
+          // bridges the gaps; fast devices stay at ~30Hz.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
         }
 
         /* ------------------------------------------------------------------
@@ -1583,7 +1632,10 @@
           if (FAKE) return "合成";
           if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
           if (mpState === "error") return "検知エラー";
-          if (mpState === "ready") return det.present > 0.4 ? "追従中" : "未検出";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
           return "待機";
         }
 
