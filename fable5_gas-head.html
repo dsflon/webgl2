@@ -256,10 +256,10 @@
 
         const DEFAULTS = {
           smoke: 0.7,
-          rise: 0.55,
+          rise: 0.3,
           swirl: 0.5,
           grain: 0.6,
-          trail: 0.4,
+          trail: 0.3,
           filmGrain: 0.35,
           bgBright: 1.0,
           edge: 0.5,
@@ -643,7 +643,11 @@
               vec2 uv = vUv;
               if (uMirror == 1) uv.x = 1.0 - uv.x;
               vec2 suv = (uv - 0.5) * uSegScale + 0.5;
-              rawMask = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              // firm the soft MediaPipe confidence mask toward 0/1 so the body
+              // is solidly covered (real seg is fuzzy; cov must reach ~1 to
+              // hide the person) — coordinator fix #2.
+              rawMask = smoothstep(0.30, 0.72, rawSeg);
             }
             vec4 prev = texture(uPrev, vUv);
             float mask = uReset == 1 ? rawMask
@@ -736,29 +740,25 @@
             vec2 flow = decV(mk.ba);
             float den = texture(uDen, vUv).r;
 
-            // buoyancy — dense smoke keeps rising and billows above the body.
-            // Strong so the plume climbs well above the head instead of piling.
-            v.y += (1.1 + 5.4 * uRise) * den * uDt;
-            // a lift rooted in the body so the plume launches upward from it
-            v.y += mask * uPresent * (0.5 + 1.8 * uRise) * uDt * 1.1;
+            // GENTLE buoyancy — the gas should linger and waft AROUND the body
+            // rather than shoot up and fill the screen (coordinator fix #1).
+            v.y += (0.15 + 0.9 * uRise) * den * uDt;
+            // a whisper of lift rooted in the body
+            v.y += mask * uPresent * (0.1 + 0.4 * uRise) * uDt * 0.5;
 
             // body motion drags the gas near the person (invariant 5)
-            v += flow * (1.2 * clamp(mask, 0.0, 1.0)) * uDt;
+            v += flow * (1.0 * clamp(mask, 0.0, 1.0)) * uDt;
 
-            // curl noise turbulence, four octaves (coarse→fine) scrolling up so
-            // the plume churns and mushrooms; the fine octaves tatter the edges
-            // into ragged, cauliflower exhaust. Gated broadly so thin gas churns
-            // too (invariant 3).
-            float wSmoke = smoothstep(0.002, 0.06, den);
-            vec2 np = vUv * 3.0 + vec2(0.0, -uTime * 0.06);
-            vec2 np2 = vUv * 6.5 + vec2(uTime * 0.045, -uTime * 0.02);
-            vec2 np3 = vUv * 12.5 + vec2(-uTime * 0.06, uTime * 0.03);
-            vec2 np4 = vUv * 22.0 + vec2(uTime * 0.02, -uTime * 0.08);
-            vec2 cn = curlN(np) + 0.8 * curlN(np2)
-              + 0.55 * curlN(np3) + 0.35 * curlN(np4);
-            v += cn * (0.30 + 2.6 * uSwirl) * wSmoke * uDt;
+            // curl noise turbulence — modest, so the haze roils in place near
+            // the body instead of spreading. Gated by density (invariant 3).
+            float wSmoke = smoothstep(0.02, 0.12, den);
+            vec2 np = vUv * 3.4 + vec2(0.0, -uTime * 0.05);
+            vec2 np2 = vUv * 7.0 + vec2(uTime * 0.04, -uTime * 0.02);
+            vec2 np3 = vUv * 13.0 + vec2(-uTime * 0.05, uTime * 0.03);
+            vec2 cn = curlN(np) + 0.7 * curlN(np2) + 0.45 * curlN(np3);
+            v += cn * (0.12 + 0.9 * uSwirl) * wSmoke * uDt;
 
-            // vorticity confinement — curl eddies into denser churning clumps
+            // vorticity confinement — curl eddies into churning clumps (modest)
             float cC = decS(texture(uCurl, vUv).r);
             float cL = decS(texture(uCurl, vUv - vec2(uTexel.x, 0.0)).r);
             float cR = decS(texture(uCurl, vUv + vec2(uTexel.x, 0.0)).r);
@@ -766,10 +766,11 @@
             float cT = decS(texture(uCurl, vUv + vec2(0.0, uTexel.y)).r);
             vec2 gAbs = 0.5 * vec2(abs(cR) - abs(cL), abs(cT) - abs(cB));
             vec2 nDir = gAbs / max(length(gAbs), 1e-4);
-            v += vec2(nDir.y, -nDir.x) * cC * (0.9 + uSwirl * 3.6) * uDt;
+            v += vec2(nDir.y, -nDir.x) * cC * (0.5 + uSwirl * 1.8) * uDt;
 
-            // light damping so the upward flow reaches high before settling
-            v *= exp(-uDt * 0.35);
+            // STRONG damping so velocities stay small and the gas cannot travel
+            // far from the body — keeps the haze local (coordinator fix #1).
+            v *= exp(-uDt * 1.1);
             fragColor = vec4(encV(v), 0.0, 1.0);
           }
         `;
@@ -853,37 +854,28 @@
             vec2 v = decV(texture(uVel, vUv).rg);
             float d = texture(uDen, vUv - v * uDt).r;
 
-            // height-aware dissipation: near the body base the gas clears
-            // faster (bounded source), higher up it barely decays so the risen
-            // plume survives and billows (invariant 2). Bounded steady state →
-            // no whiteout (invariant 4).
-            float up = clamp((vUv.y - 0.28) / 0.62, 0.0, 1.0);
-            // dissipation kept gentle and fairly uniform so the WHOLE mask
-            // (head included) fills with gas; still slightly weaker up high so
-            // the risen plume above the body survives (invariant 2).
-            float diss = mix(0.9, 0.32, up) + 0.30 * (1.0 - uSmoke);
+            float cover = clamp(texture(uMask, vUv).r, 0.0, 1.0);
+            // CONTAINMENT (coordinator fix #1): dissipation depends on distance
+            // from the person, not height. Inside the mask the gas persists
+            // (slow decay); as soon as it drifts off the body (cover→0) it fades
+            // fast, so the haze stays clamped to the person and its immediate
+            // surround and never accumulates across the whole frame. Bounded
+            // steady state → no whiteout (invariant 4).
+            float diss = mix(3.6, 0.85, cover) + 0.30 * (1.0 - uSmoke);
             d *= exp(-uDt * diss);
 
-            // injection over the (softened) person mask, weighted toward the
-            // lower / central body so the trunk is a dense SOURCE that feeds
-            // the plume; the upper body shows mostly fluid-carried rising smoke
-            // (invariant 2a — not a flat painted fill).
-            float cover = clamp(texture(uMask, vUv).r, 0.0, 1.0);
-            // multi-octave mottle scrolling upward → granular churn
-            // (invariant 3). Frozen & deterministic under ?freeze=1 (uTime=0).
+            // injection over the whole (softened) person mask → full-body gas.
+            // multi-octave mottle → granular churn (invariant 3). Frozen &
+            // deterministic under ?freeze=1 (uTime = 0).
             float mott = fbm(vUv * 6.0 + vec2(0.0, -uTime * 0.14));
             mott += 0.6 * fbm(vUv * 13.0 + vec2(uTime * 0.06, -uTime * 0.18));
             mott = pow(clamp(mott / 1.6, 0.0, 1.0), 2.1);
-            // strong minimum gain across the whole mask so every part of the
-            // body (including head / upper torso) gets enough density to read
-            // as full-body gas; a mild extra boost low down feeds the plume.
-            float srcW = cover * (0.85 + 0.5 * (1.0 - up));
-            float inj = uPresent * uSmoke * (0.35 + 1.5 * mott) * srcW;
-            // strong taper where density is already moderate so the field never
-            // saturates to a flat white blob — it keeps grey-level granular
-            // variation (invariant 3) while advected/rising structure survives
-            inj *= 1.0 - 0.7 * smoothstep(0.4, 0.85, d);
-            d += inj * uDt * 2.2;
+            // uniform strong gain across the mask so the entire body fills with
+            // gas (coordinator fix #2 — hide the person). The taper keeps
+            // grey-level granular variation instead of a flat white blob.
+            float inj = uPresent * uSmoke * (0.35 + 1.4 * mott) * cover;
+            inj *= 1.0 - 0.65 * smoothstep(0.45, 0.9, d);
+            d += inj * uDt * 2.6;
 
             // edge tatter — break the fringe hard into ragged, torn exhaust
             float en = fbm(vUv * 9.0 + 11.3);
@@ -952,11 +944,12 @@
           float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
           // density → gas color: raw grayscale (SMOKE DENSITY look), faint cool
-          // tint. Mapped into a clear MID-GREY range (never near white) so even
-          // a large/close person stays smoke-grey — no whiteout (invariant 4).
+          // tint. Whiter smoke range (coordinator fix #3) but still capped below
+          // pure white (0.90); combined with containment (fix #1) it never fills
+          // the frame, and the whiteout guard below is the final backstop.
           vec3 gasColor(float g) {
-            float v = mix(0.14, 0.62, pow(clamp(g, 0.0, 1.0), 0.9));
-            return clamp(vec3(v) * vec3(0.97, 1.0, 1.04), 0.0, 0.70);
+            float v = mix(0.32, 0.86, pow(clamp(g, 0.0, 1.0), 0.9));
+            return clamp(vec3(v) * vec3(0.98, 1.0, 1.03), 0.0, 0.90);
           }
           void main() {
             float den = texture(uDen, vUv).r;
@@ -981,8 +974,24 @@
               return;
             }
 
-            // real background, mild exposure
-            vec3 bg = clamp(texture(uScene, vUv).rgb * uBgBright, 0.0, 1.0);
+            // firm the (soft) person mask toward 0/1 so the body is solidly
+            // covered and the person is hidden (coordinator fix #2).
+            float cov = smoothstep(0.30, 0.72, clamp(texture(uMask, vUv).r, 0.0, 1.0));
+
+            // real background. UNDER the person mask the footage is blurred and
+            // darkened so the face / outline does not read crisply through the
+            // gas (fix #2); OUTSIDE the mask the background stays sharp & bright.
+            vec3 bgSharp = texture(uScene, vUv).rgb;
+            vec2 bpx = 3.5 / uResolution;
+            vec3 bgBlur = (
+              texture(uScene, vUv + vec2(bpx.x, 0.0)).rgb +
+              texture(uScene, vUv - vec2(bpx.x, 0.0)).rgb +
+              texture(uScene, vUv + vec2(0.0, bpx.y)).rgb +
+              texture(uScene, vUv - vec2(0.0, bpx.y)).rgb +
+              texture(uScene, vUv + bpx).rgb +
+              texture(uScene, vUv - bpx).rgb) / 6.0;
+            vec3 bg = mix(bgSharp, bgBlur * 0.5, cov);
+            bg = clamp(bg * uBgBright, 0.0, 1.0);
 
             // subtle self-glow halo (feedback + bloom) — strongly tamed
             float fb = texture(uFb, vUv).r;
@@ -991,12 +1000,11 @@
             float halo = max(fb, 0.55 * b1 + 0.45 * b2);
 
             float g = clamp(den, 0.0, 1.0);
-            float cov = clamp(texture(uMask, vUv).r, 0.0, 1.0);
             // the body is guaranteed a grey-gas floor so the person's color
             // never shows through (invariant 1 — full-body replacement); the
             // churning density is added on top so the level still moves and
             // reads as billowing smoke rather than a flat fill.
-            float gasLevel = clamp(cov * 0.45 + g * 0.72, 0.0, 1.0);
+            float gasLevel = clamp(cov * 0.5 + g * 0.7, 0.0, 1.0);
             vec3 smokeCol = gasColor(gasLevel);
             // churn: a slowly rising fbm modulates the grey so the smoke
             // visibly mushrooms and roils (invariant 3). Deterministic under
@@ -1021,7 +1029,7 @@
             vec3 col = mix(under, smokeCol, alpha);
             // faint additive lift for thin outer wisps; vanishes where covered
             // and where there is no smoke, so the background stays intact.
-            col += smokeCol * halo * (0.04 + 0.06 * uTrail) * (1.0 - alpha);
+            col += smokeCol * halo * (0.02 + 0.03 * uTrail) * (1.0 - alpha);
 
             // vignette (mild)
             vec2 vq = (vUv - 0.5) * vec2(uResolution.x / uResolution.y, 1.0);
