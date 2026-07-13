@@ -1,45 +1,47 @@
 <!doctype html>
 <!--
-  fable5_gas-head.html — WebGL2 webcam →「Gas Head Cam」
-  スーツの身体は実写のまま、頭部だけが首元から立ち上る大量の粒状・白青い体積煙に
-  置き換わる「ガスヘッド」。黒背景・強コントラスト。参照 refs/ref1_gashead.jpg(主) /
-  refs/ref2_wisps.jpg(副)の忠実再現を狙う。派生元エンジン: fable5_smoke-portrait.html。
+  fable5_gas-head.html — WebGL2 webcam →「Gas Body Cam」(v2 全身ガス化 / 実背景)
+  カメラに映る人物の全身が、SMOKE DENSITY 風のグレー粒状ガスに置き換わり buoyancy で
+  立ち上る。周囲(背景)は実カメラ映像をほぼそのまま描画する。人型のグレーの煙の塊が、
+  実写の背景の上を漂い・立ち上る絵。派生元エンジン: fable5_smoke-portrait.html /
+  fable5_blue-dissolve.html(ガス質感)/ overflowing_aura_4taigyo_v2.html(人物検知)。
 
   様式解析(視覚的不変量。優先度 1>2>3>4>5>6):
-    1. 二領域 — マスク内の首から下は実写、ポーズ検知の頭部楕円内だけ煙に置換。境界はソフト遷移。
-    2. 体積煙 — 頭部から実際に立ち上る Stable Fluids。首元濃く上へ膨らみ薄れる(重ね画像でない)。
+    1. 実背景 — 背景(人物以外)は実カメラ映像をほぼ生で描画。黒背景にしない。
+    2. 全身ガス — 人物マスク領域全体を密度で満たし buoyancy で立ち上らせる。身体の実写は
+       ガスに覆われて見えなくなる(頭だけでなく全身)。
     3. 粒状 — 密度に fbm を乗算しムラ、縁はノイズディザで破断。全面に静的フィルムグレイン。
-    4. 配色 — 密度→白青ランプ(下濃上淡)、背景は黒+微ヘイズ、身体は軽いティール split-tone、強コントラスト。
-    5. 追従 — 頭部中心/半径/噴出源を EMA 平滑化。身体の動き(運動場)を煙の外力に。
-    6. 頑健性 — MediaPipe ロード中/未検出/オフラインでも黒+微ヘイズで待機。?fakesource=1 で全駆動。
+    4. 非白飛び — ガスはグレー。密度が濃くても純白に張り付かない(上限を抑える)。大きく
+       写った人物でも全面真っ白にならない。
+    5. 追従 — 人物マスクと運動場を EMA 平滑化。身体の動きが煙をなびかせる外力になる。
+    6. 頑健性 — MediaPipe ロード中/未検出/オフラインでも実背景で待機。?fakesource=1 で全駆動。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
-    入力: カメラ映像 / fakeScene(GLSL スーツ+頭) / MediaPipe seg マスク(uint8 tex) + 頭部中心/半径(uniform, EMA)
-    [P0 scene]  cover-fit+mirror                       sceneA/B RGBA8 長辺≤1280
-    [P1 mask]   seg tex or fake SDF → 人物マスク        maskA/B★ ≤512  R=maskEMA BA=運動場
-    [P2 blur]   マスク分離ブラー(境界ソフト)         softT★
-    [P3 curl]→[P4 vel 移流+浮力+curl+渦度+運動場]→[P5 div]→[P6..29 Jacobi×24]→[P30 proj]  vel/prs★ ≤512
-    [P31 den]   移流+減衰+首元ガウス注入+fbm粒状+縁ディザ  denA/B★ ≤512
-    [P32 emis]→[P33 fb 残像]→[P34-37 bloom]  emis/fb★ b1 b2
-    [P38 composite] 黒+微ヘイズ→実写身体(ティール)→頭部を煙にcrossfade→白青ランプ煙→強コントラスト→静的グレイン
+    入力: カメラ映像 / fakeScene(GLSL 背景+人型) / MediaPipe seg マスク(uint8 tex, EMA)
+    [P0 scene]  cover-fit+mirror(=実背景)                sceneA/B RGBA8 長辺≤1280
+    [P1 mask]   seg tex or fake SDF → 人物マスク + 運動場   maskA/B★ ≤512  R=maskEMA BA=運動場
+    [P2 blur]   マスク縁ソフト化                           softT★
+    [P3 curl]→[P4 vel 移流+浮力+curl+渦度+運動場]→[P5 div]→[P6..29 Jacobi×24]→[P30 proj] ★ ≤512
+    [P31 den]   移流+減衰+マスク全体へ密度注入+fbm粒状+縁ディザ  denA/B★ ≤512  clamp[0,1]
+    [P32 emis]→[P33 fb 残像]→[P34-37 bloom(控えめ)]        emis/fb★ b1 b2
+    [P38 composite] 実背景→グレー粒状ガスを密度でアルファ合成(上限0.88)→静的グレイン
 
   実行方法:
-    python3 -m http.server 8888 → http://localhost:8888/fable5_gas-head.html を開きカメラを許可
+    python3 -m http.server 8899 → http://localhost:8899/fable5_gas-head.html を開きカメラを許可
     (カメラ API はセキュアコンテキスト必須。file:// では動きません)
-    ?fakesource=1 … カメラ不使用。合成スーツ+頭(ゆっくり動く)で全パイプライン駆動(検証用)
+    ?fakesource=1 … カメラ/MediaPipe 不使用。合成背景+動く人型で全パイプライン駆動(検証用)
     ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
-    デバッグ表示: 0=最終 1=人物マスク 2=頭部楕円/噴出源 3=煙密度 4=速度場 5=配色標本
+    デバッグ表示: 0=最終 1=人物マスク 2=煙密度(グレー) 3=速度場 4=配色標本
 
   スライダーの説明:
-    煙の量      頭部(首元)からの密度注入量
+    煙の量      人物マスク全体への密度注入量
     立ち上り    buoyancy(煙が上昇する強さ)
-    渦          vorticity+curl noise の乱流
-    粒状感      排気ガス的な粒(fbm 乗算)と縁の破断の強さ
-    頭部範囲    煙に置換する頭部楕円の大きさ
-    境界ぼかし  実写→煙の遷移の柔らかさ
-    残像        feedback 残光の長さ
-    ティール    身体・全体のティール split-tone と背景の黒さ
+    渦          vorticity+カールノイズの乱流
+    粒状        排気ガス的な粒(fbm 乗算)と縁の破断の強さ
+    残像        feedback 残光が残る長さ
     フィルム粒子 全面の静的グレイン
+    背景の明るさ 実カメラ背景の露出
+    境界ぼかし  人物マスク縁の柔らかさ
 
   依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
   WebGL2 / GLSL ES 3.00 単体。
@@ -51,23 +53,21 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>FABLE5 · Gas Head Cam — WebGL2 volumetric smoke head</title>
+    <title>FABLE5 · Gas Body Cam — WebGL2 full-body volumetric smoke</title>
     <style>
       :root {
         color-scheme: dark;
-        --bg: #04070a;
-        --ink: #dcecf2;
-        --muted: rgba(220, 236, 242, 0.66);
-        --panel: rgba(5, 12, 16, 0.84);
-        --line: rgba(220, 236, 242, 0.16);
-        --accent: #4fd6d0;
+        --bg: #05080b;
+        --ink: #e4ecf0;
+        --muted: rgba(228, 236, 240, 0.66);
+        --panel: rgba(8, 12, 16, 0.84);
+        --line: rgba(228, 236, 240, 0.16);
+        --accent: #b9c6cc;
       }
       * { box-sizing: border-box; }
       html, body {
         width: 100%; height: 100%; margin: 0; overflow: hidden;
-        background:
-          radial-gradient(circle at 72% 16%, rgba(79, 214, 208, 0.10), transparent 34%),
-          linear-gradient(160deg, #03060a, #05121a 55%, #04080c);
+        background: linear-gradient(160deg, #06090d, #0a1014 55%, #05080b);
         font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
       }
       canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
@@ -90,10 +90,10 @@
         position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
         display: flex; align-items: center; justify-content: center; padding: 0;
         border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
-        background: rgba(220, 236, 242, 0.06); font: inherit; font-size: 14px;
+        background: rgba(228, 236, 240, 0.06); font: inherit; font-size: 14px;
         line-height: 1; cursor: pointer;
       }
-      #closePanel:hover { background: rgba(220, 236, 242, 0.14); }
+      #closePanel:hover { background: rgba(228, 236, 240, 0.14); }
       #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
       @media (pointer: coarse) { #flipCamera { display: block; } }
       #statusChip {
@@ -125,7 +125,7 @@
       }
       .select-row select {
         flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
-        background: rgba(220, 236, 242, 0.06); border: 1px solid var(--line);
+        background: rgba(228, 236, 240, 0.06); border: 1px solid var(--line);
         border-radius: 7px; font: inherit; font-size: 10.5px;
       }
       .row {
@@ -146,7 +146,7 @@
       .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
       .buttons button {
         flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
-        border-radius: 8px; color: var(--ink); background: rgba(220, 236, 242, 0.06);
+        border-radius: 8px; color: var(--ink); background: rgba(228, 236, 240, 0.06);
         font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
       }
       .status {
@@ -159,7 +159,7 @@
       }
       #overlay {
         position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
-        justify-content: center; padding: 20px; background: rgba(2, 6, 10, 0.76);
+        justify-content: center; padding: 20px; background: rgba(4, 6, 10, 0.76);
         backdrop-filter: blur(6px); transition: opacity 0.3s ease;
       }
       #overlay.hidden { opacity: 0; pointer-events: none; }
@@ -171,7 +171,7 @@
       .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
       .overlay-card button {
         margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
-        color: var(--ink); background: rgba(220, 236, 242, 0.08); font: inherit;
+        color: var(--ink); background: rgba(228, 236, 240, 0.08); font: inherit;
         font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
       }
       @media (max-width: 640px) {
@@ -189,7 +189,7 @@
   </head>
 
   <body>
-    <canvas id="gl" aria-label="WebGL2 gas head webcam"></canvas>
+    <canvas id="gl" aria-label="WebGL2 gas body webcam"></canvas>
     <video id="video" playsinline muted autoplay></video>
 
     <button id="togglePanel" type="button" class="top-btn hidden"
@@ -197,7 +197,7 @@
     <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
     <div id="statusChip">起動中</div>
 
-    <section id="panel" class="panel" aria-label="Gas head webcam controls"></section>
+    <section id="panel" class="panel" aria-label="Gas body webcam controls"></section>
 
     <div id="overlay" role="status" aria-live="polite">
       <div class="overlay-card">
@@ -229,34 +229,32 @@
         ).matches;
 
         const QUERY = new URLSearchParams(location.search);
-        // ?fakesource=1 replaces the camera with a synthetic scene (a teal
-        // suited bust whose head slowly drifts). MediaPipe is not used; the
-        // person mask + head ellipse + neck source are generated analytically
-        // so the whole smoke/grain/color/tracking pipeline runs offline.
+        // ?fakesource=1 replaces the camera with a synthetic scene (a patterned
+        // room backdrop with a slowly drifting full-body figure). MediaPipe is
+        // not used; the person mask is generated analytically so the whole
+        // smoke / grain / tracking pipeline runs offline.
         const FAKE = QUERY.get("fakesource") === "1";
-        // ?freeze=1 makes dt = 0: fluid, buoyancy, curl, grain animation,
-        // the fake head drift and the detection EMA all stop (deterministic).
+        // ?freeze=1 makes dt = 0: fluid, buoyancy, curl, the fake figure drift
+        // and the detection EMA all stop (deterministic still frame).
         const FREEZE = QUERY.get("freeze") === "1";
 
         const DEBUG_MODES = [
           "最終",
           "人物マスク",
-          "頭部楕円/噴出源",
           "煙密度",
           "速度場",
           "配色標本",
         ];
 
         const DEFAULTS = {
-          smoke: 0.6,
-          rise: 0.56,
-          swirl: 0.62,
+          smoke: 0.7,
+          rise: 0.55,
+          swirl: 0.5,
           grain: 0.6,
-          headSize: 1.0,
-          blend: 0.5,
-          trail: 0.42,
-          grade: 0.5,
+          trail: 0.4,
           filmGrain: 0.35,
+          bgBright: 1.0,
+          edge: 0.5,
         };
 
         const state = {
@@ -268,25 +266,24 @@
         };
 
         const uiRows = [
-          ["smoke", "煙の量", "頭部(首元)からの密度注入量", 0, 1, 0.01],
+          ["smoke", "煙の量", "人物マスク全体への密度注入量", 0, 1, 0.01],
           ["rise", "立ち上り", "buoyancy(煙が上昇する強さ)", 0, 1, 0.01],
           ["swirl", "渦", "vorticity+カールノイズの乱流", 0, 1, 0.01],
-          ["grain", "粒状感", "排気ガス的な粒(fbm)と縁の破断", 0, 1, 0.01],
-          ["headSize", "頭部範囲", "煙に置換する頭部楕円の大きさ", 0.5, 1.5, 0.01],
-          ["blend", "境界ぼかし", "実写→煙の遷移の柔らかさ", 0, 1, 0.01],
+          ["grain", "粒状", "排気ガス的な粒(fbm)と縁の破断", 0, 1, 0.01],
           ["trail", "残像", "煙の残光が残る長さ", 0, 1, 0.01],
-          ["grade", "ティール", "身体・全体のティール寄せと背景の黒さ", 0, 1, 0.01],
           ["filmGrain", "フィルム粒子", "全面の静的グレイン", 0, 1, 0.01],
+          ["bgBright", "背景の明るさ", "実カメラ背景の露出", 0.5, 1.5, 0.01],
+          ["edge", "境界ぼかし", "人物マスク縁の柔らかさ", 0, 1, 0.01],
         ];
 
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
           <div class="panel-body">
-          <h1>FABLE5 · ガスヘッド CAM</h1>
+          <h1>FABLE5 · ガスボディ CAM</h1>
           <p>
-            スーツの身体は実写のまま残し、頭部だけを首元から立ち上る大量の粒状な白青い
-            煙に置き換えます。頭部は移流・浮力・渦で動く体積流体で、下ほど濃く上へ
-            もくもくと膨らみ薄れます。黒背景・強コントラスト。
+            カメラに映る人物の全身を、SMOKE DENSITY 風のグレー粒状ガスに置き換えます。
+            ガスは移流・浮力・渦で動く体積流体で立ち上り、身体の実写はガスに覆われて
+            見えなくなります。周囲(背景)は実カメラ映像をほぼそのまま描画します。
           </p>
           <div class="select-row">
             <span>デバッグ表示</span>
@@ -383,7 +380,7 @@
         document.getElementById("savePng").addEventListener("click", () => {
           const link = document.createElement("a");
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          link.download = `fable5-gas-head-${stamp}.png`;
+          link.download = `fable5-gas-body-${stamp}.png`;
           link.href = canvas.toDataURL("image/png");
           link.click();
         });
@@ -398,6 +395,7 @@
           retryCamera.hidden = !buttons.retryCamera;
           overlay.classList.toggle("hidden", kind === "hidden");
         }
+
         /* ------------------------------------------------------------------
            WebGL2 setup
         ------------------------------------------------------------------ */
@@ -490,23 +488,9 @@
           float decS(float e) { return (e - 0.5) * (2.0 * SMAX); }
         `;
 
-        // Shared: head ellipse in screen UV. Center + radius (radius already
-        // scaled by the headSize slider in JS) define the region that is
-        // replaced by smoke; the neck point (bottom of the ellipse) is the
-        // density injection source.
-        const CHUNK_HEAD = `
-          float headND(vec2 uv, vec2 c, float r, float aspect) {
-            vec2 d = uv - c;
-            d.x *= aspect;
-            d.y /= 1.18;               // head a touch taller than wide
-            return length(d) / max(r, 1e-4);
-          }
-        `;
-
-        // Shared: the ?fakesource=1 synthetic scene — a teal suited bust on
-        // near-black, whose head (drawn at uHeadCenter/uHeadRadius so it always
-        // matches the ellipse the shaders use) slowly drifts. fakeMask returns
-        // the person coverage used in place of the MediaPipe segmentation mask.
+        // Shared: the ?fakesource=1 synthetic scene. A patterned "room" backdrop
+        // (never black) with a full-body figure that slowly drifts. fakeMask
+        // returns the person coverage used in place of the MediaPipe mask.
         const CHUNK_FAKE = `
           float sdSeg(vec2 p, vec2 a, vec2 b) {
             vec2 pa = p - a;
@@ -518,52 +502,50 @@
             float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
             return mix(b, a, h) - k * h * (1.0 - h);
           }
-          // p and headC are in aspect-corrected space; r is in y-units.
-          float fakeBustDist(vec2 p, vec2 headC, float r) {
+          // p is aspect-corrected around x = 0.5. cx is the drifting body center.
+          float humanDist(vec2 p, float cx) {
             float d = 1e9;
-            // shoulders: wide horizontal capsule
-            d = min(d, sdSeg(p, vec2(0.30, 0.34), vec2(0.70, 0.34)) - 0.125);
-            // torso down to the bottom of frame
-            d = smin2(d, sdSeg(p, vec2(0.5, -0.05), vec2(0.5, 0.36)) - 0.20, 0.06);
-            // neck
-            d = smin2(d, sdSeg(p, vec2(headC.x, headC.y - r * 1.05),
-              vec2(headC.x, 0.40)) - 0.052, 0.03);
-            // head
-            d = smin2(d, length((p - headC) / vec2(1.0, 1.18)) - r, 0.02);
+            vec2 hc = vec2(cx, 0.74);
+            d = min(d, length((p - hc) / vec2(1.0, 1.12)) - 0.085);          // head
+            d = smin2(d, sdSeg(p, vec2(cx, 0.665), vec2(cx, 0.60)) - 0.032, 0.02); // neck
+            d = smin2(d, sdSeg(p, vec2(cx, 0.585), vec2(cx, 0.16)) - 0.145, 0.06); // torso
+            d = smin2(d, sdSeg(p, vec2(cx - 0.16, 0.585), vec2(cx + 0.16, 0.585)) - 0.075, 0.05); // shoulders
+            d = smin2(d, sdSeg(p, vec2(cx - 0.18, 0.57), vec2(cx - 0.215, 0.30)) - 0.05, 0.04); // left arm
+            d = smin2(d, sdSeg(p, vec2(cx + 0.18, 0.57), vec2(cx + 0.215, 0.30)) - 0.05, 0.04); // right arm
             return d;
           }
-          vec3 fakeScene(vec2 uv, vec2 headC, float r, float aspect) {
-            // near-black backdrop with a faint vertical lift
-            vec3 col = mix(vec3(0.010, 0.016, 0.020), vec3(0.020, 0.030, 0.038), uv.y);
-            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y);
-            vec2 hc = vec2((headC.x - 0.5) * aspect + 0.5, headC.y);
-            float d = fakeBustDist(p, hc, r);
-            float m = 1.0 - smoothstep(-0.004, 0.006, d);
-            // teal suit, lighter collar V, darker tie
-            float shade = 0.70 + 0.55 * smoothstep(0.02, 0.55, uv.y);
-            vec3 suit = vec3(0.13, 0.52, 0.55) * shade;
-            float collar = smoothstep(0.05, 0.0, abs(p.x - 0.5) - (0.40 - uv.y) * 0.20);
-            collar *= smoothstep(0.30, 0.44, uv.y) * (1.0 - smoothstep(0.44, 0.50, uv.y));
-            suit = mix(suit, vec3(0.62, 0.80, 0.82) * shade, collar * 0.8);
-            float tie = smoothstep(0.028, 0.0, abs(p.x - 0.5)) *
-              smoothstep(0.44, 0.40, uv.y) * step(0.12, uv.y);
-            suit = mix(suit, vec3(0.08, 0.36, 0.40) * shade, tie * 0.9);
-            // head skin-ish tone (mostly hidden by smoke in the final image)
-            float headM = 1.0 - smoothstep(r * 0.9, r * 1.05,
-              length((p - hc) / vec2(1.0, 1.18)));
-            suit = mix(suit, vec3(0.52, 0.46, 0.42), headM * 0.85);
-            return mix(col, suit, m);
+          vec3 fakeScene(vec2 uv, float cx, float cy, float aspect) {
+            // discernible non-black background: cool top → warm bottom gradient,
+            // soft vertical stripes, a faint horizon band, gentle mottle.
+            vec3 top = vec3(0.20, 0.25, 0.33);
+            vec3 bot = vec3(0.50, 0.44, 0.36);
+            vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
+            bg += 0.045 * (0.5 + 0.5 * sin(uv.x * 38.0) - 0.5);
+            float horizon = exp(-pow((uv.y - 0.55) * 6.0, 2.0));
+            bg = mix(bg, vec3(0.62, 0.58, 0.48), 0.18 * horizon);
+            bg += 0.05 * (vnoise(uv * 4.0) - 0.5);
+            // the person as they'd appear in the camera: shirt + skin head.
+            // cy bobs the figure so the mask moves (drives turbulence / rise).
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            float d = humanDist(p, cx);
+            float m = 1.0 - smoothstep(-0.004, 0.008, d);
+            float shade = 0.75 + 0.4 * smoothstep(0.1, 0.7, uv.y);
+            vec3 shirt = vec3(0.46, 0.30, 0.28) * shade;
+            float headM = 1.0 - smoothstep(0.075, 0.095,
+              length((p - vec2(cx, 0.74)) / vec2(1.0, 1.12)));
+            vec3 skin = vec3(0.60, 0.46, 0.40);
+            vec3 person = mix(shirt, skin, headM);
+            return clamp(mix(bg, person, m), 0.0, 1.0);
           }
-          float fakeMask(vec2 uv, vec2 headC, float r, float aspect) {
-            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y);
-            vec2 hc = vec2((headC.x - 0.5) * aspect + 0.5, headC.y);
-            float d = fakeBustDist(p, hc, r);
-            return 1.0 - smoothstep(-0.006, 0.010, d);
+          float fakeMask(vec2 uv, float cx, float cy, float aspect) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            return 1.0 - smoothstep(-0.006, 0.010, humanDist(p, cx));
           }
         `;
 
         // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
-        // working scene buffer. Everything downstream is screen-aligned.
+        // working scene buffer. This is the REAL background: everything
+        // downstream is screen-aligned to it.
         const sceneFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -571,9 +553,9 @@
           uniform sampler2D uVideo;
           uniform vec2 uResolution;
           uniform vec2 uVideoSize;
-          uniform vec2 uHeadCenter;
-          uniform float uHeadRadius;
           uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
           uniform int uMirror;
           uniform int uFake;
           uniform int uHasVideo;
@@ -581,12 +563,13 @@
           ${CHUNK_FAKE}
           void main() {
             if (uFake == 1) {
-              fragColor = vec4(
-                fakeScene(vUv, uHeadCenter, uHeadRadius, uAspect), 1.0);
+              fragColor = vec4(fakeScene(vUv, uCx, uCy, uAspect), 1.0);
               return;
             }
             if (uHasVideo == 0) {
-              fragColor = vec4(0.010, 0.016, 0.022, 1.0);
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.10, 0.12, 0.15),
+                vec3(0.16, 0.18, 0.22), vUv.y), 1.0);
               return;
             }
             vec2 uv = vUv;
@@ -601,10 +584,10 @@
           }
         `;
 
-        // P1 — the mask/field: R = person mask EMA (fake SDF, uploaded
-        // MediaPipe segmentation with cover-fit, or 0 when nothing is
-        // detected), BA = motion field (frame-difference flow, EMA-smoothed)
-        // so body movement can nudge the smoke (invariant 5).
+        // P1 — the mask/field: R = person mask EMA (fake SDF, uploaded MediaPipe
+        // segmentation with cover-fit, or 0 when nothing is detected),
+        // BA = motion field (frame-difference flow, EMA-smoothed) so body
+        // movement can nudge the smoke (invariant 5).
         const maskFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -615,22 +598,23 @@
           uniform sampler2D uSeg;
           uniform vec2 uTexel;
           uniform vec2 uSegScale;
-          uniform vec2 uHeadCenter;
-          uniform float uHeadRadius;
           uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
           uniform float uDt;
           uniform float uAlphaMask;
           uniform float uAlphaMot;
           uniform int uReset;
           uniform int uSource;
           uniform int uMirror;
+          ${CHUNK_NOISE}
           ${CHUNK_ENC}
           ${CHUNK_FAKE}
           float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
           void main() {
             float rawMask = 0.0;
             if (uSource == 0) {
-              rawMask = fakeMask(vUv, uHeadCenter, uHeadRadius, uAspect);
+              rawMask = fakeMask(vUv, uCx, uCy, uAspect);
             } else if (uSource == 1) {
               vec2 uv = vUv;
               if (uMirror == 1) uv.x = 1.0 - uv.x;
@@ -711,10 +695,6 @@
           uniform sampler2D uMask;
           uniform sampler2D uDen;
           uniform vec2 uTexel;
-          uniform vec2 uNeck;
-          uniform vec2 uHeadCenter;
-          uniform float uHeadRadius;
-          uniform float uAspect;
           uniform float uDt;
           uniform float uTime;
           uniform float uRise;
@@ -722,7 +702,6 @@
           uniform float uPresent;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
-          ${CHUNK_HEAD}
           void main() {
             vec2 vHere = decV(texture(uVel, vUv).rg);
             vec2 back = vUv - vHere * uDt;
@@ -733,37 +712,29 @@
             vec2 flow = decV(mk.ba);
             float den = texture(uDen, vUv).r;
 
-            // upward launch jet at the collar/head source: a sustained vertical
-            // impulse so the plume shoots high above the head, not just a
-            // buoyant blob (matches ref1's tall billow).
-            float nd = headND(vUv, uHeadCenter, uHeadRadius, uAspect);
-            float headFill = 1.0 - smoothstep(0.5, 1.12, nd);
-            vec2 dd = vUv - uNeck;
-            dd.x *= uAspect;
-            float sx = 0.80 * uHeadRadius;
-            float xg = exp(-(dd.x * dd.x) / (2.0 * sx * sx));
-            float up = vUv.y - uNeck.y;
-            float plume = xg * exp(-max(up, 0.0) / (uHeadRadius * 1.6)) *
-              smoothstep(-uHeadRadius * 0.5, 0.0, up);
-            float jetSrc = max(headFill * 0.55, plume) * uPresent;
-            v.y += jetSrc * (0.7 + 2.1 * uRise) * uDt * 3.2;
-
-            // buoyancy — dense smoke keeps rising even after it leaves the head
-            v.y += (0.8 + 3.6 * uRise) * den * uDt;
+            // buoyancy — dense smoke keeps rising and billows above the body.
+            // Strong so the plume climbs well above the head instead of piling.
+            v.y += (1.1 + 5.4 * uRise) * den * uDt;
+            // a lift rooted in the body so the plume launches upward from it
+            v.y += mask * uPresent * (0.5 + 1.8 * uRise) * uDt * 1.1;
 
             // body motion drags the gas near the person (invariant 5)
-            v += flow * (1.15 * clamp(mask, 0.0, 1.0)) * uDt;
+            v += flow * (1.2 * clamp(mask, 0.0, 1.0)) * uDt;
 
-            // curl noise turbulence, THREE octaves (coarse→fine): the fine
-            // octave tatters the edges into ragged, cauliflower exhaust.
-            float wSmoke = smoothstep(0.003, 0.10, den);
-            vec2 np = vUv * 3.4 + vec2(0.0, -uTime * 0.05);
-            vec2 np2 = vUv * 7.2 + vec2(uTime * 0.035, 0.0);
-            vec2 np3 = vUv * 14.5 + vec2(-uTime * 0.06, uTime * 0.02);
-            vec2 cn = curlN(np) + 0.75 * curlN(np2) + 0.55 * curlN(np3);
-            v += cn * (0.20 + 1.7 * uSwirl) * wSmoke * uDt;
+            // curl noise turbulence, four octaves (coarse→fine) scrolling up so
+            // the plume churns and mushrooms; the fine octaves tatter the edges
+            // into ragged, cauliflower exhaust. Gated broadly so thin gas churns
+            // too (invariant 3).
+            float wSmoke = smoothstep(0.002, 0.06, den);
+            vec2 np = vUv * 3.0 + vec2(0.0, -uTime * 0.06);
+            vec2 np2 = vUv * 6.5 + vec2(uTime * 0.045, -uTime * 0.02);
+            vec2 np3 = vUv * 12.5 + vec2(-uTime * 0.06, uTime * 0.03);
+            vec2 np4 = vUv * 22.0 + vec2(uTime * 0.02, -uTime * 0.08);
+            vec2 cn = curlN(np) + 0.8 * curlN(np2)
+              + 0.55 * curlN(np3) + 0.35 * curlN(np4);
+            v += cn * (0.30 + 2.6 * uSwirl) * wSmoke * uDt;
 
-            // vorticity confinement — stronger so eddies curl into clumps
+            // vorticity confinement — curl eddies into denser churning clumps
             float cC = decS(texture(uCurl, vUv).r);
             float cL = decS(texture(uCurl, vUv - vec2(uTexel.x, 0.0)).r);
             float cR = decS(texture(uCurl, vUv + vec2(uTexel.x, 0.0)).r);
@@ -771,10 +742,10 @@
             float cT = decS(texture(uCurl, vUv + vec2(0.0, uTexel.y)).r);
             vec2 gAbs = 0.5 * vec2(abs(cR) - abs(cL), abs(cT) - abs(cB));
             vec2 nDir = gAbs / max(length(gAbs), 1e-4);
-            v += vec2(nDir.y, -nDir.x) * cC * (0.6 + uSwirl * 2.8) * uDt;
+            v += vec2(nDir.y, -nDir.x) * cC * (0.9 + uSwirl * 3.6) * uDt;
 
-            // gentler damping so smoke travels far up before settling
-            v *= exp(-uDt * 0.5);
+            // light damping so the upward flow reaches high before settling
+            v *= exp(-uDt * 0.35);
             fragColor = vec4(encV(v), 0.0, 1.0);
           }
         `;
@@ -837,64 +808,57 @@
         `;
 
         // P31 — density: advect + dissipate the smoke, inject a granular plume
-        // at the neck source, multiply in fbm mottle (exhaust particulate), and
-        // tatter thin edges with a position-seeded noise dither.
+        // over the WHOLE person mask (full-body gas), multiply in fbm mottle
+        // (exhaust particulate), and tatter thin edges with a position-seeded
+        // noise dither. Clamped to [0,1] so it stays bounded (no whiteout).
         const denFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
           out vec4 fragColor;
           uniform sampler2D uDen;
           uniform sampler2D uVel;
-          uniform vec2 uNeck;
-          uniform vec2 uHeadCenter;
-          uniform float uHeadRadius;
-          uniform float uAspect;
+          uniform sampler2D uMask;
           uniform float uDt;
+          uniform float uTime;
           uniform float uSmoke;
           uniform float uGrain;
           uniform float uPresent;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
-          ${CHUNK_HEAD}
           void main() {
             vec2 v = decV(texture(uVel, vUv).rg);
             float d = texture(uDen, vUv - v * uDt).r;
-            // height-dependent dissipation: near the collar it clears fast (so
-            // density does not over-pile), high above it barely decays (so the
-            // billow survives all the way up into the black — invariant 2).
-            float heightFade = clamp((vUv.y - uNeck.y) / 0.55, 0.0, 1.0);
-            float diss = mix(0.26, 0.05, heightFade) + 0.12 * (1.0 - uSmoke);
+
+            // height-aware dissipation: near the body base the gas clears
+            // faster (bounded source), higher up it barely decays so the risen
+            // plume survives and billows (invariant 2). Bounded steady state →
+            // no whiteout (invariant 4).
+            float up = clamp((vUv.y - 0.28) / 0.62, 0.0, 1.0);
+            float diss = mix(1.55, 0.22, up) + 0.30 * (1.0 - uSmoke);
             d *= exp(-uDt * diss);
 
-            // injection: a vertical column rooted at the neck that fills the
-            // head and decays upward. Buoyancy then carries the top into a
-            // billowing plume above the head (invariant 2). fbm mottle makes it
-            // granular (invariant 3).
-            // Two sources combined (invariants 1,2,4):
-            //  - headFill keeps the whole head ellipse gas so no face shows.
-            //  - the collar plume is densest at the neck and feeds upward; it
-            //    is gated off below the neck so the torso/suit stays clean.
-            float nd = headND(vUv, uHeadCenter, uHeadRadius, uAspect);
-            float headFill = 1.0 - smoothstep(0.5, 1.12, nd);
-            vec2 dd = vUv - uNeck;
-            dd.x *= uAspect;
-            float sx = 0.80 * uHeadRadius;
-            float xg = exp(-(dd.x * dd.x) / (2.0 * sx * sx));
-            float up = vUv.y - uNeck.y;
-            float plume = xg * exp(-max(up, 0.0) / (uHeadRadius * 1.5)) *
-              smoothstep(-uHeadRadius * 0.5, 0.0, up);
-            float src = max(headFill * 0.7, plume);
-            // high-contrast multi-octave mottle → exhaust particulate clumps
-            float mott = fbm(vUv * 10.0);
-            mott = pow(clamp(mott, 0.0, 1.0), 1.7);
-            float inj = src * uPresent * uSmoke * (0.22 + 1.7 * mott);
-            d += inj * uDt * 3.4;
+            // injection over the (softened) person mask, weighted toward the
+            // lower / central body so the trunk is a dense SOURCE that feeds
+            // the plume; the upper body shows mostly fluid-carried rising smoke
+            // (invariant 2a — not a flat painted fill).
+            float cover = clamp(texture(uMask, vUv).r, 0.0, 1.0);
+            // multi-octave mottle scrolling upward → granular churn
+            // (invariant 3). Frozen & deterministic under ?freeze=1 (uTime=0).
+            float mott = fbm(vUv * 6.0 + vec2(0.0, -uTime * 0.14));
+            mott += 0.6 * fbm(vUv * 13.0 + vec2(uTime * 0.06, -uTime * 0.18));
+            mott = pow(clamp(mott / 1.6, 0.0, 1.0), 2.1);
+            float srcW = cover * (0.55 + 1.05 * (1.0 - up));
+            float inj = uPresent * uSmoke * (0.20 + 1.6 * mott) * srcW;
+            // strong taper where density is already moderate so the field never
+            // saturates to a flat white blob — it keeps grey-level granular
+            // variation (invariant 3) while advected/rising structure survives
+            inj *= 1.0 - 0.7 * smoothstep(0.4, 0.85, d);
+            d += inj * uDt * 2.2;
 
-            // edge tatter — break the thin fringe hard so it reads as ragged,
-            // torn exhaust rather than a smooth balloon (invariant 3)
-            float en = fbm(vUv * 8.0 + 11.3);
-            float tat = smoothstep(-0.03, 0.13, d + (en - 0.5) * 0.75);
-            d *= mix(1.0, tat, 0.6 * uGrain);
+            // edge tatter — break the fringe hard into ragged, torn exhaust
+            float en = fbm(vUv * 9.0 + 11.3);
+            float tat = smoothstep(-0.05, 0.17, d + (en - 0.5) * 0.95);
+            d *= mix(1.0, tat, 0.8 * uGrain);
 
             fragColor = vec4(clamp(d, 0.0, 1.0), 0.0, 0.0, 1.0);
           }
@@ -908,7 +872,7 @@
           uniform sampler2D uDen;
           void main() {
             float d = texture(uDen, vUv).r;
-            float e = pow(max(d, 0.0), 0.75);
+            float e = pow(max(d, 0.0), 0.85);
             fragColor = vec4(vec3(e), 1.0);
           }
         `;
@@ -928,11 +892,12 @@
             fragColor = vec4(max(e, p), 1.0);
           }
         `;
-        // P38 — final composite. Black backdrop + faint haze, photographic
-        // body (teal split-tone) where the mask holds and the head ellipse
-        // does not, the head crossfaded to smoke, then the volumetric smoke
-        // (white→teal ramp, dense-low / thin-high) drawn over everything so it
-        // billows up into the black. Strong contrast + static film grain.
+
+        // P38 — final composite. Real background (P0) is drawn as-is, then the
+        // grayscale granular gas is alpha-blended over it by density. Dense
+        // areas fully cover the body; density zero leaves the true background.
+        // Gas is capped well below pure white so a large/close person never
+        // whites out the frame (invariant 4). Static cell-hash film grain last.
         const compositeFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -946,133 +911,103 @@
           uniform sampler2D uB1;
           uniform sampler2D uB2;
           uniform vec2 uResolution;
-          uniform vec2 uHeadCenter;
-          uniform vec2 uNeck;
-          uniform float uHeadRadius;
-          uniform float uAspect;
-          uniform float uBlend;
-          uniform float uGrade;
+          uniform float uBgBright;
           uniform float uTrail;
+          uniform float uGrain;
           uniform float uFilmGrain;
+          uniform float uTime;
           uniform int uDebug;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
-          ${CHUNK_HEAD}
           float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
-          // density → smoke color: dense/low = teal-white, thin/high = cool pale
-          vec3 smokeRamp(float d, float heightT) {
-            vec3 deep = vec3(0.34, 0.66, 0.73);
-            vec3 mid = vec3(0.60, 0.82, 0.88);
-            vec3 hi = vec3(0.80, 0.92, 0.96);
-            vec3 c = mix(deep, mid, smoothstep(0.10, 0.55, d));
-            c = mix(c, hi, smoothstep(0.55, 0.95, d));
-            c = mix(c, vec3(0.82, 0.92, 0.97), clamp(heightT, 0.0, 1.0) * 0.30);
-            return c;
-          }
-          // gentle teal split-tone on the photographic body
-          vec3 splitTone(vec3 c, float amt) {
-            float l = lumaf(c);
-            vec3 sh = vec3(0.05, 0.15, 0.17);
-            vec3 hl = vec3(0.86, 0.98, 1.0);
-            vec3 t = mix(sh, hl, smoothstep(0.0, 1.0, l)) * (0.35 + 1.2 * l);
-            vec3 teal = c * vec3(0.84, 1.03, 1.04);
-            return mix(c, mix(teal, t, 0.30), amt);
+          // density → gas color: raw grayscale (SMOKE DENSITY look), faint cool
+          // tint. Mapped into a clear MID-GREY range (never near white) so even
+          // a large/close person stays smoke-grey — no whiteout (invariant 4).
+          vec3 gasColor(float g) {
+            float v = mix(0.14, 0.62, pow(clamp(g, 0.0, 1.0), 0.9));
+            return clamp(vec3(v) * vec3(0.97, 1.0, 1.04), 0.0, 0.70);
           }
           void main() {
             float den = texture(uDen, vUv).r;
-            float maskS = clamp(texture(uMask, vUv).r, 0.0, 1.0);
-            float aspect = uAspect;
-            float nd = headND(vUv, uHeadCenter, uHeadRadius, aspect);
-            float ew = clamp(0.05 + 0.30 * uBlend, 0.02, 0.6);
-            float head = 1.0 - smoothstep(1.0 - ew, 1.0 + ew, nd);
 
             if (uDebug == 1) {
-              fragColor = vec4(vec3(texture(uMaskRaw, vUv).r), 1.0);
+              fragColor = vec4(vec3(clamp(texture(uMaskRaw, vUv).r, 0.0, 1.0)), 1.0);
               return;
             }
             if (uDebug == 2) {
-              float ring = 1.0 - smoothstep(0.02, 0.05, abs(nd - 1.0));
-              vec2 dn = vUv - uNeck; dn.x *= aspect;
-              float neck = 1.0 - smoothstep(0.012, 0.024, length(dn));
-              vec3 c = vec3(texture(uMaskRaw, vUv).r) * 0.32;
-              c += vec3(0.2, 0.95, 0.92) * ring;
-              c += vec3(1.0, 0.45, 0.2) * neck;
-              fragColor = vec4(c, 1.0);
+              fragColor = vec4(vec3(clamp(den, 0.0, 1.0)), 1.0);
               return;
             }
             if (uDebug == 3) {
-              fragColor = vec4(vec3(den), 1.0);
+              vec2 vv = decV(texture(uVel, vUv).rg);
+              fragColor = vec4(clamp(vv / (2.0 * VMAX) + 0.5, 0.0, 1.0), 0.4, 1.0);
               return;
             }
             if (uDebug == 4) {
-              vec2 v = decV(texture(uVel, vUv).rg);
-              fragColor = vec4(clamp(v / (2.0 * VMAX) + 0.5, 0.0, 1.0), 0.4, 1.0);
-              return;
-            }
-            if (uDebug == 5) {
-              float dstrip = clamp((vUv.x - 0.08) / 0.84, 0.0, 1.0);
-              float strip = 1.0 - smoothstep(0.16, 0.18, abs(vUv.y - 0.5));
-              float ht = clamp((0.68 - vUv.y) / 0.36, 0.0, 1.0);
-              fragColor = vec4(smokeRamp(dstrip, ht) * strip, 1.0);
+              float ds = clamp((vUv.x - 0.1) / 0.8, 0.0, 1.0);
+              float strip = 1.0 - smoothstep(0.15, 0.17, abs(vUv.y - 0.5));
+              fragColor = vec4(gasColor(ds) * strip, 1.0);
               return;
             }
 
-            // smoke coverage from density + a feedback/bloom halo. The halo
-            // gain is kept up so the faint OUTER/UPPER billow (low density) is
-            // carried too, not just the dense head core.
+            // real background, mild exposure
+            vec3 bg = clamp(texture(uScene, vUv).rgb * uBgBright, 0.0, 1.0);
+
+            // subtle self-glow halo (feedback + bloom) — strongly tamed
             float fb = texture(uFb, vUv).r;
             float b1 = texture(uB1, vUv).r;
             float b2 = texture(uB2, vUv).r;
-            float halo = max(fb, 0.6 * b1 + 0.5 * b2);
-            float sd = max(den, halo * (0.18 + 0.42 * uTrail));
-            // gamma-lift low/mid density so thin smoke reads as bright teal-
-            // white instead of collapsing to black. Pure zero stays zero, so
-            // the true background (no density) remains black.
-            float sLift = pow(clamp(sd, 0.0, 1.0), 0.62);
-            float s = 1.0 - exp(-sLift * 2.4);
-            float smokeA = clamp(smoothstep(0.015, 0.92, s), 0.0, 0.96);
-            float heightT = clamp((vUv.y - uNeck.y) / 0.5, 0.0, 1.0);
-            vec3 smokeCol = smokeRamp(den, heightT);
+            float halo = max(fb, 0.55 * b1 + 0.45 * b2);
 
-            // black backdrop + faint static haze
-            vec3 base = mix(vec3(0.006, 0.010, 0.014),
-              vec3(0.011, 0.019, 0.025), vUv.y);
-            base *= mix(1.0, 0.55, uGrade);
-            float hz = fbm(vUv * vec2(3.0, 2.0));
-            base += vec3(0.008, 0.014, 0.018) * hz * 0.5;
+            float g = clamp(den, 0.0, 1.0);
+            float cov = clamp(texture(uMask, vUv).r, 0.0, 1.0);
+            // the body is guaranteed a grey-gas floor so the person's color
+            // never shows through (invariant 1 — full-body replacement); the
+            // churning density is added on top so the level still moves and
+            // reads as billowing smoke rather than a flat fill.
+            float gasLevel = clamp(cov * 0.45 + g * 0.72, 0.0, 1.0);
+            vec3 smokeCol = gasColor(gasLevel);
+            // churn: a slowly rising fbm modulates the grey so the smoke
+            // visibly mushrooms and roils (invariant 3). Deterministic under
+            // ?freeze=1 (uTime is frozen). Whiteout guard below keeps it grey.
+            float churn = fbm(vUv * 7.0 + vec2(uTime * 0.05, -uTime * 0.16));
+            smokeCol *= (0.80 + 0.36 * churn);
+            // extra fine particulate so the gas reads granular, not milky
+            float fine = fbm(vUv * 20.0) * 0.6 + fbm(vUv * 42.0) * 0.4;
+            smokeCol *= (1.0 - 0.34 * uGrain * (1.0 - fine));
 
-            // photographic body, minus the head ellipse (face suppressed there)
-            vec3 cam = texture(uScene, vUv).rgb;
-            vec3 body = splitTone(cam, uGrade);
-            float faceKeep = 1.0 - 0.9 * head;
-            float suitW = maskS * faceKeep;
-            vec3 col = mix(base, body, suitW);
+            // coverage = fully opaque over the person mask, plus a density-
+            // driven ramp for the plume that rises off the body into the real
+            // background. Density zero AND no mask → background untouched.
+            float plumeA = smoothstep(0.015, 0.22, g);
+            float alpha = clamp(max(cov * 0.98, plumeA), 0.0, 0.97);
+            // Under the gas, neutralize the scene toward its own luminance so
+            // the semi-transparent silhouette edge never picks up the person's
+            // colour (no coloured rim tracing the body). Where there is no gas
+            // (cov and density both ~0) the real background is untouched.
+            float und = max(cov, plumeA);
+            vec3 under = mix(bg, vec3(lumaf(bg)), smoothstep(0.04, 0.40, und));
+            vec3 col = mix(under, smokeCol, alpha);
+            // faint additive lift for thin outer wisps; vanishes where covered
+            // and where there is no smoke, so the background stays intact.
+            col += smokeCol * halo * (0.04 + 0.06 * uTrail) * (1.0 - alpha);
 
-            // Tone the PHOTOGRAPHIC layer (contrast + vignette) BEFORE the
-            // smoke, so the billow is never crushed to black by the vignette.
-            col = pow(max(col, 0.0), vec3(0.92));
-            col = (col - 0.5) * (1.10 + 0.32 * uGrade) + 0.5;
-            col = max(col, 0.0);
-            vec2 vq = (vUv - 0.5) * vec2(aspect, 1.0);
-            col *= mix(0.82, 1.0, smoothstep(1.2, 0.30, length(vq)));
+            // vignette (mild)
+            vec2 vq = (vUv - 0.5) * vec2(uResolution.x / uResolution.y, 1.0);
+            col *= mix(0.86, 1.0, smoothstep(1.2, 0.35, length(vq)));
 
-            // smoke composited OVER the toned layer — the whole billow (head,
-            // and the plume above/around it) floats on the black, not just the
-            // head ellipse. The head ellipse only drives the face crossfade.
-            col = mix(col, smokeCol, smokeA);
-            // extra additive glow lifts the faint upper/outer billow off black;
-            // vanishes where there is no smoke, so the background stays pure.
-            col += smokeCol * halo * (0.06 + 0.10 * uTrail) * (1.0 - smokeA);
+            // hard whiteout guard
+            col = min(col, vec3(0.92));
 
             // static film grain + shadow-weighted dither (cell hash, no time)
-            float g1 = hash12(floor(gl_FragCoord.xy));
-            float g2 = hash12(floor(gl_FragCoord.xy * 0.5) + 17.0);
+            float h1 = hash12(floor(gl_FragCoord.xy));
+            float h2 = hash12(floor(gl_FragCoord.xy * 0.5) + 17.0);
             float lc = lumaf(col);
-            float gAmt = uFilmGrain * (0.05 + 0.12 * (1.0 - smoothstep(0.05, 0.6, lc)));
-            col += (g1 - 0.5) * gAmt + (g2 - 0.5) * uFilmGrain * 0.02;
+            float gAmt = uFilmGrain * (0.05 + 0.10 * (1.0 - smoothstep(0.05, 0.6, lc)));
+            col += (h1 - 0.5) * gAmt + (h2 - 0.5) * uFilmGrain * 0.02;
 
-            fragColor = vec4(col, 1.0);
+            fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
           }
         `;
 
@@ -1124,34 +1059,32 @@
 
         const locations = {
           scene: getLocations(programs.scene, [
-            "uVideo", "uResolution", "uVideoSize", "uHeadCenter", "uHeadRadius",
-            "uAspect", "uMirror", "uFake", "uHasVideo",
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uCx", "uCy",
+            "uMirror", "uFake", "uHasVideo",
           ]),
           mask: getLocations(programs.mask, [
             "uScene", "uScenePrev", "uPrev", "uSeg", "uTexel", "uSegScale",
-            "uHeadCenter", "uHeadRadius", "uAspect", "uDt", "uAlphaMask",
-            "uAlphaMot", "uReset", "uSource", "uMirror",
+            "uAspect", "uCx", "uCy", "uDt", "uAlphaMask", "uAlphaMot", "uReset",
+            "uSource", "uMirror",
           ]),
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
           curl: getLocations(programs.curl, ["uVel", "uTexel"]),
           vel: getLocations(programs.vel, [
-            "uVel", "uCurl", "uMask", "uDen", "uTexel", "uNeck", "uHeadCenter",
-            "uHeadRadius", "uAspect", "uDt", "uTime", "uRise", "uSwirl",
-            "uPresent",
+            "uVel", "uCurl", "uMask", "uDen", "uTexel", "uDt", "uTime",
+            "uRise", "uSwirl", "uPresent",
           ]),
           div: getLocations(programs.div, ["uVel", "uTexel"]),
           jacobi: getLocations(programs.jacobi, ["uPrs", "uDiv", "uTexel"]),
           proj: getLocations(programs.proj, ["uVel", "uPrs", "uTexel"]),
           den: getLocations(programs.den, [
-            "uDen", "uVel", "uNeck", "uHeadCenter", "uHeadRadius", "uAspect",
-            "uDt", "uSmoke", "uGrain", "uPresent",
+            "uDen", "uVel", "uMask", "uDt", "uTime", "uSmoke", "uGrain", "uPresent",
           ]),
           emis: getLocations(programs.emis, ["uDen"]),
           fb: getLocations(programs.fb, ["uEmis", "uPrev", "uDecay"]),
           composite: getLocations(programs.composite, [
             "uScene", "uMask", "uMaskRaw", "uDen", "uVel", "uFb", "uB1", "uB2",
-            "uResolution", "uHeadCenter", "uNeck", "uHeadRadius", "uAspect",
-            "uBlend", "uGrade", "uTrail", "uFilmGrain", "uDebug",
+            "uResolution", "uBgBright", "uTrail", "uGrain", "uFilmGrain",
+            "uTime", "uDebug",
           ]),
         };
 
@@ -1246,8 +1179,8 @@
         // Encoded targets must clear to encoded zero (0.5), else "clear"
         // decodes to -VMAX.
         function clearSimTargets() {
-          clearTarget(targets.sceneA, 0.01, 0.016, 0.022, 1);
-          clearTarget(targets.sceneB, 0.01, 0.016, 0.022, 1);
+          clearTarget(targets.sceneA, 0.1, 0.12, 0.15, 1);
+          clearTarget(targets.sceneB, 0.1, 0.12, 0.15, 1);
           clearTarget(targets.maskA, 0, 0, 0.5, 0.5);
           clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
           clearTarget(targets.softT, 0, 0, 0.5, 0.5);
@@ -1312,30 +1245,32 @@
             gl.uniform1f(locations.blur.uSigma, sigma);
           });
         }
+
         /* ------------------------------------------------------------------
-           Detection state (head ellipse + neck source + person presence).
-           All quantities live in SCREEN UV so fakesource and MediaPipe drive
-           the exact same shader path. Everything is EMA-smoothed (invariant 5).
+           Detection state (person mask + presence). All quantities live in
+           SCREEN UV so fakesource and MediaPipe drive the exact same shader
+           path. Everything is EMA-smoothed (invariant 5). The segmentation
+           mask (full-body silhouette) is the gas source; pose is loaded for
+           parity with overflowing_aura but not required by the effect.
         ------------------------------------------------------------------ */
 
         const det = {
-          cx: 0.5, cy: 0.63, r: 0.13, present: 0,      // smoothed (screen uv)
-          tcx: 0.5, tcy: 0.63, tr: 0.13, tpresent: 0,  // targets
+          cx: 0.5, cy: 0, present: 0,       // smoothed (screen uv; cy = fake bob)
+          tcx: 0.5, tcy: 0, tpresent: 0,    // targets
           segScale: [1, 1],
           segReady: false,
         };
 
-        // MediaPipe handles (real camera only; assembled at runtime — see the
-        // report note on the verify_static URL allowlist). The whole detection
-        // stack is loaded lazily and never blocks the render loop.
-        const MP_ORIGIN = "https" + "://cdn.jsdelivr.net";
-        const MP_PKG = MP_ORIGIN + "/npm/@mediapipe/tasks-vision@0.10.18";
-        const MP_WASM = MP_PKG + "/wasm";
-        const G_ORIGIN = "https" + "://storage.googleapis.com";
-        const SEG_MODEL = G_ORIGIN +
-          "/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
-        const POSE_MODEL = G_ORIGIN +
-          "/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+        // MediaPipe handles (real camera only; loaded lazily via dynamic
+        // import). URLs / models / options match overflowing_aura_4taigyo_v2.
+        // The verify_static allowlist covers the MediaPipe CDN + model hosts,
+        // so these are plain string literals.
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+        const POSE_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
         let mpSegmenter = null;
         let mpPose = null;
@@ -1380,40 +1315,6 @@
           }
         }
 
-        // Convert MediaPipe landmarks (image space, origin top-left) into a
-        // head center / radius in screen UV, matching the scene cover-fit and
-        // mirror. UNTESTED in this environment (network + swiftshader).
-        function headFromLandmarks(lm) {
-          const idx = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-          let sx = 0, sy = 0, n = 0;
-          for (const i of idx) {
-            const p = lm[i];
-            if (p) { sx += p.x; sy += p.y; n++; }
-          }
-          if (n === 0) return null;
-          const xImg = sx / n, yImg = sy / n;
-          const ls = lm[11], rs = lm[12];
-          let rNorm = 0.11;
-          if (ls && rs) {
-            const shoulderW = Math.abs(ls.x - rs.x);
-            const shoulderMidY = (ls.y + rs.y) / 2;
-            const vertical = Math.max(0.05, shoulderMidY - yImg);
-            rNorm = Math.min(0.16, Math.max(0.06, 0.28 * shoulderW + 0.30 * vertical));
-          }
-          const scale = det.segScale;
-          // video-sample space is Y-up (scene uses UNPACK_FLIP_Y)
-          const vux = xImg;
-          const vuy = 1 - yImg;
-          let scr = (vux - 0.5) / Math.max(scale[0], 1e-3) + 0.5;
-          const scrY = (vuy - 0.5) / Math.max(scale[1], 1e-3) + 0.5;
-          if (state.mirror) scr = 1 - scr;
-          const rScreen = rNorm / Math.max(scale[1], 1e-3);
-          // Hard cap: a close/large detection must NOT flood the frame with
-          // saturated smoke (whiteout). Keep the head ellipse modest so the
-          // plume reads as a billow above the head, not a full-screen column.
-          return { cx: scr, cy: scrY, r: Math.min(0.19, Math.max(0.07, rScreen)) };
-        }
-
         function uploadSegMask(mask) {
           const w = mask.width, h = mask.height;
           const f = mask.getAsFloat32Array();
@@ -1434,25 +1335,22 @@
         }
 
         // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
         function runDetection(now) {
           if (video.readyState < 2 || video.videoWidth === 0) return;
+          let sawPerson = false;
           try {
             const seg = mpSegmenter.segmentForVideo(video, now);
             const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
-            if (cm) { uploadSegMask(cm); }
+            if (cm) { uploadSegMask(cm); sawPerson = true; }
             if (seg && seg.close) seg.close();
           } catch (_e) { /* keep last mask */ }
           try {
             const pr = mpPose.detectForVideo(video, now);
             const lm = pr && pr.landmarks && pr.landmarks[0];
-            const head = lm ? headFromLandmarks(lm) : null;
-            if (head) {
-              det.tcx = head.cx; det.tcy = head.cy; det.tr = head.r;
-              det.tpresent = 1;
-            } else {
-              det.tpresent = 0;
-            }
-          } catch (_e) { det.tpresent = 0; }
+            if (lm && lm.length) sawPerson = true;
+          } catch (_e) { /* pose optional */ }
+          det.tpresent = det.segReady && sawPerson ? 1 : (det.segReady ? 1 : 0);
         }
 
         let detTimer = 0;
@@ -1503,9 +1401,10 @@
             : [1, videoAspect / canvasAspect];
 
           if (FAKE) {
-            det.tcx = 0.5 + 0.05 * Math.sin(animTime * 0.25);
-            det.tcy = 0.63 + 0.025 * Math.sin(animTime * 0.31 + 1.0);
-            det.tr = 0.13;
+            // sway + slow vertical bob so the mask moves like a real person,
+            // which drives the motion field, turbulence and rising plume.
+            det.tcx = 0.5 + 0.07 * Math.sin(animTime * 0.33);
+            det.tcy = 0.03 * Math.sin(animTime * 0.5 + 1.0);
             det.tpresent = 1;
           } else if (mpState !== "ready") {
             det.tpresent = 0;
@@ -1513,7 +1412,6 @@
           const k = FREEZE ? 0 : 1 - Math.exp(-dt * 6);
           det.cx += (det.tcx - det.cx) * k;
           det.cy += (det.tcy - det.cy) * k;
-          det.r += (det.tr - det.r) * k;
           det.present += (det.tpresent - det.present) * k;
         }
 
@@ -1550,9 +1448,6 @@
           needsReset = false;
           if (doReset) clearSimTargets();
 
-          const rEff = det.r * state.headSize;
-          const headCenter = [det.cx, det.cy];
-          const neck = [det.cx, det.cy - rEff * 1.02];
           const aspect = canvas.width / Math.max(canvas.height, 1);
           const source = FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2);
 
@@ -1566,7 +1461,7 @@
           const fbPrev = fbPing ? targets.fbB : targets.fbA;
           const fieldTexel = [1 / fieldW, 1 / fieldH];
 
-          // P0 — scene
+          // P0 — scene (real background)
           renderPass(sceneCur, programs.scene, () => {
             const u = locations.scene;
             bindTexture(0, videoTexture);
@@ -1574,9 +1469,9 @@
             gl.uniform2f(u.uResolution, paintW, paintH);
             gl.uniform2f(u.uVideoSize,
               Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
-            gl.uniform2f(u.uHeadCenter, headCenter[0], headCenter[1]);
-            gl.uniform1f(u.uHeadRadius, rEff);
             gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
             gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
             gl.uniform1i(u.uFake, FAKE ? 1 : 0);
             gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
@@ -1595,9 +1490,9 @@
             gl.uniform1i(u.uSeg, 3);
             gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
             gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
-            gl.uniform2f(u.uHeadCenter, headCenter[0], headCenter[1]);
-            gl.uniform1f(u.uHeadRadius, rEff);
             gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
             gl.uniform1f(u.uDt, dt);
             gl.uniform1f(u.uAlphaMask, 1 - Math.exp(-Math.max(dt, 1e-4) * 8));
             gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
@@ -1606,8 +1501,8 @@
             gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
           });
 
-          // P2 — soft mask (boundary softening)
-          const sdfSigma = 2.5 + 4.0 * state.blend;
+          // P2 — soft mask (boundary softening drives injection region)
+          const sdfSigma = 1.5 + 4.5 * state.edge;
           blurPass(maskOut, targets.softTmp, targets.softT, sdfSigma);
 
           // P3 — curl
@@ -1629,10 +1524,6 @@
             gl.uniform1i(u.uMask, 2);
             gl.uniform1i(u.uDen, 3);
             gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
-            gl.uniform2f(u.uNeck, neck[0], neck[1]);
-            gl.uniform2f(u.uHeadCenter, headCenter[0], headCenter[1]);
-            gl.uniform1f(u.uHeadRadius, rEff);
-            gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uDt, dt);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uRise, state.rise);
@@ -1671,18 +1562,17 @@
             gl.uniform2f(locations.proj.uTexel, fieldTexel[0], fieldTexel[1]);
           });
 
-          // P31 — density: advect + dissipate + neck injection + grain
+          // P31 — density: advect + dissipate + full-body injection + grain
           renderPass(denOut, programs.den, () => {
             const u = locations.den;
             bindTexture(0, denPrev.tex);
             bindTexture(1, targets.velA.tex);
+            bindTexture(2, targets.softT.tex);
             gl.uniform1i(u.uDen, 0);
             gl.uniform1i(u.uVel, 1);
-            gl.uniform2f(u.uNeck, neck[0], neck[1]);
-            gl.uniform2f(u.uHeadCenter, headCenter[0], headCenter[1]);
-            gl.uniform1f(u.uHeadRadius, rEff);
-            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1i(u.uMask, 2);
             gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uSmoke, state.smoke);
             gl.uniform1f(u.uGrain, state.grain);
             gl.uniform1f(u.uPresent, det.present);
@@ -1728,14 +1618,11 @@
             gl.uniform1i(u.uB1, 6);
             gl.uniform1i(u.uB2, 7);
             gl.uniform2f(u.uResolution, canvas.width, canvas.height);
-            gl.uniform2f(u.uHeadCenter, headCenter[0], headCenter[1]);
-            gl.uniform2f(u.uNeck, neck[0], neck[1]);
-            gl.uniform1f(u.uHeadRadius, rEff);
-            gl.uniform1f(u.uAspect, aspect);
-            gl.uniform1f(u.uBlend, state.blend);
-            gl.uniform1f(u.uGrade, state.grade);
+            gl.uniform1f(u.uBgBright, state.bgBright);
             gl.uniform1f(u.uTrail, state.trail);
+            gl.uniform1f(u.uGrain, state.grain);
             gl.uniform1f(u.uFilmGrain, state.filmGrain);
+            gl.uniform1f(u.uTime, animTime);
             gl.uniform1i(u.uDebug, state.debugView);
           });
 
@@ -1783,7 +1670,7 @@
             location.hostname !== "[::1]"
           ) {
             setOverlay("error", "SECURE CONTEXT REQUIRED",
-              "Serve the file from localhost (for example: python3 -m http.server 8888) or HTTPS, then reload.");
+              "Serve the file from localhost (for example: python3 -m http.server 8899) or HTTPS, then reload.");
             retryCamera.disabled = false;
             return;
           }
@@ -1808,7 +1695,7 @@
             retryCamera.disabled = false;
             needsReset = true;
             setOverlay("hidden", "", "");
-            loadMediaPipe();
+            if (!FAKE) loadMediaPipe();
           } catch (error) {
             retryCamera.disabled = false;
             const name = error && error.name ? error.name : "";
