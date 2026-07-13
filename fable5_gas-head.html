@@ -1335,7 +1335,7 @@
         const SEG_MODEL = G_ORIGIN +
           "/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
         const POSE_MODEL = G_ORIGIN +
-          "/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker.task";
+          "/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
         let mpSegmenter = null;
         let mpPose = null;
@@ -1365,8 +1365,10 @@
               mpSegmenter = await ImageSegmenter.createFromOptions(vision, segOpts("CPU"));
             }
             mpProgress = 0.8;
+            // No forced delegate — let MediaPipe pick GPU/CPU (matches the
+            // proven overflowing_aura demo; forcing GPU can throw on some GPUs).
             mpPose = await PoseLandmarker.createFromOptions(vision, {
-              baseOptions: { modelAssetPath: POSE_MODEL, delegate: "GPU" },
+              baseOptions: { modelAssetPath: POSE_MODEL },
               runningMode: "VIDEO",
               numPoses: 1,
             });
