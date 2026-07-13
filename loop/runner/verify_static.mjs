@@ -30,6 +30,10 @@ const EXTERNAL_ALLOWLIST = [
   /^https:\/\/cdn\.jsdelivr\.net\/npm\/@huggingface\/transformers/,
   /^https:\/\/cdn\.jsdelivr\.net\/npm\/@litertjs\//,
   /^https:\/\/huggingface\.co\//,
+  // MediaPipe tasks-vision (ImageSegmenter / PoseLandmarker) + its hosted
+  // models — the person-detection stack used by the webcam art pieces.
+  /^https:\/\/cdn\.jsdelivr\.net\/npm\/@mediapipe\/tasks-vision/,
+  /^https:\/\/storage\.googleapis\.com\/mediapipe-models\//,
 ];
 
 function lineOf(source, index) {
