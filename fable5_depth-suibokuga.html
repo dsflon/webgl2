@@ -474,8 +474,11 @@
            pending a human spike (§4.7). Machine verification runs entirely on
            ?fakesource=1 synthetic depth.
         ------------------------------------------------------------------ */
+        // jsdelivr の +esm エンドポイントを使う。生の dist/index.js を直接 import すると
+        // 内部の bare import("@litertjs/wasm-utils") をブラウザが解決できず失敗するため
+        // (LITERT_GUIDE §4.1)。+esm は依存を解決済みの単一 ESM を返す。
         const LITERT_CORE =
-          "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/dist/index.js";
+          "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/+esm";
         const LITERT_WASM =
           "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/wasm/";
         const MODEL_URL =
@@ -1402,10 +1405,14 @@
           depth.hasDepth = true;
           if (!depth.firstDepthAt) depth.firstDepthAt = performance.now();
           updateDepthStatus();
+          // Surface the real exception so the actual cause (module resolve /
+          // model 404 / WebGPU) is legible without opening devtools.
+          const detail = err && (err.message || String(err));
           setOverlay(
             "error",
             "MODEL LOAD FAILED",
-            "Could not download or compile the depth model. Running on synthetic depth so the ink still flows. Retry the download, or keep the offline look.",
+            "Could not download or compile the depth model. Running on synthetic depth so the ink still flows. Retry the download, or keep the offline look." +
+              (detail ? `\n\n(${detail})` : ""),
             { retryModel: true, continueSynth: true },
           );
         }
