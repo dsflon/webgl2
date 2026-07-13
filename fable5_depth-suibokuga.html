@@ -55,8 +55,11 @@
     Paper warmth    紙と墨の冷暖(冷=青墨 ↔ 暖=茶墨)
 
   ■ 依存(リポジトリ規約の ML 例外・LITERT_GUIDE §8 の許可リスト)
-    @litertjs/core(CDN・バージョンピン留め)+ Depth-Anything-V2-Small .tflite(候補)。
-    実推論経路は本サンドボックスで未検証(要人間スパイク)。機械検証は ?fakesource=1 の
+    @litertjs/core(CDN・バージョンピン留め・+esm 経由)。
+    深度モデルは Depth Anything V2 Small を .tflite へ変換した自前ホストの静的アセット
+    (assets/depth_anything_v2_small_wi8_afp32.tflite)。変換手順は MODEL_URL 定義の
+    直上コメントを参照(公式デモ litert/js/demos/depth_anything と同方式)。
+    モデル未配置なら合成深度にフォールバックして動作(M5)。機械検証は ?fakesource=1 の
     合成深度で通す。描画は WebGL2 / GLSL ES 3.00 単体。
 -->
 <html lang="en">
@@ -474,13 +477,32 @@
            pending a human spike (§4.7). Machine verification runs entirely on
            ?fakesource=1 synthetic depth.
         ------------------------------------------------------------------ */
+        // jsdelivr の +esm エンドポイントを使う。生の dist/index.js を直接 import すると
+        // 内部の bare import("@litertjs/wasm-utils") をブラウザが解決できず失敗するため
+        // (LITERT_GUIDE §4.1)。+esm は依存を解決済みの単一 ESM を返す。
         const LITERT_CORE =
-          "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/dist/index.js";
+          "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/+esm";
         const LITERT_WASM =
           "https://cdn.jsdelivr.net/npm/@litertjs/core@2.5.2/wasm/";
+        // Self-hosted .tflite (same-origin static asset), matching Google's
+        // official LiteRT.js demo (litert/js/demos/depth_anything): the model is
+        // NOT a drop-in public URL — you convert Depth Anything V2 Small to
+        // .tflite once and host the file yourself. To produce it:
+        //   1. git clone github.com/google-ai-edge/LiteRT
+        //   2. cd litert/js/demos/depth_anything && pip install -r requirements
+        //      (ai-edge-torch) && python convert_model.py
+        //      → generates depth_anything_v2_small_wi8_afp32.tflite
+        //      (source model: huggingface.co/depth-anything/Depth-Anything-V2-Small-hf)
+        //   3. drop that file into this repo at assets/ and commit (GitHub Pages
+        //      serves it same-origin). Verify WebGPU delegation with
+        //      `npx @litertjs/model-tester` (LITERT_GUIDE §4.7).
+        // Until the file exists, initModel fails cleanly → synthetic depth (M5).
         const MODEL_URL =
-          "https://huggingface.co/litert-community/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.tflite";
-        const INFER_SIZE = 256; // 256px square offscreen (LITERT §4.4 / §M8)
+          "./assets/depth_anything_v2_small_wi8_afp32.tflite";
+        // Depth Anything V2 Small is ViT-S/14 → canonical input 518×518
+        // (37×14). MUST equal the input size baked into your converted .tflite;
+        // change here if convert_model.py used a different resolution.
+        const INFER_SIZE = 518;
 
         /* ------------------------------------------------------------------
            State & UI
@@ -1402,10 +1424,14 @@
           depth.hasDepth = true;
           if (!depth.firstDepthAt) depth.firstDepthAt = performance.now();
           updateDepthStatus();
+          // Surface the real exception so the actual cause (module resolve /
+          // model 404 / WebGPU) is legible without opening devtools.
+          const detail = err && (err.message || String(err));
           setOverlay(
             "error",
             "MODEL LOAD FAILED",
-            "Could not download or compile the depth model. Running on synthetic depth so the ink still flows. Retry the download, or keep the offline look.",
+            "Could not load or compile the depth model. Place the converted .tflite at assets/ (see the file header for the one-time conversion). Running on synthetic depth so the ink still flows — retry, or keep the offline look." +
+              (detail ? `\n\n(${detail})` : ""),
             { retryModel: true, continueSynth: true },
           );
         }
