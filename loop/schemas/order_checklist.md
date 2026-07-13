@@ -26,9 +26,3 @@ Phase 4 パイロットで2本目が通ってから厳格化する — IMPLEMENT
 注意: 実物(papercraft-cam 発注書)は Phase 0 の検証フック規約より前に書かれたため
 `order.hooks` を満たさない。verify_order は実物に対しては `--legacy` で
 このルールを免除して検証する(新規発注書には免除なし)。
-
-ML(意味信号)について: brief.ml.needed=true のテーマでは、発注書 §4 に
-「意味信号(ML)」節(信号・ランタイム・モデル・fakesource — LITERT_GUIDE.md 準拠)を
-含めることを S1 生成側(order_template §4)の責務とする。brief と order をまたぐ
-整合チェックは当面 verify_order の機械ルールにしない(単一ファイル lint の設計を守る。
-ML 作品が2本通ってから `order.ml` ルール追加を検討 — 保守的設計の方針に同じ)。

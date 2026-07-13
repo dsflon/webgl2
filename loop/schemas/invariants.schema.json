@@ -10,8 +10,7 @@
     "signals",
     "vocabulary",
     "invariants",
-    "priority",
-    "ml"
+    "priority"
   ],
   "additionalProperties": false,
   "properties": {
@@ -81,38 +80,6 @@
       "minItems": 3,
       "items": { "type": "integer" },
       "uniqueItems": true
-    },
-    "ml": {
-      "description": "意味信号(ML)の使用判断。LITERT_GUIDE.md §2.1 の判定フロー(3問)を S0 で必ず通す。「使わない」も needed:false で明示する(判断の外部化)",
-      "type": "object",
-      "required": ["needed"],
-      "additionalProperties": false,
-      "properties": {
-        "needed": { "type": "boolean" },
-        "signal": {
-          "description": "1作品1信号の原則(LITERT_GUIDE §2.2)",
-          "enum": ["depth", "segmentation", "pose", "face", "asr", "embedding", "superres"]
-        },
-        "runtime": {
-          "description": "選定ルールは LITERT_GUIDE §3(毎フレーム級=litert / 低頻度非同期=transformers)",
-          "enum": ["litert", "transformers"]
-        },
-        "model": { "type": "string", "minLength": 3 },
-        "justification": {
-          "description": "「この信号が無いとき何が見えなくなるか」を1文で(言えなければ needed:false に戻す)",
-          "type": "string",
-          "minLength": 15
-        },
-        "fakesource": {
-          "description": "?fakesource=1 の合成信号の仕様(モデル無しで様式が成立すること — LITERT_GUIDE §4.6)",
-          "type": "string",
-          "minLength": 15
-        }
-      },
-      "if": { "properties": { "needed": { "const": true } } },
-      "then": {
-        "required": ["needed", "signal", "runtime", "model", "justification", "fakesource"]
-      }
     }
   }
 }
