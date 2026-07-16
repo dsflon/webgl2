@@ -1,60 +1,64 @@
 <!doctype html>
 <!--
-  fable5_flower-being.html — WebGL2 webcam →「Flower Being」(花に溶ける人 / 動きに反応)
-  チームラボ「Flowers Bloom」系。カメラに映る人物が、極彩色の発光する花びらに溶けて
-  いき、黒の空間へ還る。人物は生映像として出さず暗いシルエットとし、その領域を濃い開花源
-  として体から花びらが流れ出す。人物の動きが「風」になり、花びらが舞い上がり渦巻く。
-  背景は黒(実カメラ背景は描かない)。黒地に環境花(低密度で漂う花)＋人物由来の濃い花。
-  派生元エンジン: fable5_gas-head.html(全身ガス化・モバイル検知)/ fable5_blue-dissolve.html
-  (発色・発光)/ overflowing_aura_4taigyo_v2.html(人物検知の座標一致)。
+  fable5_flower-being.html — WebGL2 webcam →「Flower Being」(花に溶ける人 / GPU パーティクル)
+  チームラボ「Flowers Bloom」系。カメラに映る人物が、極彩色の発光する「花びらの粒」に
+  なって黒の空間へ舞い散る。人物は生映像として出さず、花びらが人物シルエットから発生して
+  体の形に密集する(=人型が見える)。体から離れた花びらは風に乗って舞い上がり漂う(=花に
+  溶ける)。人物の動き(運動場 flow)は各花びらへの「突風(加速度)」になる — 水面の移流では
+  なく、空気中の花びらの動き。背景は黒。加算＋2段ブルームで発光、フィルミックトーンマップ
+  で白飛びを避ける。
+  派生元: fable5_flower-being.html(検知系・座標一致・UI をそのまま流用。密度場流体は撤去し
+  GPU パーティクルに置換)。
 
   様式解析(視覚的不変量。優先度 1>2>3>4>5>6):
-    1. 黒背景・生映像非表示 — 背景は黒。実カメラ映像は一切描画しない(検知にのみ使用)。
-       人物は暗いシルエットで、切り抜き縁が出ない(花が縁を跨いで流出し輪郭を溶かす)。
-    2. 極彩色の花 — 密度場を花としてマッピング。位置ハッシュで花ごとに色が変わる極彩色
-       (マゼンタ/薔薇/紫/シアン/黄金/桃/白)。voronoi の花弁スタンプで離散的な花に。
-    3. 溶ける人 — 人物マスク全体を濃い開花源にし、buoyancy＋風で花びらが体外へ流出。
-       人型はうっすら花の密集として残る(のっぺりフォグ禁止/生映像の切り抜きに見えない)。
-    4. 発光・非白飛び — 加算＋ブルームで花を光らせる。花芯だけ明るく、全体は彩度で魅せる。
-       純白には張り付かない。
-    5. 動き＝風 — フレーム差分/マスク運動場(flow)を強めの外力として速度場へ。動きが大きい
-       ほど風が強く花びらが舞い上がり渦巻く。静止時は穏やかに漂う。
-    6. 頑健性・モバイル — MediaPipe ロード中/未検出/オフラインでも黒地の環境花で待機。
-       ?fakesource=1 で全駆動。検知は ImageSegmenter のみ(288px 縮小・33〜250ms 適応間引き・
-       GPU 破綻時 CPU 自動切替・presence はカバレッジ)。ステータスチップに推論ms・デリゲート。
+    1. 花びら＝離散スプライト — 花を全画面密度場でなく、回転する花びらスプライト(点でなく
+       instanced quad、5〜8弁の小花形状)として離散的に描く。星の放射光にはしない。
+    2. 溶ける人(人型が出る) — 花びらの 55〜70% を人物マスク内から発生させ、体の形に密集。
+       体から離れた粒は漂って背景の環境花に溶ける。無人時は環境花のみ。
+    3. 動き＝突風 — マスク運動場(flow)を各粒の加速度(突風)として加える。動くほど強く舞い
+       上がり渦巻く。水面のうねりではない。
+    4. 発光・非白飛び — 黒地に加算合成＋2段ブルームで発光。フィルミックトーンマップで白飛び
+       回避。極彩色パレット(マゼンタ/薔薇/紫/シアン/黄金/桃/白)。
+    5. 頑健性・モバイル — 粒数を端末適応(ソフトウェア/モバイル 12k〜16k / デスクトップ 40k)。
+       MediaPipe ロード中/未検出/オフラインでも黒地の環境花で待機。?fakesource=1 で全駆動。
+    6. 検知は ImageSegmenter のみ(288px 縮小・33〜250ms 適応間引き・GPU 破綻時 CPU 自動切替・
+       presence はカバレッジ)。ステータスチップに推論ms・デリゲート。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
     入力: カメラ映像 / fakeScene(GLSL 背景+人型) / MediaPipe seg マスク(uint8 tex, EMA)
     [P0 scene]  cover-fit+mirror(検知用・非表示)          sceneA/B RGBA8 長辺≤1280
-    [P1 mask]   seg tex or fake SDF → 人物マスク + 運動場   maskA/B★ ≤512  R=maskEMA BA=運動場(flow)
-    [P2 blur]   マスク縁ソフト化                           softT★
-    [P3 curl]→[P4 vel 移流+浮力+curl+渦度+運動場を強めの風に]→[P5 div]→[P6..29 Jacobi×24]→[P30 proj] ★ ≤512
-    [P31 den]   移流+減衰(体外へ流出)+マスク注入(縁 mottle ゲート)+縁ディザ  denA/B★ ≤512 clamp[0,1]
-    [P32 emis 花色発光]→[P33 fb 残光]→[P34-37 bloom 2段]   emis/fb★ b1 b2
-    [P38 composite] 黒地に voronoi 花弁スタンプ(位置ハッシュで極彩色)を描画。環境花＋密度
-                駆動の濃い花＋舞い散り、色付きブルーム加算、暗いシルエット、静的グレイン。純白非到達
+    [P1 mask]   seg tex or fake SDF → 人物マスク + 運動場   maskA/B★ ≤512  R=maskEMA BA=flow
+    [P2 soft]   マスク縁ソフト化(発生分布・突風の参照元)   softT★
+    [P3 init]   ★1回。index ハッシュで決定的に粒を配置     stateA/B★ (PART_W×PART_H, MRT)
+                (55〜70%は人物マスク内、残りは全画面環境花。年齢はスタガ)
+    [P4 update] 各粒: 年齢+dt / curl風 / 突風=flow を加速度 / 浮遊 / 空気抵抗 / 回転 /
+                寿命or画面外でリスポーン(決定的ハッシュ)                stateA/B★ ping-pong (MRT)
+    [P5 draw]   instanced quad の花びらスプライト(回転・5〜8弁・寿命fade・色=palette)を
+                加算合成で HDR フィールドへ                             field★
+    [P6 bloom]  field を2段ダウンサンプル＋ぼかし                       b1 b2
+    [P7 comp]   黒地 + field + ブルーム、フィルミックトーンマップ、微グレイン、周辺減光
 
   実行方法:
-    python3 -m http.server 8899 → http://localhost:8899/fable5_flower-being.html を開きカメラを許可
+    python3 -m http.server 8899 → http://localhost:8899/fable5_flower-being.html を開きカメラ許可
     (カメラ API はセキュアコンテキスト必須。file:// では動きません)
     ?fakesource=1 … カメラ/MediaPipe 不使用。合成背景+動く人型で全パイプライン駆動(検証用)
-    ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
+    ?freeze=1    … 全時間駆動を停止(dt=0)。全パーティクルが静止し決定的な静止フレーム(検証用)
     ?fakeseg=1   … seg 経路の Y 反転をオフライン検証(人物が画面上部に出れば正しい)
-    デバッグ表示: 0=最終 1=人物マスク 2=花密度 3=速度場(風) 4=配色標本
+    デバッグ表示: 0=最終 1=人物マスク 2=発生分布/粒密度 3=運動場(風) 4=配色標本
 
   スライダーの説明:
-    花の量      人物マスクからの開花(密度注入)量
-    舞い上がり  buoyancy(花びらが立ち上る強さ)
-    風・渦      動きが生む風と渦(vorticity+カールノイズ)の強さ
-    花びらの粒  花びらの粒状感と縁の破断の強さ
-    残光        花の発光が残る長さ
+    花の量      人物マスクから咲く花びらの明るさ・量
+    舞い上がり  花びらが立ち上る浮遊力(buoyancy)
+    風・渦      動きが生む突風とカールノイズ渦の強さ
+    花びらの大きさ 花びらスプライトの大きさ・粒状感
+    残光        発光の余韻(ブルームの持続)
     フィルム粒子 全面の静的グレイン
     発光        花のブルーム(発光)の強さ
-    環境花      黒地に漂う環境の花の量
-    境界ぼかし  人物マスク縁の柔らかさ
+    環境花      黒地に漂う環境の花の量(明るさ)
+    境界ぼかし  人物マスク縁の柔らかさ(発生分布)
 
   依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
-  WebGL2 / GLSL ES 3.00 単体。
+  WebGL2 / GLSL ES 3.00 単体。パーティクル状態は RGBA16F FBO(MRT, ping-pong)で管理。
 -->
 <html lang="ja">
   <head>
@@ -63,7 +67,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>FABLE5 · Flower Being — WebGL2 dissolving into flowers</title>
+    <title>FABLE5 · Flower Being — WebGL2 GPU-particle petals</title>
     <style>
       :root {
         color-scheme: dark;
@@ -207,7 +211,7 @@
     <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
     <div id="statusChip">起動中</div>
 
-    <section id="panel" class="panel" aria-label="Gas body webcam controls"></section>
+    <section id="panel" class="panel" aria-label="Flower being webcam controls"></section>
 
     <div id="overlay" role="status" aria-live="polite">
       <div class="overlay-card">
@@ -242,35 +246,35 @@
         // ?fakesource=1 replaces the camera with a synthetic scene (a patterned
         // room backdrop with a slowly drifting full-body figure). MediaPipe is
         // not used; the person mask is generated analytically so the whole
-        // smoke / grain / tracking pipeline runs offline.
+        // particle / detection pipeline runs offline.
         const FAKE = QUERY.get("fakesource") === "1";
-        // ?freeze=1 makes dt = 0: fluid, buoyancy, curl, the fake figure drift
-        // and the detection EMA all stop (deterministic still frame).
+        // ?freeze=1 makes dt = 0: particle age/velocity/rotation, the fake
+        // figure drift and the detection EMA all stop → deterministic still
+        // frame (every particle holds exactly its initialized state).
         const FREEZE = QUERY.get("freeze") === "1";
         // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
         // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
         // KNOWN orientation (person in the TOP ~60% of image space, top-left
         // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
-        // With the Y-flip fixed, the gas must appear in the TOP of the screen;
-        // if it appears at the bottom the flip is wrong. This lets us exercise
-        // the seg path in this offline environment (no camera / MediaPipe).
+        // With the Y-flip fixed, the flowers must cluster in the TOP of the
+        // screen; if they cluster at the bottom the flip is wrong.
         const FAKESEG = QUERY.get("fakeseg") === "1";
 
         const DEBUG_MODES = [
           "最終",
           "人物マスク",
-          "花密度",
-          "速度場(風)",
+          "発生分布/粒密度",
+          "運動場(風)",
           "配色標本",
         ];
 
         const DEFAULTS = {
           smoke: 0.82,
-          rise: 0.38,
-          swirl: 0.58,
+          rise: 0.42,
+          swirl: 0.55,
           grain: 0.5,
           trail: 0.45,
-          filmGrain: 0.22,
+          filmGrain: 0.2,
           bloom: 0.72,
           ambient: 0.55,
           edge: 0.5,
@@ -285,15 +289,15 @@
         };
 
         const uiRows = [
-          ["smoke", "花の量", "人物マスクからの開花(密度注入)量", 0, 1, 0.01],
-          ["rise", "舞い上がり", "buoyancy(花びらが立ち上る強さ)", 0, 1, 0.01],
-          ["swirl", "風・渦", "動きが生む風と渦の強さ", 0, 1, 0.01],
-          ["grain", "花びらの粒", "花びらの粒状感と縁の破断", 0, 1, 0.01],
-          ["trail", "残光", "花の発光が残る長さ", 0, 1, 0.01],
+          ["smoke", "花の量", "人物マスクから咲く花びらの明るさ・量", 0, 1, 0.01],
+          ["rise", "舞い上がり", "花びらが立ち上る浮遊力(buoyancy)", 0, 1, 0.01],
+          ["swirl", "風・渦", "動きが生む突風とカールノイズ渦の強さ", 0, 1, 0.01],
+          ["grain", "花びらの大きさ", "花びらスプライトの大きさ・粒状感", 0, 1, 0.01],
+          ["trail", "残光", "発光の余韻(ブルームの持続)", 0, 1, 0.01],
           ["filmGrain", "フィルム粒子", "全面の静的グレイン", 0, 1, 0.01],
           ["bloom", "発光", "花のブルーム(発光)の強さ", 0, 1, 0.01],
-          ["ambient", "環境花", "黒地に漂う環境の花の量", 0, 1, 0.01],
-          ["edge", "境界ぼかし", "人物マスク縁の柔らかさ", 0, 1, 0.01],
+          ["ambient", "環境花", "黒地に漂う環境の花の量(明るさ)", 0, 1, 0.01],
+          ["edge", "境界ぼかし", "人物マスク縁の柔らかさ(発生分布)", 0, 1, 0.01],
         ];
 
         panel.innerHTML = `
@@ -301,9 +305,9 @@
           <div class="panel-body">
           <h1>FABLE5 · フラワービーイング</h1>
           <p>
-            カメラに映る人物が、極彩色の発光する花びらに溶けて黒の空間へ還ります。
-            人物は暗いシルエットとなり(生映像は出しません)、体から花びらが流れ出します。
-            あなたが動くと風になり、花びらが舞い上がり渦巻きます。背景は黒。
+            カメラに映る人物が、極彩色の発光する花びらの粒になって黒の空間へ舞い散ります。
+            花びらは体の形に密集して人型を描き(生映像は出しません)、体から離れると風に乗って
+            漂います。あなたが動くと突風になり、花びらが舞い上がり渦巻きます。背景は黒。
           </p>
           <div class="select-row">
             <span>デバッグ表示</span>
@@ -341,8 +345,8 @@
             <button id="resetLook" type="button">リセット</button>
           </div>
           <div class="status">
-            <div id="readout">FPS -- / 解像度 -- / 流体 -- / 検知 --</div>
-            <span class="badge">WebGL2 · Stable Fluids · MediaPipe</span>
+            <div id="readout">FPS -- / 解像度 -- / 粒子 -- / 検知 --</div>
+            <span class="badge">WebGL2 · GPU Particles · MediaPipe</span>
           </div>
           </div>
         `;
@@ -442,10 +446,32 @@
         gl.disable(gl.CULL_FACE);
         gl.disable(gl.BLEND);
 
-        // Float render targets keep the fluid / EMAs from stalling in 8 bits.
-        // Signed quantities are offset-encoded into [0,1] (encV / encS) so the
-        // RGBA8 fallback runs the exact same shaders, only coarser.
+        // Float render targets keep particle position/velocity precise. Signed
+        // velocity is offset-encoded into [0,1] (encV) so the RGBA8 fallback
+        // runs the same shaders, only coarser.
         const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        // Renderer probe → particle-count adaptation. Software (SwiftShader in
+        // the verifier / CI) and coarse-pointer (mobile) devices get fewer
+        // particles; desktop GPUs get the full count. (order: 30k–60k desktop,
+        // 8k–16k mobile/slow.)
+        const dbgRI = gl.getExtension("WEBGL_debug_renderer_info");
+        const RENDERER = dbgRI ? gl.getParameter(dbgRI.UNMASKED_RENDERER_WEBGL) : "";
+        const IS_SOFT = /swiftshader|llvmpipe|software|basic|subzero/i.test(RENDERER);
+        const COARSE = window.matchMedia("(pointer: coarse)").matches;
+        // side² particles laid out in a square texture. Fewer than a pure
+        // point-spray so each flower/petal can be drawn LARGE and legible
+        // (order: individual flowers must be distinguishable, mobile-friendly).
+        // 112²=12544 (soft), 100²=10000 (mobile), 180²=32400 (desktop).
+        const PART_SIDE = IS_SOFT ? 112 : (COARSE ? 100 : 180);
+        const PART_W = PART_SIDE;
+        const PART_H = PART_SIDE;
+        const PART_N = PART_W * PART_H;
+        // fraction of particles that respawn INSIDE the person mask (body) when
+        // a person is present. High so the body cluster clearly dominates and
+        // the human reads; when nobody is present these fall back to the
+        // environment, so an empty room still shows a full field of flowers.
+        const BODY_FRAC = 0.72;
 
         const fullscreenVS = `#version 300 es
           precision highp float;
@@ -460,9 +486,9 @@
           }
         `;
 
-        // Shared: pcg-flavoured hash + value noise + fbm. Grain and the density
-        // mottle are seeded by cell / position only — never by time (repo rule),
-        // so they stay deterministic under ?freeze=1.
+        // Shared: pcg-flavoured hash + value noise + fbm + curl. Grain and the
+        // curl wind are seeded by cell / position only — never by time in a hash
+        // (repo rule) so they stay deterministic under ?freeze=1.
         const CHUNK_NOISE = `
           float hash12(vec2 p) {
             vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -497,15 +523,12 @@
           }
         `;
 
-        // Shared: [0,1] offset encoding for signed fields. The clamp doubles as
-        // the mandatory velocity clamp (no NaN blow-ups).
+        // Shared: [0,1] offset encoding for signed velocity. The clamp doubles
+        // as the mandatory velocity clamp (no NaN blow-ups).
         const CHUNK_ENC = `
           const float VMAX = 2.4;
-          const float SMAX = 3.0;
           vec2 encV(vec2 v) { return clamp(v, -VMAX, VMAX) / (2.0 * VMAX) + 0.5; }
           vec2 decV(vec2 e) { return (e - 0.5) * (2.0 * VMAX); }
-          float encS(float x) { return clamp(x, -SMAX, SMAX) / (2.0 * SMAX) + 0.5; }
-          float decS(float e) { return (e - 0.5) * (2.0 * SMAX); }
         `;
 
         // Shared: the ?fakesource=1 synthetic scene. A patterned "room" backdrop
@@ -535,8 +558,6 @@
             return d;
           }
           vec3 fakeScene(vec2 uv, float cx, float cy, float aspect) {
-            // discernible non-black background: cool top → warm bottom gradient,
-            // soft vertical stripes, a faint horizon band, gentle mottle.
             vec3 top = vec3(0.20, 0.25, 0.33);
             vec3 bot = vec3(0.50, 0.44, 0.36);
             vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
@@ -544,8 +565,6 @@
             float horizon = exp(-pow((uv.y - 0.55) * 6.0, 2.0));
             bg = mix(bg, vec3(0.62, 0.58, 0.48), 0.18 * horizon);
             bg += 0.05 * (vnoise(uv * 4.0) - 0.5);
-            // the person as they'd appear in the camera: shirt + skin head.
-            // cy bobs the figure so the mask moves (drives turbulence / rise).
             vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
             float d = humanDist(p, cx);
             float m = 1.0 - smoothstep(-0.004, 0.008, d);
@@ -563,71 +582,84 @@
           }
         `;
 
-        // Shared: the极彩色 flower rendering. A teamLab-style vivid palette keyed
-        // by a per-flower hash (adjacent flowers differ in hue), plus a voronoi
-        // "flower stamp" — each cell hosts one bloom with a bright core and
-        // cos-lobed petals (5-8), colored by the cell hash. Deterministic (no
-        // time in any hash) so it holds still under ?freeze=1. This is what
-        // turns the scalar density field into discrete, glowing flowers instead
-        // of flat fog.
+        // Shared: teamLab-style vivid flower palette keyed by a per-particle
+        // hash (adjacent particles differ in hue). Deterministic — no time in
+        // any hash — so colours hold under ?freeze=1.
         const CHUNK_FLOWER = `
+          // Balanced极彩色 palette — magenta is only ONE band so it no longer
+          // dominates; cyan / gold / violet / blue / white / pink all get equal
+          // footing. Adjacent particles differ in hue (t is a per-particle hash).
           vec3 flowerPalette(float t) {
             t = fract(t);
             vec3 c;
-            if      (t < 0.15) c = vec3(1.00, 0.10, 0.52);   // magenta rose
-            else if (t < 0.30) c = vec3(0.86, 0.12, 0.86);   // magenta violet
-            else if (t < 0.45) c = vec3(0.55, 0.18, 0.98);   // violet
-            else if (t < 0.60) c = vec3(0.16, 0.72, 1.00);   // cyan
-            else if (t < 0.74) c = vec3(1.00, 0.80, 0.24);   // gold
-            else if (t < 0.88) c = vec3(1.00, 0.42, 0.72);   // pink
-            else               c = vec3(1.00, 0.96, 0.98);   // white
+            if      (t < 0.14) c = vec3(1.00, 0.12, 0.55);   // magenta rose
+            else if (t < 0.28) c = vec3(1.00, 0.48, 0.74);   // soft pink
+            else if (t < 0.42) c = vec3(0.64, 0.24, 0.99);   // violet
+            else if (t < 0.56) c = vec3(0.34, 0.40, 1.00);   // blue-violet
+            else if (t < 0.70) c = vec3(0.15, 0.78, 1.00);   // cyan
+            else if (t < 0.84) c = vec3(1.00, 0.82, 0.26);   // gold
+            else               c = vec3(1.00, 0.97, 0.92);   // warm white
             return c;
           }
-          vec2 hash22(vec2 p) {
-            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
-            p3 += dot(p3, p3.yzx + 33.33);
-            return fract((p3.xx + p3.yz) * p3.zy);
+        `;
+
+        // Shared: per-particle DETERMINISTIC traits + placement. All randomness
+        // is derived from the particle INDEX (and an evolving per-particle
+        // respawn seed) via a hash — never Math.random / Date.now / uTime — so
+        // ?freeze=1 is bit-stable and 2 frames match. Used by init, update and
+        // draw so every stage agrees on a particle's life/role/colour/size.
+        const CHUNK_PART = `
+          float h11(float p) {
+            p = fract(p * 0.1031);
+            p *= p + 33.33;
+            p *= p + p;
+            return fract(p);
           }
-          // One voronoi layer of flowers. rgb = flower colour, a = intensity at
-          // p. 'wob' rotates the petal jitter a touch so the field breathes
-          // (constant under freeze because uTime is then 0).
-          vec4 flowerLayer(vec2 p, float wob) {
-            vec2 ip = floor(p);
-            vec2 fp = fract(p);
-            float bestD = 1e9;
-            vec2 bestRP = vec2(0.0);
-            vec2 bestId = vec2(0.0);
-            for (int j = -1; j <= 1; j++) {
-              for (int i = -1; i <= 1; i++) {
-                vec2 g = vec2(float(i), float(j));
-                vec2 o = hash22(ip + g);
-                vec2 cpos = g + o;
-                vec2 rp = fp - cpos;
-                float dd = dot(rp, rp);
-                if (dd < bestD) { bestD = dd; bestRP = rp; bestId = ip + g; }
+          // life (x, seconds), body flag (y, >0.5 = spawns in the mask),
+          // base size in px (z), palette t (w).
+          vec4 partTraits(float idx) {
+            float s0 = h11(idx * 0.017 + 0.11);
+            float s1 = h11(idx * 0.017 + 5.70);
+            float s2 = h11(idx * 0.017 + 13.3);
+            float life = mix(2.6, 6.2, s0);
+            float body = step(s1, uBodyFrac);
+            // legible flowers: medium florets, with ~20% big blooms. Larger
+            // than the old bokeh dots so petals are actually visible.
+            float sizePx = mix(20.0, 34.0, s2);
+            sizePx = mix(sizePx, mix(44.0, 78.0, s0), step(0.80, s2));
+            float pal = h11(idx * 0.017 + 21.1);
+            return vec4(life, body, sizePx, pal);
+          }
+          float partRotSpeed(float idx) { return (h11(idx * 0.017 + 31.0) - 0.5) * 0.6; }
+          float partPetals(float idx) { return 5.0 + floor(h11(idx * 0.017 + 41.0) * 4.0); }
+          // Deterministic placement. Body particles rejection-sample the mask
+          // (up to 12 tries) so they pack into the body SHAPE → the human reads
+          // as a cluster of flowers. Environment particles rejection-sample a
+          // static fbm field so they gather into CLUMPS with black ground
+          // between (like the reference wall of flowers) instead of a uniform
+          // wash. If nobody is present, body particles fall back to environment
+          // placement, so an empty room shows only environment flowers.
+          vec2 placePart(float idx, float rseed, float body, float present, sampler2D maskT) {
+            vec2 np = vec2(h11(rseed + 3.1), h11(rseed + 7.7));
+            if (body > 0.5 && present > 0.5) {
+              for (int k = 0; k < 12; k++) {
+                float a = h11(rseed + float(k) * 1.7 + 0.3);
+                float b = h11(rseed + float(k) * 1.7 + 9.1);
+                if (texture(maskT, vec2(a, b)).r > 0.5) { np = vec2(a, b); break; }
+              }
+            } else {
+              for (int k = 0; k < 8; k++) {
+                vec2 cand = vec2(h11(rseed + float(k) * 2.3 + 0.7),
+                                 h11(rseed + float(k) * 2.3 + 4.1));
+                if (fbm(cand * 3.0) > 0.55) { np = cand; break; }
               }
             }
-            float r = sqrt(bestD);
-            float rnd = hash12(bestId);
-            float rnd2 = hash12(bestId + 5.7);
-            float ang = atan(bestRP.y, bestRP.x) + rnd2 * 6.2831 + wob;
-            float petals = 5.0 + floor(rnd2 * 4.0);        // 5..8 petals
-            float lobe = 0.58 + 0.42 * cos(ang * petals);  // petal modulation
-            float rad = 0.30 + 0.22 * rnd;                 // flower radius/cell
-            float disc = smoothstep(rad, 0.0, r);          // soft disc
-            float petal = pow(disc, 1.4) * lobe;
-            float core = smoothstep(rad * 0.34, 0.0, r);   // bright centre
-            float intensity = clamp(petal + core * 0.9, 0.0, 1.6);
-            vec3 col = flowerPalette(rnd);
-            // warm/whiten the very centre so cores glow like the reference
-            col = mix(col, vec3(1.0, 0.95, 0.85), core * 0.7);
-            return vec4(col, intensity);
+            return np;
           }
         `;
 
         // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
-        // working scene buffer. This is the REAL background: everything
-        // downstream is screen-aligned to it.
+        // working scene buffer. Detection-only; never shown.
         const sceneFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -649,7 +681,6 @@
               return;
             }
             if (uHasVideo == 0) {
-              // neutral holding backdrop while the camera warms up (not black)
               fragColor = vec4(mix(vec3(0.10, 0.12, 0.15),
                 vec3(0.16, 0.18, 0.22), vUv.y), 1.0);
               return;
@@ -669,7 +700,7 @@
         // P1 — the mask/field: R = person mask EMA (fake SDF, uploaded MediaPipe
         // segmentation with cover-fit, or 0 when nothing is detected),
         // BA = motion field (frame-difference flow, EMA-smoothed) so body
-        // movement can nudge the smoke (invariant 5).
+        // movement can gust the petals (invariant 3). UNCHANGED detection math.
         const maskFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -701,26 +732,15 @@
               // Real-camera segmentation mask. Coordinate convention matched to
               // overflowing_aura_4taigyo_v2.html so the mask overlaps the real
               // person pixel-for-pixel with the P0 background:
-              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
-              //     to the P0 scene (both mirror the same way, so a mirrored
-              //     scene and its mask stay in register).
-              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — same crop as P0
-              //     (uSegScale is computed exactly like the scene's scale).
+              //   * mirror BEFORE cover-fit (identical to the P0 scene).
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — same crop as P0.
               //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
-              //     image-space, top-left origin, and segTexture is uploaded
-              //     UNPACK_FLIP_Y=false, whereas the video texture is uploaded
-              //     UNPACK_FLIP_Y=true (upright). The explicit 1.0 - y here is
-              //     the mask-side equivalent of overflowing_aura's
-              //     texture(u_person, vec2(camUV.x, 1.0 - camUV.y)) — without it
-              //     the mask lands upside-down and the gas only lands where the
-              //     mask happens to overlap (looks like "only the face").
+              //     image-space top-left origin, uploaded UNPACK_FLIP_Y=false,
+              //     whereas the video texture is uploaded UNPACK_FLIP_Y=true.
               vec2 uv = vUv;
               if (uMirror == 1) uv.x = 1.0 - uv.x;
               vec2 suv = (uv - 0.5) * uSegScale + 0.5;
               float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
-              // firm the soft MediaPipe confidence mask toward 0/1 so the body
-              // is solidly covered (real seg is fuzzy; cov must reach ~1 to
-              // hide the person) — coordinator fix #2.
               rawMask = smoothstep(0.30, 0.72, rawSeg);
             }
             vec4 prev = texture(uPrev, vUv);
@@ -746,7 +766,8 @@
           }
         `;
 
-        // Separable Gaussian (all channels). Used to soften the mask edge.
+        // Separable Gaussian (all channels). Softens the mask edge (P2) and
+        // downsamples/blurs the particle field for bloom (P6).
         const blurFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -767,277 +788,271 @@
           }
         `;
 
-        // P3 — curl of the velocity field (for vorticity confinement).
-        const curlFS = `#version 300 es
+        // P3 — particle INIT (MRT). Runs once, deterministically. Writes:
+        //   outA = (pos.x, pos.y, encV(vel))
+        //   outB = (ageFraction, rotationTurns, respawnSeed, spare)
+        // Ages are staggered across [0,1) so respawns spread over time instead
+        // of pulsing in sync. Body particles start already inside the mask so
+        // the human is legible from the first frame (and under freeze).
+        const partInitFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
-          out vec4 fragColor;
-          uniform sampler2D uVel;
-          uniform vec2 uTexel;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform sampler2D uMask;
+          uniform float uTexW;
+          uniform float uBodyFrac;
+          uniform int uPresent01;
+          ${CHUNK_NOISE}
           ${CHUNK_ENC}
+          ${CHUNK_PART}
           void main() {
-            float vr = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).rg).y;
-            float vl = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).rg).y;
-            float vt = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).rg).x;
-            float vb = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).rg).x;
-            float c = 0.5 * ((vr - vl) - (vt - vb));
-            fragColor = vec4(encS(c), 0.0, 0.0, 1.0);
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexW + float(tc.x);
+            vec4 tr = partTraits(idx);
+            float rseed = h11(idx * 0.017 + 0.5);
+            float present = float(uPresent01);
+            vec2 pos = placePart(idx, rseed, tr.y, present, uMask);
+            float ageF = h11(idx * 0.017 + 2.3) * 0.96;
+            vec2 vel = vec2((h11(rseed + 13.0) - 0.5) * 0.04, 0.02 * h11(rseed + 17.0));
+            float rot = h11(idx * 0.017 + 3.9);
+            outA = vec4(pos, encV(vel));
+            outB = vec4(ageF, rot, rseed, 0.0);
           }
         `;
 
-        // P4 — semi-Lagrangian advection + forces: buoyancy lifts dense smoke,
-        // curl noise adds exhaust turbulence, vorticity confinement re-sharpens
-        // eddies, and the body motion field drags the gas so it wafts.
-        const velFS = `#version 300 es
+        // P4 — particle UPDATE (MRT, ping-pong). Each particle advances by its
+        // OWN acceleration (air, not water advection):
+        //   * curl-noise drift (analytic, slow)
+        //   * GUST = motion field (flow) added as acceleration — the person's
+        //     movement blows nearby petals up and around (invariant 3).
+        //   * buoyancy (petals rise), extra lift on the body, slight gravity,
+        //     air drag (velocity decay), tumble rotation.
+        //   * respawn on death (age≥life) or when it drifts off-screen, using
+        //     an evolving deterministic seed. Under ?freeze=1 (dt=0) age never
+        //     advances, forces vanish and drag=1 → every particle is bit-stable.
+        const partUpdateFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
-          out vec4 fragColor;
-          uniform sampler2D uVel;
-          uniform sampler2D uCurl;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
           uniform sampler2D uMask;
-          uniform sampler2D uDen;
-          uniform vec2 uTexel;
+          uniform float uTexW;
           uniform float uDt;
           uniform float uTime;
           uniform float uRise;
           uniform float uSwirl;
-          uniform float uPresent;
+          uniform float uBodyFrac;
+          uniform int uPresent01;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
+          ${CHUNK_PART}
           void main() {
-            vec2 vHere = decV(texture(uVel, vUv).rg);
-            vec2 back = vUv - vHere * uDt;
-            vec2 v = decV(texture(uVel, back).rg);
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexW + float(tc.x);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            vec2 pos = A.xy;
+            vec2 vel = decV(A.zw);
+            float ageF = B.x;
+            float rot = B.y;
+            float rseed = B.z;
 
-            vec4 mk = texture(uMask, vUv);
-            float mask = mk.r;
+            vec4 tr = partTraits(idx);
+            float life = tr.x;
+            float body = tr.y;
+            float present = float(uPresent01);
+
+            ageF += uDt / life;
+
+            // field sample at current position
+            vec4 mk = texture(uMask, pos);
+            float maskHere = clamp(mk.r, 0.0, 1.0);
             vec2 flow = decV(mk.ba);
-            float den = texture(uDen, vUv).r;
-
-            // buoyancy — petals rise and drift up off the body as they detach.
-            v.y += (0.30 + 1.30 * uRise) * den * uDt;
-            // a lift rooted in the body so blooms lift away from it
-            v.y += mask * uPresent * (0.15 + 0.50 * uRise) * uDt * 0.6;
-
-            // MOTION = WIND (invariant 5,強め): the body motion field is a
-            // strong external force applied to the WHOLE neighbourhood (not just
-            // on the mask) so detached petals are blown too. The more the person
-            // moves, the stronger the gust — big motion → big swirling gusts.
             float windMag = length(flow);
-            v += flow * (1.6 + 6.5 * uSwirl) * (0.35 + mask) * uDt;
 
-            // curl noise turbulence — folds density into swirling petal streams.
-            // Boosted by wind magnitude so motion spins up real vortices.
-            float wSmoke = smoothstep(0.02, 0.12, den) * (0.5 + 0.9 * mask)
-              + windMag * 1.6;
-            vec2 np = vUv * 3.4 + vec2(0.0, -uTime * 0.05);
-            vec2 np2 = vUv * 7.0 + vec2(uTime * 0.04, -uTime * 0.02);
-            vec2 np3 = vUv * 13.0 + vec2(-uTime * 0.05, uTime * 0.03);
-            vec2 cn = curlN(np) + 0.8 * curlN(np2) + 0.6 * curlN(np3);
-            v += cn * (0.30 + 2.2 * uSwirl) * wSmoke * uDt;
+            // curl-noise drift (organic wafting)
+            vec2 cn = curlN(pos * 3.0 + vec2(0.0, -uTime * 0.03))
+                    + 0.5 * curlN(pos * 7.0 + vec2(uTime * 0.02, 0.0));
+            vel += cn * (0.015 + 0.06 * uSwirl) * uDt;
+            // GUST: body motion field as acceleration (stronger with swirl)
+            vel += flow * (2.2 + 9.0 * uSwirl) * uDt;
+            // buoyancy + a lift rooted in the body so petals rise off it
+            vel.y += (0.015 + 0.11 * uRise) * uDt;
+            vel.y += maskHere * (0.03 + 0.18 * uRise) * uDt;
+            // slight gravity so not everything floats away, then air drag
+            vel.y -= 0.02 * uDt;
+            vel *= exp(-uDt * 0.85);
+            vel = clamp(vel, vec2(-VMAX), vec2(VMAX));
 
-            // vorticity confinement — curl eddies into churning clumps (modest)
-            float cC = decS(texture(uCurl, vUv).r);
-            float cL = decS(texture(uCurl, vUv - vec2(uTexel.x, 0.0)).r);
-            float cR = decS(texture(uCurl, vUv + vec2(uTexel.x, 0.0)).r);
-            float cB = decS(texture(uCurl, vUv - vec2(0.0, uTexel.y)).r);
-            float cT = decS(texture(uCurl, vUv + vec2(0.0, uTexel.y)).r);
-            vec2 gAbs = 0.5 * vec2(abs(cR) - abs(cL), abs(cT) - abs(cB));
-            vec2 nDir = gAbs / max(length(gAbs), 1e-4);
-            v += vec2(nDir.y, -nDir.x) * cC * (0.7 + uSwirl * 2.6) * uDt;
+            pos += vel * uDt;
+            rot = fract(rot + partRotSpeed(idx) * uDt * (1.0 + windMag * 4.0));
 
-            // moderate damping — looser than the gas engine so petals CAN
-            // travel off the body on the wind, but still bounded (no blow-up).
-            v *= exp(-uDt * 0.68);
-            fragColor = vec4(encV(v), 0.0, 1.0);
+            bool offscreen = pos.x < -0.15 || pos.x > 1.15
+                          || pos.y < -0.2 || pos.y > 1.25;
+            if (ageF >= 1.0 || offscreen) {
+              rseed = h11(rseed * 127.1 + idx * 0.017 + 1.0);
+              pos = placePart(idx, rseed, body, present, uMask);
+              vel = vec2((h11(rseed + 13.0) - 0.5) * 0.05,
+                         0.02 + 0.05 * h11(rseed + 17.0));
+              ageF = ageF >= 1.0 ? fract(ageF) : 0.0;
+              rot = h11(rseed + 23.0);
+            }
+
+            outA = vec4(pos, encV(vel));
+            outB = vec4(ageF, rot, rseed, 0.0);
           }
         `;
 
-        // P5 — divergence of the forced velocity.
-        const divFS = `#version 300 es
+        // P5 — particle DRAW. Instanced quad per particle (gl_InstanceID →
+        // texelFetch of state; gl_VertexID → quad corner). Chosen over
+        // gl.POINTS for mobile robustness (no point-size clamp, no whole-sprite
+        // clipping when the centre leaves the viewport) while keeping true
+        // per-petal rotation. The fragment carves a soft 5–8 lobe flower shape
+        // (NOT a radial star) coloured from the palette; additive → glow.
+        const partDrawVS = `#version 300 es
           precision highp float;
-          in vec2 vUv;
-          out vec4 fragColor;
-          uniform sampler2D uVel;
-          uniform vec2 uTexel;
-          ${CHUNK_ENC}
-          void main() {
-            float vr = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).rg).x;
-            float vl = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).rg).x;
-            float vt = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).rg).y;
-            float vb = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).rg).y;
-            fragColor = vec4(encS(0.5 * ((vr - vl) + (vt - vb))), 0.0, 0.0, 1.0);
-          }
-        `;
-
-        // P6..P29 — Jacobi pressure iterations (fixed count from JS,
-        // warm-started from the previous frame's pressure).
-        const jacobiFS = `#version 300 es
-          precision highp float;
-          in vec2 vUv;
-          out vec4 fragColor;
-          uniform sampler2D uPrs;
-          uniform sampler2D uDiv;
-          uniform vec2 uTexel;
-          ${CHUNK_ENC}
-          void main() {
-            float pl = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).r);
-            float pr = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).r);
-            float pb = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).r);
-            float pt = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).r);
-            float dv = decS(texture(uDiv, vUv).r);
-            fragColor = vec4(encS((pl + pr + pb + pt - dv) * 0.25), 0.0, 0.0, 1.0);
-          }
-        `;
-
-        // P30 — subtract the pressure gradient (projection).
-        const projFS = `#version 300 es
-          precision highp float;
-          in vec2 vUv;
-          out vec4 fragColor;
-          uniform sampler2D uVel;
-          uniform sampler2D uPrs;
-          uniform vec2 uTexel;
-          ${CHUNK_ENC}
-          void main() {
-            vec2 v = decV(texture(uVel, vUv).rg);
-            float pl = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).r);
-            float pr = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).r);
-            float pb = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).r);
-            float pt = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).r);
-            v -= 0.5 * vec2(pr - pl, pt - pb);
-            fragColor = vec4(encV(v), 0.0, 1.0);
-          }
-        `;
-
-        // P31 — density: advect + dissipate the smoke, inject a granular plume
-        // over the WHOLE person mask (full-body gas), multiply in fbm mottle
-        // (exhaust particulate), and tatter thin edges with a position-seeded
-        // noise dither. Clamped to [0,1] so it stays bounded (no whiteout).
-        const denFS = `#version 300 es
-          precision highp float;
-          in vec2 vUv;
-          out vec4 fragColor;
-          uniform sampler2D uDen;
-          uniform sampler2D uVel;
-          uniform sampler2D uMask;
-          uniform float uDt;
-          uniform float uTime;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform float uTexW;
+          uniform vec2 uResolution;
+          uniform float uSize;
           uniform float uSmoke;
-          uniform float uGrain;
-          uniform float uPresent;
+          uniform float uAmbient;
+          uniform float uBodyFrac;
+          out vec2 vCorner;
+          out vec3 vCol;
+          out float vAlpha;
+          out float vPetals;
+          out float vType;      // 0 = flower bloom, 1 = falling petal
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
-          void main() {
-            vec2 v = decV(texture(uVel, vUv).rg);
-            float d = texture(uDen, vUv - v * uDt).r;
-
-            float cover = clamp(texture(uMask, vUv).r, 0.0, 1.0);
-            // DISSIPATION: inside the mask the petals persist (slow decay); off
-            // the body they fade, but far more gently than the gas engine so
-            // petals detach and DRIFT out into the black flower field on the
-            // wind before dissolving (「花びらに溶けて還る」). Still bounded →
-            // no whiteout (invariant 4).
-            float diss = mix(1.55, 0.52, cover) + 0.25 * (1.0 - uSmoke);
-            d *= exp(-uDt * diss);
-
-            // injection over the whole (softened) person mask → full-body gas.
-            // multi-octave mottle → granular churn (invariant 3). Frozen &
-            // deterministic under ?freeze=1 (uTime = 0).
-            float mott = fbm(vUv * 7.0 + vec2(0.0, -uTime * 0.14));
-            mott += 0.6 * fbm(vUv * 15.0 + vec2(uTime * 0.06, -uTime * 0.18));
-            mott = pow(clamp(mott / 1.6, 0.0, 1.0), 1.6);
-            // strong gain across the mask: the simulated density now CARRIES
-            // the visual (the composite only floors the body lightly), so the
-            // body must run dense and structured. The taper keeps it bounded
-            // and granular instead of a flat white blob.
-            // CRITICAL: never let the body saturate to a flat d=1 — a flat
-            // field has zero gradients, so lighting/detail die and the smoke
-            // reads as a solid plaster cutout. The mottle carries most of the
-            // gain and the taper caps d in the 0.6–0.85 band with spatial
-            // structure the composite can light.
-            // the body edge band only receives gas where the mottle is high,
-            // so the smoke's own footprint is lumpy at the boundary — the
-            // silhouette must NOT be the segmentation contour.
-            float edgeGate = smoothstep(0.55, 0.95, cover);
-            float rimBand = cover * (1.0 - edgeGate);
-            float src = edgeGate + rimBand * smoothstep(0.35, 0.75, mott) * 1.4;
-            float inj = uPresent * uSmoke * (0.18 + 1.55 * mott) * src;
-            inj *= 1.0 - 0.85 * smoothstep(0.35, 0.85, d);
-            d += inj * uDt * 2.4;
-
-            // edge tatter — soften: hard cutouts read as torn paper, smoke
-            // wants gradual thick→thin transitions with only mild raggedness
-            float en = fbm(vUv * 9.0 + 11.3);
-            float tat = smoothstep(-0.12, 0.30, d + (en - 0.5) * 0.55);
-            d *= mix(1.0, tat, 0.5 * uGrain);
-
-            fragColor = vec4(clamp(d, 0.0, 1.0), 0.0, 0.0, 1.0);
-          }
-        `;
-
-        // P32 — COLOURED emission (bloom / halo source). Density is tinted by a
-        // slowly-varying flower colour so the bloom chain carries the极彩色 glow
-        // (region hue via low-freq noise; freeze-safe — no time in the hash).
-        const emisFS = `#version 300 es
-          precision highp float;
-          in vec2 vUv;
-          out vec4 fragColor;
-          uniform sampler2D uDen;
-          ${CHUNK_NOISE}
           ${CHUNK_FLOWER}
+          ${CHUNK_PART}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
           void main() {
-            float d = texture(uDen, vUv).r;
-            float e = pow(max(d, 0.0), 0.85);
-            float hueSel = vnoise(vUv * 3.2) * 0.7 + vnoise(vUv * 9.0) * 0.3;
-            vec3 tint = flowerPalette(hueSel);
-            fragColor = vec4(tint * e, 1.0);
+            int i = gl_InstanceID;
+            int tw = int(uTexW);
+            ivec2 tc = ivec2(i % tw, i / tw);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            vec2 pos = A.xy;
+            vec2 vel = decV(A.zw);
+            float ageF = clamp(B.x, 0.0, 1.0);
+            float rot = B.y * 6.2831853;
+            float idx = float(i);
+            vec4 tr = partTraits(idx);
+            float body = tr.y;
+            float sizePx = tr.z * (0.45 + 1.4 * uSize);
+
+            // deterministic species split (index hash → freeze-safe): ~36% of
+            // particles are single FALLING PETALS, the rest are FLOWER BLOOMS.
+            float typ = h11(idx * 0.017 + 51.0);
+            float isPetal = step(0.64, typ);
+            vType = isPetal;
+
+            vec3 col = flowerPalette(tr.w);
+            float fade = clamp(sin(ageF * 3.14159265), 0.0, 1.0);
+            // body flowers glow brighter than the environment so the human
+            // cluster reads as a figure; environment stays dim. Bounded so
+            // additive overlaps never blow the black ground white (invariant 4).
+            float bright = body > 0.5 ? (0.15 + 0.26 * uSmoke)
+                                      : (0.05 + 0.11 * uAmbient);
+            vCol = col * bright;
+            vAlpha = fade;
+            vPetals = partPetals(idx);
+
+            vec2 corner = QUAD[gl_VertexID];
+            vCorner = corner;
+
+            // petals are elongated and STRETCH with speed → the more wind /
+            // motion, the longer the streaked, tumbling petal (invariant 3).
+            vec2 shape = corner;
+            if (isPetal > 0.5) {
+              float speed = length(vel);
+              float stretch = 1.25 + 0.6 * clamp(speed * 1.2, 0.0, 1.6);
+              shape = vec2(corner.x * 0.5, corner.y * stretch);
+              sizePx *= 0.95;
+            }
+
+            float c = cos(rot), s = sin(rot);
+            vec2 rc = vec2(shape.x * c - shape.y * s,
+                           shape.x * s + shape.y * c);
+            vec2 posPx = pos * uResolution;
+            vec2 clip = ((posPx + rc * (sizePx * 0.5)) / uResolution) * 2.0 - 1.0;
+            gl_Position = vec4(clip, 0.0, 1.0);
           }
         `;
 
-        // P33 — afterglow feedback: max(current, previous · decay).
-        // Under ?freeze=1 decay = 1 (dt = 0), so the buffer holds still.
-        const fbFS = `#version 300 es
+        const partDrawFS = `#version 300 es
           precision highp float;
-          in vec2 vUv;
+          in vec2 vCorner;
+          in vec3 vCol;
+          in float vAlpha;
+          in float vPetals;
+          in float vType;
           out vec4 fragColor;
-          uniform sampler2D uEmis;
-          uniform sampler2D uPrev;
-          uniform float uDecay;
           void main() {
-            vec3 e = texture(uEmis, vUv).rgb;
-            vec3 p = texture(uPrev, vUv).rgb * uDecay;
-            fragColor = vec4(max(e, p), 1.0);
+            vec2 p = vCorner;
+
+            if (vType > 0.5) {
+              // -------- FALLING PETAL: a single almond/teardrop petal, pointed
+              // at the ends, rounded in the middle, with a faint centre vein.
+              // Tumbles (rotated in the VS) → "ひらひら舞う花びら", not a dot. --------
+              float ty = clamp(p.y * 0.5 + 0.5, 0.0, 1.0);       // 0..1 along length
+              float w = pow(clamp(sin(ty * 3.14159265), 0.0, 1.0), 0.62); // width profile
+              float halfw = 0.9 * w;
+              float dx = abs(p.x) / max(halfw, 1e-3);
+              float bodyP = smoothstep(1.0, 0.42, dx);           // petal cross-section
+              float vein = smoothstep(0.14, 0.0, abs(p.x)) * w;  // subtle centre vein
+              vec3 cp = vCol * (0.85 * bodyP + 0.30 * vein);
+              float ap = bodyP * vAlpha;
+              if (ap <= 0.004) discard;
+              fragColor = vec4(cp * ap, ap);                     // additive (ONE,ONE)
+              return;
+            }
+
+            // -------- FLOWER BLOOM: deep, clearly separated petals (5–8) with
+            // dark seams between them and a small saturated stamen. NOT a round
+            // bokeh dot and NOT a spiky star — the petals are rounded and wide. --
+            float r = length(p);
+            if (r > 1.0) discard;
+            float ang = atan(p.y, p.x);
+            float k = 0.5 + 0.5 * cos(ang * vPetals);
+            float petal = pow(k, 0.55);                   // rounded, WIDE petals
+            float rad = mix(0.30, 1.0, petal);            // DEEP scallop → clear petals
+            float edge = smoothstep(rad, rad * 0.55, r);  // petal body
+            float seam = smoothstep(0.10, 0.55, petal);   // dark slits between petals
+            float glow = exp(-r * r * 2.6) * 0.16;        // faint luminous halo
+            float core = smoothstep(0.20, 0.0, r);        // small stamen
+            vec3 c = vCol * (edge * seam * 0.95 + glow);
+            // stamen: warm gold-tinted but kept saturated (no white blowout)
+            c += mix(vCol, vec3(1.0, 0.86, 0.42), 0.45) * core * 0.55;
+            float alpha = clamp(edge * seam + glow * 0.6 + core * 0.30, 0.0, 1.0) * vAlpha;
+            fragColor = vec4(c * alpha, alpha);           // additive (ONE,ONE)
           }
         `;
 
-        // P38 — final composite (FLOWER FIELD). Background is BLACK — the real
-        // camera footage is NEVER drawn (invariant 1). On the black ground we
-        // paint discrete, glowing极彩色 flowers with voronoi petal stamps: a
-        // clustered environment layer everywhere, denser blooms driven by the
-        // simulated density (the person + the petals that have flowed off the
-        // body on the wind), and scattered drifting petals that streak with
-        // motion. Colored bloom is added for the glow. The person reads as an
-        // implicit dark silhouette shaped by where the flowers cluster (the
-        // black gaps ARE the silhouette) — no cut-out edge, no live footage.
+        // P7 — final composite. Black ground + additive particle field +
+        // 2-stage bloom, filmic tonemap (no whiteout), faint violet ground,
+        // vignette, static grain. The camera footage is NEVER drawn (invariant
+        // 1): the person is the CLUSTER of flowers, the black gaps the silhouette.
         const compositeFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
           out vec4 fragColor;
-          uniform sampler2D uScene;   // (unused in output; kept for parity)
-          uniform sampler2D uMask;
-          uniform sampler2D uMaskRaw;
-          uniform sampler2D uDen;
-          uniform sampler2D uVel;
-          uniform sampler2D uFb;
+          uniform sampler2D uField;
           uniform sampler2D uB1;
           uniform sampler2D uB2;
+          uniform sampler2D uMask;
           uniform vec2 uResolution;
-          uniform vec2 uDenTexel;
           uniform float uBloom;
-          uniform float uAmbient;
           uniform float uTrail;
-          uniform float uGrain;
           uniform float uFilmGrain;
           uniform float uTime;
           uniform int uDebug;
@@ -1045,119 +1060,52 @@
           ${CHUNK_ENC}
           ${CHUNK_FLOWER}
           float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-
           void main() {
-            float den = clamp(texture(uDen, vUv).r, 0.0, 1.0);
-            vec2 vel = decV(texture(uVel, vUv).rg);
-
             if (uDebug == 1) {
-              fragColor = vec4(vec3(clamp(texture(uMaskRaw, vUv).r, 0.0, 1.0)), 1.0);
+              fragColor = vec4(vec3(clamp(texture(uMask, vUv).r, 0.0, 1.0)), 1.0);
               return;
             }
             if (uDebug == 2) {
-              fragColor = vec4(vec3(den), 1.0);        // flower density
+              vec3 f = texture(uField, vUv).rgb;
+              fragColor = vec4(vec3(1.0) - exp(-f * 1.4), 1.0);   // particle density
               return;
             }
             if (uDebug == 3) {
-              fragColor = vec4(clamp(vel / (2.0 * VMAX) + 0.5, 0.0, 1.0), 0.4, 1.0);
+              vec2 fl = decV(texture(uMask, vUv).ba);
+              fragColor = vec4(clamp(fl / (2.0 * VMAX) + 0.5, 0.0, 1.0), 0.4, 1.0);
               return;
             }
             if (uDebug == 4) {
-              // palette specimen: horizontal sweep through the flower palette
               float strip = 1.0 - smoothstep(0.13, 0.15, abs(vUv.y - 0.5));
               fragColor = vec4(flowerPalette(vUv.x) * strip, 1.0);
               return;
             }
 
-            float aspect = uResolution.x / uResolution.y;
-            vec2 ap = vec2(vUv.x * aspect, vUv.y);   // keep flowers round
-
-            // turbulent warp so the sampling (and thus the silhouette edge) is
-            // broken up by the flowers — the segmentation contour never shows.
-            vec2 wq = vUv * 6.0;
-            vec2 wob = vec2(
-                fbm(wq + vec2(0.0, -uTime * 0.08)),
-                fbm(wq + vec2(31.0, 7.0) + vec2(uTime * 0.05, 0.0))) - 0.5;
-
-            // ---- environment flowers: low-freq fbm shapes them into drifting
-            // clumps on the black ground (like the reference wall of flowers).
-            // Kept present everywhere (never fully gated to zero) so the black
-            // ground always carries a scatter of blooms. ----
-            float clump = fbm(vUv * 2.2 + vec2(0.0, -uTime * 0.02));
-            clump = smoothstep(0.30, 0.85, clump);
-            float ambAmt = uAmbient * (0.45 + 0.65 * clump);
-
-            // total flower "fuel": environment + simulated density (the person
-            // and the petals blown off the body). Density dominates on the body.
-            float fuel = clamp(ambAmt * 1.05 + den * 1.75, 0.0, 1.9);
-
-            // wind warps the flower sampling so petals streak with motion.
-            float windMag = length(vel);
-            vec2 fuv = ap + vel * 0.05 + wob * 0.03;
-
-            // two voronoi flower scales (large blooms + small florets) + a
-            // sparse scatter layer for舞い散る petals (stronger with wind).
-            vec4 F1 = flowerLayer(fuv * 7.5, uTime * 0.05);
-            vec4 F2 = flowerLayer(fuv * 15.0 + vec2(19.0, 5.0), -uTime * 0.04);
-            vec4 F3 = flowerLayer(fuv * 30.0 + vel * 0.4 + vec2(3.0, 11.0),
-                                  uTime * 0.09);
-            float fleck = smoothstep(0.72, 1.2, F3.a);
-
-            float g1 = smoothstep(0.03, 0.5, fuel);
-            float g2 = smoothstep(0.18, 0.9, fuel);
-            vec3 flowers = vec3(0.0);
-            flowers += F1.rgb * F1.a * g1;
-            flowers += F2.rgb * F2.a * g2 * 0.8;
-            flowers += F3.rgb * fleck * smoothstep(0.02, 0.4, fuel)
-                     * (0.5 + 1.3 * windMag);
-
-            // flowers glow additively. Dense (body / wind-carried) areas get
-            // MORE and brighter flowers, but the multiplier is kept modest so
-            // the dark voronoi gaps survive — the body reads as a CLUSTER of
-            // discrete flowers (an implicit silhouette), never a solid blob.
-            float glow = 0.85 + 0.75 * den + 0.40 * ambAmt;
-            vec3 col = flowers * glow;
-
-            // a dim coloured wash where flowers clump, so the voronoi gaps are
-            // not dead black — the soft glow bleed of the reference. Subtle, so
-            // it stays flowers-on-black, not flat fog. Deliberately does NOT
-            // scale with density (that made the body a solid glow).
-            vec3 washCol = flowerPalette(vnoise(vUv * 2.0 + 4.0));
-            col += washCol * ambAmt * (0.08 + 0.12 * clump);
-
-            // near-black ground with a whisper of deep violet so it is not a
-            // dead flat black (still reads as black in the reference).
-            col += vec3(0.012, 0.005, 0.026) * (1.0 - 0.35 * vUv.y);
-
-            // ---- coloured bloom HALO from the (flower-tinted) emission chain.
-            // Kept as a soft glow accent — NOT a fill — so it haloes the flowers
-            // instead of washing the body out to white.
+            vec3 field = texture(uField, vUv).rgb;
             vec3 b1 = texture(uB1, vUv).rgb;
             vec3 b2 = texture(uB2, vUv).rgb;
-            vec3 fbv = texture(uFb, vUv).rgb;
-            vec3 bloom = b1 * 0.55 + b2 * 0.85 + fbv * (0.12 + 0.35 * uTrail);
-            col += bloom * (0.22 + 0.75 * uBloom);
+            vec3 col = field;
+            col += (b1 * 0.35 + b2 * 0.55 * (0.5 + 0.9 * uTrail))
+                 * (0.18 + 0.75 * uBloom);
 
-            // fine petal grain so the flowers do not read as smooth blobs
-            float fine = 0.6 * fbm(fuv * 22.0) + 0.4 * fbm(vUv * 40.0);
-            col *= 1.0 - 0.18 * uGrain * (1.0 - fine);
+            // faint deep-violet ground so black is not dead flat (still black)
+            col += vec3(0.010, 0.004, 0.022) * (1.0 - 0.30 * vUv.y);
 
-            // vignette (mild) — pulls focus to the immersive centre
+            // vignette pulls focus to the immersive centre
+            float aspect = uResolution.x / uResolution.y;
             vec2 vq = (vUv - 0.5) * vec2(aspect, 1.0);
-            col *= mix(0.82, 1.0, smoothstep(1.25, 0.30, length(vq)));
+            col *= mix(0.74, 1.0, smoothstep(1.25, 0.30, length(vq)));
 
             // filmic exposure tonemap → vivid but never a white blowout
-            // (invariant 4). Only flower cores approach white.
-            col = vec3(1.0) - exp(-col * 1.05);
+            col = vec3(1.0) - exp(-col * 0.68);
 
             // static film grain (cell hash, no time → freeze-safe)
             float h1 = hash12(floor(gl_FragCoord.xy));
-            float h2 = hash12(floor(gl_FragCoord.xy * 0.5) + 17.0);
             float lc = lumaf(col);
             float gAmt = uFilmGrain * (0.05 + 0.10 * (1.0 - smoothstep(0.05, 0.6, lc)));
-            col += (h1 - 0.5) * gAmt + (h2 - 0.5) * uFilmGrain * 0.02;
+            col += (h1 - 0.5) * gAmt;
 
-            col = min(col, vec3(0.985));            // hard whiteout guard
+            col = min(col, vec3(0.985));       // hard whiteout guard
             fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
           }
         `;
@@ -1175,9 +1123,9 @@
           }
           return shader;
         }
-        function createProgram(fsSource) {
+        function createProgram(fsSource, vsSource) {
           const program = gl.createProgram();
-          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, fullscreenVS));
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource || fullscreenVS));
           gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
           gl.linkProgram(program);
           if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
@@ -1197,14 +1145,9 @@
           scene: createProgram(sceneFS),
           mask: createProgram(maskFS),
           blur: createProgram(blurFS),
-          curl: createProgram(curlFS),
-          vel: createProgram(velFS),
-          div: createProgram(divFS),
-          jacobi: createProgram(jacobiFS),
-          proj: createProgram(projFS),
-          den: createProgram(denFS),
-          emis: createProgram(emisFS),
-          fb: createProgram(fbFS),
+          pInit: createProgram(partInitFS),
+          pUpdate: createProgram(partUpdateFS),
+          pDraw: createProgram(partDrawFS, partDrawVS),
           composite: createProgram(compositeFS),
         };
 
@@ -1219,31 +1162,29 @@
             "uSource", "uMirror",
           ]),
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
-          curl: getLocations(programs.curl, ["uVel", "uTexel"]),
-          vel: getLocations(programs.vel, [
-            "uVel", "uCurl", "uMask", "uDen", "uTexel", "uDt", "uTime",
-            "uRise", "uSwirl", "uPresent",
+          pInit: getLocations(programs.pInit, [
+            "uMask", "uTexW", "uBodyFrac", "uPresent01",
           ]),
-          div: getLocations(programs.div, ["uVel", "uTexel"]),
-          jacobi: getLocations(programs.jacobi, ["uPrs", "uDiv", "uTexel"]),
-          proj: getLocations(programs.proj, ["uVel", "uPrs", "uTexel"]),
-          den: getLocations(programs.den, [
-            "uDen", "uVel", "uMask", "uDt", "uTime", "uSmoke", "uGrain", "uPresent",
+          pUpdate: getLocations(programs.pUpdate, [
+            "uStateA", "uStateB", "uMask", "uTexW", "uDt", "uTime", "uRise",
+            "uSwirl", "uBodyFrac", "uPresent01",
           ]),
-          emis: getLocations(programs.emis, ["uDen"]),
-          fb: getLocations(programs.fb, ["uEmis", "uPrev", "uDecay"]),
+          pDraw: getLocations(programs.pDraw, [
+            "uStateA", "uStateB", "uTexW", "uResolution", "uSize", "uSmoke",
+            "uAmbient", "uBodyFrac",
+          ]),
           composite: getLocations(programs.composite, [
-            "uScene", "uMask", "uMaskRaw", "uDen", "uVel", "uFb", "uB1", "uB2",
-            "uResolution", "uDenTexel", "uBloom", "uAmbient", "uTrail", "uGrain",
+            "uField", "uB1", "uB2", "uMask", "uResolution", "uBloom", "uTrail",
             "uFilmGrain", "uTime", "uDebug",
           ]),
         };
 
-        function createTexture(width, height, internal, format, type) {
+        function createTexture(width, height, internal, format, type, filter) {
           const tex = gl.createTexture();
           gl.bindTexture(gl.TEXTURE_2D, tex);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          const f = filter || gl.LINEAR;
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
           gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
@@ -1252,16 +1193,33 @@
         function createTarget(width, height, useFloat) {
           const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
           const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
-          const tex = createTexture(width, height, internal, gl.RGBA, type);
+          const tex = createTexture(width, height, internal, gl.RGBA, type, gl.LINEAR);
           const fbo = gl.createFramebuffer();
           gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
           gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
           return { tex, fbo, width, height };
         }
+        // A ping-pong-able particle STATE set: two float textures (NEAREST —
+        // pure data, fetched with texelFetch) on one MRT framebuffer.
+        function createParticleSet(width, height) {
+          const internal = floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const texA = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const texB = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, texB, 0);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { texA, texB, fbo, width, height };
+        }
         function destroyTarget(target) {
           if (!target) return;
-          gl.deleteTexture(target.tex);
+          if (target.tex) gl.deleteTexture(target.tex);
+          if (target.texA) gl.deleteTexture(target.texA);
+          if (target.texB) gl.deleteTexture(target.texB);
           gl.deleteFramebuffer(target.fbo);
         }
         function clearTarget(target, r, g, b, a) {
@@ -1270,6 +1228,17 @@
           gl.clearColor(r, g, b, a);
           gl.clear(gl.COLOR_BUFFER_BIT);
         }
+
+        // Empty VAO for attributeless draws (fullscreen tri + instanced quads).
+        const vao = gl.createVertexArray();
+
+        // Particle state ping-pong (allocated once; independent of canvas size).
+        const partSets = [
+          createParticleSet(PART_W, PART_H),
+          createParticleSet(PART_W, PART_H),
+        ];
+        let partPing = false;
+        let particleInited = false;
 
         // Video texture (DOM source → UNPACK_FLIP_Y). Segmentation texture is a
         // plain R8 upload from MediaPipe (already oriented, no flip).
@@ -1308,17 +1277,7 @@
             maskB: createTarget(fieldW, fieldH, true),
             softT: createTarget(fieldW, fieldH, true),
             softTmp: createTarget(fieldW, fieldH, true),
-            curlT: createTarget(fieldW, fieldH, true),
-            velA: createTarget(fieldW, fieldH, true),
-            velB: createTarget(fieldW, fieldH, true),
-            divT: createTarget(fieldW, fieldH, true),
-            prsA: createTarget(fieldW, fieldH, true),
-            prsB: createTarget(fieldW, fieldH, true),
-            denA: createTarget(fieldW, fieldH, true),
-            denB: createTarget(fieldW, fieldH, true),
-            emisT: createTarget(glowW, glowH, true),
-            fbA: createTarget(glowW, glowH, true),
-            fbB: createTarget(glowW, glowH, true),
+            field: createTarget(paintW, paintH, true),
             b1Tmp: createTarget(b1W, b1H, true),
             b1: createTarget(b1W, b1H, true),
             b2Tmp: createTarget(b2W, b2H, true),
@@ -1327,25 +1286,14 @@
           needsReset = true;
         }
 
-        // Encoded targets must clear to encoded zero (0.5), else "clear"
-        // decodes to -VMAX.
+        // Encoded targets must clear to encoded zero (0.5) for the flow channel.
         function clearSimTargets() {
           clearTarget(targets.sceneA, 0.1, 0.12, 0.15, 1);
           clearTarget(targets.sceneB, 0.1, 0.12, 0.15, 1);
           clearTarget(targets.maskA, 0, 0, 0.5, 0.5);
           clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
           clearTarget(targets.softT, 0, 0, 0.5, 0.5);
-          clearTarget(targets.velA, 0.5, 0.5, 0, 1);
-          clearTarget(targets.velB, 0.5, 0.5, 0, 1);
-          clearTarget(targets.prsA, 0.5, 0, 0, 1);
-          clearTarget(targets.prsB, 0.5, 0, 0, 1);
-          clearTarget(targets.divT, 0.5, 0, 0, 1);
-          clearTarget(targets.curlT, 0.5, 0, 0, 1);
-          clearTarget(targets.denA, 0, 0, 0, 1);
-          clearTarget(targets.denB, 0, 0, 0, 1);
-          clearTarget(targets.emisT, 0, 0, 0, 1);
-          clearTarget(targets.fbA, 0, 0, 0, 1);
-          clearTarget(targets.fbB, 0, 0, 0, 1);
+          clearTarget(targets.field, 0, 0, 0, 1);
         }
 
         function resize() {
@@ -1400,9 +1348,9 @@
         /* ------------------------------------------------------------------
            Detection state (person mask + presence). All quantities live in
            SCREEN UV so fakesource and MediaPipe drive the exact same shader
-           path. Everything is EMA-smoothed (invariant 5). The segmentation
-           mask (full-body silhouette) is the gas source; pose is loaded for
-           parity with overflowing_aura but not required by the effect.
+           path. Everything is EMA-smoothed. UNCHANGED from the flower-being
+           detection stack (ImageSegmenter only). The segmentation mask is the
+           particle source; motion field is the gust.
         ------------------------------------------------------------------ */
 
         const det = {
@@ -1412,10 +1360,6 @@
           segReady: false,
         };
 
-        // MediaPipe handles (real camera only; loaded lazily via dynamic
-        // import). URLs / models / options match overflowing_aura_4taigyo_v2.
-        // The verify_static allowlist covers the MediaPipe CDN + model hosts,
-        // so these are plain string literals.
         const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
         const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
         const SEG_MODEL =
@@ -1430,9 +1374,8 @@
         let mpSwitching = false;
         let segU8 = new Uint8Array(4);
         // Inference reads a SMALL offscreen copy of the video, never the full
-        // 1280x720 frame: the mask is consumed at fluid resolution (≤512)
-        // anyway, and a ~288px input is 10-20x cheaper — the difference
-        // between a phone that keeps up and one that janks to a crawl.
+        // frame: the mask is consumed at field resolution anyway, and a ~288px
+        // input is 10-20x cheaper.
         const SEG_MAX_SIDE = 288;
         const segSrc = document.createElement("canvas");
         const segSrcCtx = segSrc.getContext("2d");
@@ -1483,22 +1426,21 @@
             mpSegmenter = next;
             mpDelegate = "CPU";
             segBadRun = 0;
-            console.warn("gas-head: GPU segmentation output looked broken — switched to CPU delegate");
+            console.warn("flower-being: GPU segmentation output looked broken — switched to CPU delegate");
           } catch (_e) { /* keep the GPU segmenter */ }
           mpSwitching = false;
         }
 
         // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
-        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
-        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the
-        // real mask. Person occupies the TOP ~60% of the image, centered band —
-        // so a correct Y-flip renders the gas in the TOP of the screen.
+        // Person occupies the TOP ~60% of the image (top-left origin), uploaded
+        // UNPACK_FLIP_Y=false exactly like the real mask — so a correct Y-flip
+        // clusters the flowers in the TOP of the screen.
         function uploadFakeSeg() {
           const w = 96, h = 96;
           const arr = new Uint8Array(w * h);
           for (let y = 0; y < h; y++) {
             for (let x = 0; x < w; x++) {
-              const inTop = y < h * 0.6;          // image top = head/upper body
+              const inTop = y < h * 0.6;
               const inBand = x > w * 0.22 && x < w * 0.78;
               arr[y * w + x] = inTop && inBand ? 255 : 0;
             }
@@ -1554,8 +1496,6 @@
             const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
             if (cm) {
               const cover = uploadSegMask(cm);
-              // presence from real coverage — the gas turns off when nobody
-              // is in frame instead of clinging to a stale mask.
               det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
               const degenerate = cover < 0.002 || cover > 0.97;
               segBadRun = degenerate ? segBadRun + 1 : 0;
@@ -1574,9 +1514,7 @@
           if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
             runDetection(performance.now());
           }
-          // Adaptive cadence: inference must never own the main thread. Slow
-          // devices (phones, CPU delegate) detect less often and the mask EMA
-          // bridges the gaps; fast devices stay at ~30Hz.
+          // Adaptive cadence: inference must never own the main thread.
           const interval = Math.max(33, Math.min(250, detCost * 1.7));
           detTimer = setTimeout(detectionTick, interval);
         }
@@ -1585,15 +1523,13 @@
            Render loop
         ------------------------------------------------------------------ */
 
-        const JACOBI_ITERATIONS = 24;
-
         let stream = null;
         let cameraReady = false;
         let animTime = 0;
         let lastNow = performance.now();
         let fpsLast = performance.now();
         let fpsFrames = 0;
-        let scenePing = false, maskPing = false, denPing = false, fbPing = false;
+        let scenePing = false, maskPing = false;
         let readyStamped = false;
 
         const readout = document.getElementById("readout");
@@ -1622,7 +1558,7 @@
 
           if (FAKE) {
             // sway + slow vertical bob so the mask moves like a real person,
-            // which drives the motion field, turbulence and rising plume.
+            // which drives the motion field → gusts and rising petals.
             det.tcx = 0.5 + 0.07 * Math.sin(animTime * 0.33);
             det.tcy = 0.03 * Math.sin(animTime * 0.5 + 1.0);
             det.tpresent = 1;
@@ -1673,6 +1609,7 @@
           if (doReset) clearSimTargets();
 
           const aspect = canvas.width / Math.max(canvas.height, 1);
+          const present01 = det.present > 0.5 ? 1 : 0;
           // FAKESEG forces the real-camera seg path (uSource==1) with the
           // synthetic mask so the Y-flip can be validated offline.
           const source = FAKESEG ? 1
@@ -1682,13 +1619,9 @@
           const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
           const maskOut = maskPing ? targets.maskA : targets.maskB;
           const maskPrev = maskPing ? targets.maskB : targets.maskA;
-          const denOut = denPing ? targets.denA : targets.denB;
-          const denPrev = denPing ? targets.denB : targets.denA;
-          const fbOut = fbPing ? targets.fbA : targets.fbB;
-          const fbPrev = fbPing ? targets.fbB : targets.fbA;
           const fieldTexel = [1 / fieldW, 1 / fieldH];
 
-          // P0 — scene (real background)
+          // P0 — scene (real background; detection only)
           renderPass(sceneCur, programs.scene, () => {
             const u = locations.scene;
             bindTexture(0, videoTexture);
@@ -1728,128 +1661,85 @@
             gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
           });
 
-          // P2 — soft mask (boundary softening drives injection region)
+          // P2 — soft mask (drives the spawn distribution + gust sampling)
           const sdfSigma = 1.5 + 4.5 * state.edge;
           blurPass(maskOut, targets.softTmp, targets.softT, sdfSigma);
 
-          // P3 — curl
-          renderPass(targets.curlT, programs.curl, () => {
-            bindTexture(0, targets.velA.tex);
-            gl.uniform1i(locations.curl.uVel, 0);
-            gl.uniform2f(locations.curl.uTexel, fieldTexel[0], fieldTexel[1]);
-          });
+          // P3 — particle init (once; body particles start inside the mask)
+          if (!particleInited) {
+            renderPass(partSets[0], programs.pInit, () => {
+              const u = locations.pInit;
+              bindTexture(0, targets.softT.tex);
+              gl.uniform1i(u.uMask, 0);
+              gl.uniform1f(u.uTexW, PART_W);
+              gl.uniform1f(u.uBodyFrac, BODY_FRAC);
+              gl.uniform1i(u.uPresent01, present01);
+            });
+            particleInited = true;
+            partPing = false; // next update reads partSets[0]
+          }
 
-          // P4 — advect velocity + forces
-          renderPass(targets.velB, programs.vel, () => {
-            const u = locations.vel;
-            bindTexture(0, targets.velA.tex);
-            bindTexture(1, targets.curlT.tex);
-            bindTexture(2, maskOut.tex);
-            bindTexture(3, denPrev.tex);
-            gl.uniform1i(u.uVel, 0);
-            gl.uniform1i(u.uCurl, 1);
+          // P4 — particle update (ping-pong MRT)
+          const partSrc = partPing ? partSets[1] : partSets[0];
+          const partDst = partPing ? partSets[0] : partSets[1];
+          renderPass(partDst, programs.pUpdate, () => {
+            const u = locations.pUpdate;
+            bindTexture(0, partSrc.texA);
+            bindTexture(1, partSrc.texB);
+            bindTexture(2, targets.softT.tex);
+            gl.uniform1i(u.uStateA, 0);
+            gl.uniform1i(u.uStateB, 1);
             gl.uniform1i(u.uMask, 2);
-            gl.uniform1i(u.uDen, 3);
-            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uTexW, PART_W);
             gl.uniform1f(u.uDt, dt);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uRise, state.rise);
             gl.uniform1f(u.uSwirl, state.swirl);
-            gl.uniform1f(u.uPresent, det.present);
+            gl.uniform1f(u.uBodyFrac, BODY_FRAC);
+            gl.uniform1i(u.uPresent01, present01);
           });
 
-          // P5 — divergence
-          renderPass(targets.divT, programs.div, () => {
-            bindTexture(0, targets.velB.tex);
-            gl.uniform1i(locations.div.uVel, 0);
-            gl.uniform2f(locations.div.uTexel, fieldTexel[0], fieldTexel[1]);
-          });
+          // P5 — draw particles (instanced quads, additive) into the HDR field
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.field.fbo);
+          gl.viewport(0, 0, targets.field.width, targets.field.height);
+          gl.clearColor(0, 0, 0, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.ONE, gl.ONE);
+          gl.useProgram(programs.pDraw);
+          bindTexture(0, partDst.texA);
+          bindTexture(1, partDst.texB);
+          gl.uniform1i(locations.pDraw.uStateA, 0);
+          gl.uniform1i(locations.pDraw.uStateB, 1);
+          gl.uniform1f(locations.pDraw.uTexW, PART_W);
+          gl.uniform2f(locations.pDraw.uResolution, targets.field.width, targets.field.height);
+          gl.uniform1f(locations.pDraw.uSize, state.grain);
+          gl.uniform1f(locations.pDraw.uSmoke, state.smoke);
+          gl.uniform1f(locations.pDraw.uAmbient, state.ambient);
+          gl.uniform1f(locations.pDraw.uBodyFrac, BODY_FRAC);
+          gl.bindVertexArray(vao);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, PART_N);
+          gl.bindVertexArray(null);
+          gl.disable(gl.BLEND);
 
-          // P6..P29 — Jacobi pressure solve (warm-started)
-          let prsIn = targets.prsA;
-          let prsOut = targets.prsB;
-          for (let i = 0; i < JACOBI_ITERATIONS; i++) {
-            const src = prsIn;
-            renderPass(prsOut, programs.jacobi, () => {
-              bindTexture(0, src.tex);
-              bindTexture(1, targets.divT.tex);
-              gl.uniform1i(locations.jacobi.uPrs, 0);
-              gl.uniform1i(locations.jacobi.uDiv, 1);
-              gl.uniform2f(locations.jacobi.uTexel, fieldTexel[0], fieldTexel[1]);
-            });
-            const swap = prsIn; prsIn = prsOut; prsOut = swap;
-          }
+          // P6 — two-stage separable bloom from the field
+          blurPass(targets.field, targets.b1Tmp, targets.b1, 2.6);
+          blurPass(targets.b1, targets.b2Tmp, targets.b2, 2.6);
 
-          // P30 — projection → velA
-          renderPass(targets.velA, programs.proj, () => {
-            bindTexture(0, targets.velB.tex);
-            bindTexture(1, prsIn.tex);
-            gl.uniform1i(locations.proj.uVel, 0);
-            gl.uniform1i(locations.proj.uPrs, 1);
-            gl.uniform2f(locations.proj.uTexel, fieldTexel[0], fieldTexel[1]);
-          });
-
-          // P31 — density: advect + dissipate + full-body injection + grain
-          renderPass(denOut, programs.den, () => {
-            const u = locations.den;
-            bindTexture(0, denPrev.tex);
-            bindTexture(1, targets.velA.tex);
-            bindTexture(2, targets.softT.tex);
-            gl.uniform1i(u.uDen, 0);
-            gl.uniform1i(u.uVel, 1);
-            gl.uniform1i(u.uMask, 2);
-            gl.uniform1f(u.uDt, dt);
-            gl.uniform1f(u.uTime, animTime);
-            gl.uniform1f(u.uSmoke, state.smoke);
-            gl.uniform1f(u.uGrain, state.grain);
-            gl.uniform1f(u.uPresent, det.present);
-          });
-
-          // P32 — emission (bloom source)
-          renderPass(targets.emisT, programs.emis, () => {
-            bindTexture(0, denOut.tex);
-            gl.uniform1i(locations.emis.uDen, 0);
-          });
-
-          // P33 — afterglow feedback
-          const fbDecay = Math.exp(-dt * (2.8 + (0.25 - 2.8) * state.trail));
-          renderPass(fbOut, programs.fb, () => {
-            bindTexture(0, targets.emisT.tex);
-            bindTexture(1, fbPrev.tex);
-            gl.uniform1i(locations.fb.uEmis, 0);
-            gl.uniform1i(locations.fb.uPrev, 1);
-            gl.uniform1f(locations.fb.uDecay, fbDecay);
-          });
-
-          // P34..P37 — two-stage separable bloom
-          blurPass(fbOut, targets.b1Tmp, targets.b1, 2.4);
-          blurPass(targets.b1, targets.b2Tmp, targets.b2, 2.4);
-
-          // P38 — composite
+          // P7 — composite
           renderPass(null, programs.composite, () => {
             const u = locations.composite;
-            bindTexture(0, sceneCur.tex);
-            bindTexture(1, targets.softT.tex);
-            bindTexture(2, maskOut.tex);
-            bindTexture(3, denOut.tex);
-            bindTexture(4, targets.velA.tex);
-            bindTexture(5, fbOut.tex);
-            bindTexture(6, targets.b1.tex);
-            bindTexture(7, targets.b2.tex);
-            gl.uniform1i(u.uScene, 0);
-            gl.uniform1i(u.uMask, 1);
-            gl.uniform1i(u.uMaskRaw, 2);
-            gl.uniform1i(u.uDen, 3);
-            gl.uniform1i(u.uVel, 4);
-            gl.uniform1i(u.uFb, 5);
-            gl.uniform1i(u.uB1, 6);
-            gl.uniform1i(u.uB2, 7);
+            bindTexture(0, targets.field.tex);
+            bindTexture(1, targets.b1.tex);
+            bindTexture(2, targets.b2.tex);
+            bindTexture(3, targets.softT.tex);
+            gl.uniform1i(u.uField, 0);
+            gl.uniform1i(u.uB1, 1);
+            gl.uniform1i(u.uB2, 2);
+            gl.uniform1i(u.uMask, 3);
             gl.uniform2f(u.uResolution, canvas.width, canvas.height);
-            gl.uniform2f(u.uDenTexel, 1 / fieldW, 1 / fieldH);
             gl.uniform1f(u.uBloom, state.bloom);
-            gl.uniform1f(u.uAmbient, state.ambient);
             gl.uniform1f(u.uTrail, state.trail);
-            gl.uniform1f(u.uGrain, state.grain);
             gl.uniform1f(u.uFilmGrain, state.filmGrain);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1i(u.uDebug, state.debugView);
@@ -1857,8 +1747,7 @@
 
           scenePing = !scenePing;
           maskPing = !maskPing;
-          denPing = !denPing;
-          fbPing = !fbPing;
+          partPing = !partPing;
 
           if (!readyStamped && hasInput) {
             readyStamped = true;
@@ -1872,7 +1761,7 @@
             fpsLast = wallNow;
             fpsFrames = 0;
             readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
-              canvas.height} / 流体 ${fieldW}×${fieldH} / 検知 ${detectionLabel()}`;
+              canvas.height} / 粒子 ${PART_N.toLocaleString()} / 検知 ${detectionLabel()}`;
             updateChip();
           }
 
@@ -1967,9 +1856,7 @@
           // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
           // scene drives the whole pipeline regardless of the camera (the video
           // texture is never sampled, MediaPipe stays untouched), so the camera
-          // is only exercised to keep the three error overlays observable: on
-          // success the overlay hides and the fake art shows; on denial/no-camera
-          // the matching error overlay appears over the still-rendering scene.
+          // is only exercised to keep the three error overlays observable.
           startCamera();
           detectionTick();
           requestAnimationFrame(frame);
