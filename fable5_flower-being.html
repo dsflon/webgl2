@@ -1,0 +1,1984 @@
+<!doctype html>
+<!--
+  fable5_flower-being.html — WebGL2 webcam →「Flower Being」(花に溶ける人 / 動きに反応)
+  チームラボ「Flowers Bloom」系。カメラに映る人物が、極彩色の発光する花びらに溶けて
+  いき、黒の空間へ還る。人物は生映像として出さず暗いシルエットとし、その領域を濃い開花源
+  として体から花びらが流れ出す。人物の動きが「風」になり、花びらが舞い上がり渦巻く。
+  背景は黒(実カメラ背景は描かない)。黒地に環境花(低密度で漂う花)＋人物由来の濃い花。
+  派生元エンジン: fable5_gas-head.html(全身ガス化・モバイル検知)/ fable5_blue-dissolve.html
+  (発色・発光)/ overflowing_aura_4taigyo_v2.html(人物検知の座標一致)。
+
+  様式解析(視覚的不変量。優先度 1>2>3>4>5>6):
+    1. 黒背景・生映像非表示 — 背景は黒。実カメラ映像は一切描画しない(検知にのみ使用)。
+       人物は暗いシルエットで、切り抜き縁が出ない(花が縁を跨いで流出し輪郭を溶かす)。
+    2. 極彩色の花 — 密度場を花としてマッピング。位置ハッシュで花ごとに色が変わる極彩色
+       (マゼンタ/薔薇/紫/シアン/黄金/桃/白)。voronoi の花弁スタンプで離散的な花に。
+    3. 溶ける人 — 人物マスク全体を濃い開花源にし、buoyancy＋風で花びらが体外へ流出。
+       人型はうっすら花の密集として残る(のっぺりフォグ禁止/生映像の切り抜きに見えない)。
+    4. 発光・非白飛び — 加算＋ブルームで花を光らせる。花芯だけ明るく、全体は彩度で魅せる。
+       純白には張り付かない。
+    5. 動き＝風 — フレーム差分/マスク運動場(flow)を強めの外力として速度場へ。動きが大きい
+       ほど風が強く花びらが舞い上がり渦巻く。静止時は穏やかに漂う。
+    6. 頑健性・モバイル — MediaPipe ロード中/未検出/オフラインでも黒地の環境花で待機。
+       ?fakesource=1 で全駆動。検知は ImageSegmenter のみ(288px 縮小・33〜250ms 適応間引き・
+       GPU 破綻時 CPU 自動切替・presence はカバレッジ)。ステータスチップに推論ms・デリゲート。
+
+  パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
+    入力: カメラ映像 / fakeScene(GLSL 背景+人型) / MediaPipe seg マスク(uint8 tex, EMA)
+    [P0 scene]  cover-fit+mirror(検知用・非表示)          sceneA/B RGBA8 長辺≤1280
+    [P1 mask]   seg tex or fake SDF → 人物マスク + 運動場   maskA/B★ ≤512  R=maskEMA BA=運動場(flow)
+    [P2 blur]   マスク縁ソフト化                           softT★
+    [P3 curl]→[P4 vel 移流+浮力+curl+渦度+運動場を強めの風に]→[P5 div]→[P6..29 Jacobi×24]→[P30 proj] ★ ≤512
+    [P31 den]   移流+減衰(体外へ流出)+マスク注入(縁 mottle ゲート)+縁ディザ  denA/B★ ≤512 clamp[0,1]
+    [P32 emis 花色発光]→[P33 fb 残光]→[P34-37 bloom 2段]   emis/fb★ b1 b2
+    [P38 composite] 黒地に voronoi 花弁スタンプ(位置ハッシュで極彩色)を描画。環境花＋密度
+                駆動の濃い花＋舞い散り、色付きブルーム加算、暗いシルエット、静的グレイン。純白非到達
+
+  実行方法:
+    python3 -m http.server 8899 → http://localhost:8899/fable5_flower-being.html を開きカメラを許可
+    (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    ?fakesource=1 … カメラ/MediaPipe 不使用。合成背景+動く人型で全パイプライン駆動(検証用)
+    ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
+    ?fakeseg=1   … seg 経路の Y 反転をオフライン検証(人物が画面上部に出れば正しい)
+    デバッグ表示: 0=最終 1=人物マスク 2=花密度 3=速度場(風) 4=配色標本
+
+  スライダーの説明:
+    花の量      人物マスクからの開花(密度注入)量
+    舞い上がり  buoyancy(花びらが立ち上る強さ)
+    風・渦      動きが生む風と渦(vorticity+カールノイズ)の強さ
+    花びらの粒  花びらの粒状感と縁の破断の強さ
+    残光        花の発光が残る長さ
+    フィルム粒子 全面の静的グレイン
+    発光        花のブルーム(発光)の強さ
+    環境花      黒地に漂う環境の花の量
+    境界ぼかし  人物マスク縁の柔らかさ
+
+  依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
+  WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Flower Being — WebGL2 dissolving into flowers</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05080b;
+        --ink: #e4ecf0;
+        --muted: rgba(228, 236, 240, 0.66);
+        --panel: rgba(8, 12, 16, 0.84);
+        --line: rgba(228, 236, 240, 0.16);
+        --accent: #b9c6cc;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #06090d, #0a1014 55%, #05080b);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      video {
+        position: fixed; width: 1px; height: 1px; left: -10px; top: -10px;
+        opacity: 0; pointer-events: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(228, 236, 240, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(228, 236, 240, 0.14); }
+      #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
+      @media (pointer: coarse) { #flipCamera { display: block; } }
+      #statusChip {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 11; padding: 7px 12px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: var(--panel); font-size: 10px; letter-spacing: 0.1em;
+        pointer-events: none; transition: opacity 0.6s ease; white-space: nowrap;
+      }
+      #statusChip.hidden { opacity: 0; }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(228, 236, 240, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(228, 236, 240, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(4, 6, 10, 0.76);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
+      .overlay-card button {
+        margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(228, 236, 240, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 flower being webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
+    <div id="statusChip">起動中</div>
+
+    <section id="panel" class="panel" aria-label="Gas body webcam controls"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces the camera with a synthetic scene (a patterned
+        // room backdrop with a slowly drifting full-body figure). MediaPipe is
+        // not used; the person mask is generated analytically so the whole
+        // smoke / grain / tracking pipeline runs offline.
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: fluid, buoyancy, curl, the fake figure drift
+        // and the detection EMA all stop (deterministic still frame).
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
+        // KNOWN orientation (person in the TOP ~60% of image space, top-left
+        // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
+        // With the Y-flip fixed, the gas must appear in the TOP of the screen;
+        // if it appears at the bottom the flip is wrong. This lets us exercise
+        // the seg path in this offline environment (no camera / MediaPipe).
+        const FAKESEG = QUERY.get("fakeseg") === "1";
+
+        const DEBUG_MODES = [
+          "最終",
+          "人物マスク",
+          "花密度",
+          "速度場(風)",
+          "配色標本",
+        ];
+
+        const DEFAULTS = {
+          smoke: 0.82,
+          rise: 0.38,
+          swirl: 0.58,
+          grain: 0.5,
+          trail: 0.45,
+          filmGrain: 0.22,
+          bloom: 0.72,
+          ambient: 0.55,
+          edge: 0.5,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["smoke", "花の量", "人物マスクからの開花(密度注入)量", 0, 1, 0.01],
+          ["rise", "舞い上がり", "buoyancy(花びらが立ち上る強さ)", 0, 1, 0.01],
+          ["swirl", "風・渦", "動きが生む風と渦の強さ", 0, 1, 0.01],
+          ["grain", "花びらの粒", "花びらの粒状感と縁の破断", 0, 1, 0.01],
+          ["trail", "残光", "花の発光が残る長さ", 0, 1, 0.01],
+          ["filmGrain", "フィルム粒子", "全面の静的グレイン", 0, 1, 0.01],
+          ["bloom", "発光", "花のブルーム(発光)の強さ", 0, 1, 0.01],
+          ["ambient", "環境花", "黒地に漂う環境の花の量", 0, 1, 0.01],
+          ["edge", "境界ぼかし", "人物マスク縁の柔らかさ", 0, 1, 0.01],
+        ];
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>FABLE5 · フラワービーイング</h1>
+          <p>
+            カメラに映る人物が、極彩色の発光する花びらに溶けて黒の空間へ還ります。
+            人物は暗いシルエットとなり(生映像は出しません)、体から花びらが流れ出します。
+            あなたが動くと風になり、花びらが舞い上がり渦巻きます。背景は黒。
+          </p>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>左右反転(鏡)</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>ゆらぎを停止</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 解像度 -- / 流体 -- / 検知 --</div>
+            <span class="badge">WebGL2 · Stable Fluids · MediaPipe</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode = state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-flower-being-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the fluid / EMAs from stalling in 8 bits.
+        // Signed quantities are offset-encoded into [0,1] (encV / encS) so the
+        // RGBA8 fallback runs the exact same shaders, only coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hash + value noise + fbm. Grain and the density
+        // mottle are seeded by cell / position only — never by time (repo rule),
+        // so they stay deterministic under ?freeze=1.
+        const CHUNK_NOISE = `
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 5; i++) {
+              s += amp * vnoise(p);
+              p *= 2.02;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          vec2 curlN(vec2 p) {
+            float e = 0.012;
+            float n1 = vnoise(p + vec2(0.0, e)) - vnoise(p - vec2(0.0, e));
+            float n2 = vnoise(p + vec2(e, 0.0)) - vnoise(p - vec2(e, 0.0));
+            return vec2(n1, -n2) / (2.0 * e);
+          }
+        `;
+
+        // Shared: [0,1] offset encoding for signed fields. The clamp doubles as
+        // the mandatory velocity clamp (no NaN blow-ups).
+        const CHUNK_ENC = `
+          const float VMAX = 2.4;
+          const float SMAX = 3.0;
+          vec2 encV(vec2 v) { return clamp(v, -VMAX, VMAX) / (2.0 * VMAX) + 0.5; }
+          vec2 decV(vec2 e) { return (e - 0.5) * (2.0 * VMAX); }
+          float encS(float x) { return clamp(x, -SMAX, SMAX) / (2.0 * SMAX) + 0.5; }
+          float decS(float e) { return (e - 0.5) * (2.0 * SMAX); }
+        `;
+
+        // Shared: the ?fakesource=1 synthetic scene. A patterned "room" backdrop
+        // (never black) with a full-body figure that slowly drifts. fakeMask
+        // returns the person coverage used in place of the MediaPipe mask.
+        const CHUNK_FAKE = `
+          float sdSeg(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+          // p is aspect-corrected around x = 0.5. cx is the drifting body center.
+          float humanDist(vec2 p, float cx) {
+            float d = 1e9;
+            vec2 hc = vec2(cx, 0.74);
+            d = min(d, length((p - hc) / vec2(1.0, 1.12)) - 0.085);          // head
+            d = smin2(d, sdSeg(p, vec2(cx, 0.665), vec2(cx, 0.60)) - 0.032, 0.02); // neck
+            d = smin2(d, sdSeg(p, vec2(cx, 0.585), vec2(cx, 0.16)) - 0.145, 0.06); // torso
+            d = smin2(d, sdSeg(p, vec2(cx - 0.16, 0.585), vec2(cx + 0.16, 0.585)) - 0.075, 0.05); // shoulders
+            d = smin2(d, sdSeg(p, vec2(cx - 0.18, 0.57), vec2(cx - 0.215, 0.30)) - 0.05, 0.04); // left arm
+            d = smin2(d, sdSeg(p, vec2(cx + 0.18, 0.57), vec2(cx + 0.215, 0.30)) - 0.05, 0.04); // right arm
+            return d;
+          }
+          vec3 fakeScene(vec2 uv, float cx, float cy, float aspect) {
+            // discernible non-black background: cool top → warm bottom gradient,
+            // soft vertical stripes, a faint horizon band, gentle mottle.
+            vec3 top = vec3(0.20, 0.25, 0.33);
+            vec3 bot = vec3(0.50, 0.44, 0.36);
+            vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
+            bg += 0.045 * (0.5 + 0.5 * sin(uv.x * 38.0) - 0.5);
+            float horizon = exp(-pow((uv.y - 0.55) * 6.0, 2.0));
+            bg = mix(bg, vec3(0.62, 0.58, 0.48), 0.18 * horizon);
+            bg += 0.05 * (vnoise(uv * 4.0) - 0.5);
+            // the person as they'd appear in the camera: shirt + skin head.
+            // cy bobs the figure so the mask moves (drives turbulence / rise).
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            float d = humanDist(p, cx);
+            float m = 1.0 - smoothstep(-0.004, 0.008, d);
+            float shade = 0.75 + 0.4 * smoothstep(0.1, 0.7, uv.y);
+            vec3 shirt = vec3(0.46, 0.30, 0.28) * shade;
+            float headM = 1.0 - smoothstep(0.075, 0.095,
+              length((p - vec2(cx, 0.74)) / vec2(1.0, 1.12)));
+            vec3 skin = vec3(0.60, 0.46, 0.40);
+            vec3 person = mix(shirt, skin, headM);
+            return clamp(mix(bg, person, m), 0.0, 1.0);
+          }
+          float fakeMask(vec2 uv, float cx, float cy, float aspect) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            return 1.0 - smoothstep(-0.006, 0.010, humanDist(p, cx));
+          }
+        `;
+
+        // Shared: the极彩色 flower rendering. A teamLab-style vivid palette keyed
+        // by a per-flower hash (adjacent flowers differ in hue), plus a voronoi
+        // "flower stamp" — each cell hosts one bloom with a bright core and
+        // cos-lobed petals (5-8), colored by the cell hash. Deterministic (no
+        // time in any hash) so it holds still under ?freeze=1. This is what
+        // turns the scalar density field into discrete, glowing flowers instead
+        // of flat fog.
+        const CHUNK_FLOWER = `
+          vec3 flowerPalette(float t) {
+            t = fract(t);
+            vec3 c;
+            if      (t < 0.15) c = vec3(1.00, 0.10, 0.52);   // magenta rose
+            else if (t < 0.30) c = vec3(0.86, 0.12, 0.86);   // magenta violet
+            else if (t < 0.45) c = vec3(0.55, 0.18, 0.98);   // violet
+            else if (t < 0.60) c = vec3(0.16, 0.72, 1.00);   // cyan
+            else if (t < 0.74) c = vec3(1.00, 0.80, 0.24);   // gold
+            else if (t < 0.88) c = vec3(1.00, 0.42, 0.72);   // pink
+            else               c = vec3(1.00, 0.96, 0.98);   // white
+            return c;
+          }
+          vec2 hash22(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.xx + p3.yz) * p3.zy);
+          }
+          // One voronoi layer of flowers. rgb = flower colour, a = intensity at
+          // p. 'wob' rotates the petal jitter a touch so the field breathes
+          // (constant under freeze because uTime is then 0).
+          vec4 flowerLayer(vec2 p, float wob) {
+            vec2 ip = floor(p);
+            vec2 fp = fract(p);
+            float bestD = 1e9;
+            vec2 bestRP = vec2(0.0);
+            vec2 bestId = vec2(0.0);
+            for (int j = -1; j <= 1; j++) {
+              for (int i = -1; i <= 1; i++) {
+                vec2 g = vec2(float(i), float(j));
+                vec2 o = hash22(ip + g);
+                vec2 cpos = g + o;
+                vec2 rp = fp - cpos;
+                float dd = dot(rp, rp);
+                if (dd < bestD) { bestD = dd; bestRP = rp; bestId = ip + g; }
+              }
+            }
+            float r = sqrt(bestD);
+            float rnd = hash12(bestId);
+            float rnd2 = hash12(bestId + 5.7);
+            float ang = atan(bestRP.y, bestRP.x) + rnd2 * 6.2831 + wob;
+            float petals = 5.0 + floor(rnd2 * 4.0);        // 5..8 petals
+            float lobe = 0.58 + 0.42 * cos(ang * petals);  // petal modulation
+            float rad = 0.30 + 0.22 * rnd;                 // flower radius/cell
+            float disc = smoothstep(rad, 0.0, r);          // soft disc
+            float petal = pow(disc, 1.4) * lobe;
+            float core = smoothstep(rad * 0.34, 0.0, r);   // bright centre
+            float intensity = clamp(petal + core * 0.9, 0.0, 1.6);
+            vec3 col = flowerPalette(rnd);
+            // warm/whiten the very centre so cores glow like the reference
+            col = mix(col, vec3(1.0, 0.95, 0.85), core * 0.7);
+            return vec4(col, intensity);
+          }
+        `;
+
+        // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
+        // working scene buffer. This is the REAL background: everything
+        // downstream is screen-aligned to it.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeScene(vUv, uCx, uCy, uAspect), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.10, 0.12, 0.15),
+                vec3(0.16, 0.18, 0.22), vUv.y), 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scale = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scale + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — the mask/field: R = person mask EMA (fake SDF, uploaded MediaPipe
+        // segmentation with cover-fit, or 0 when nothing is detected),
+        // BA = motion field (frame-difference flow, EMA-smoothed) so body
+        // movement can nudge the smoke (invariant 5).
+        const maskFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uScenePrev;
+          uniform sampler2D uPrev;
+          uniform sampler2D uSeg;
+          uniform vec2 uTexel;
+          uniform vec2 uSegScale;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uDt;
+          uniform float uAlphaMask;
+          uniform float uAlphaMot;
+          uniform int uReset;
+          uniform int uSource;
+          uniform int uMirror;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_FAKE}
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            float rawMask = 0.0;
+            if (uSource == 0) {
+              rawMask = fakeMask(vUv, uCx, uCy, uAspect);
+            } else if (uSource == 1) {
+              // Real-camera segmentation mask. Coordinate convention matched to
+              // overflowing_aura_4taigyo_v2.html so the mask overlaps the real
+              // person pixel-for-pixel with the P0 background:
+              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
+              //     to the P0 scene (both mirror the same way, so a mirrored
+              //     scene and its mask stay in register).
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — same crop as P0
+              //     (uSegScale is computed exactly like the scene's scale).
+              //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
+              //     image-space, top-left origin, and segTexture is uploaded
+              //     UNPACK_FLIP_Y=false, whereas the video texture is uploaded
+              //     UNPACK_FLIP_Y=true (upright). The explicit 1.0 - y here is
+              //     the mask-side equivalent of overflowing_aura's
+              //     texture(u_person, vec2(camUV.x, 1.0 - camUV.y)) — without it
+              //     the mask lands upside-down and the gas only lands where the
+              //     mask happens to overlap (looks like "only the face").
+              vec2 uv = vUv;
+              if (uMirror == 1) uv.x = 1.0 - uv.x;
+              vec2 suv = (uv - 0.5) * uSegScale + 0.5;
+              float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              // firm the soft MediaPipe confidence mask toward 0/1 so the body
+              // is solidly covered (real seg is fuzzy; cov must reach ~1 to
+              // hide the person) — coordinator fix #2.
+              rawMask = smoothstep(0.30, 0.72, rawSeg);
+            }
+            vec4 prev = texture(uPrev, vUv);
+            float mask = uReset == 1 ? rawMask
+              : mix(prev.r, rawMask, uAlphaMask);
+
+            // pseudo optical flow from the scene frame difference
+            vec3 cur = texture(uScene, vUv).rgb;
+            float l0 = lumaf(texture(uScenePrev, vUv).rgb);
+            float l1 = lumaf(cur);
+            float lx = lumaf(texture(uScene, vUv + vec2(uTexel.x, 0.0)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(uTexel.x, 0.0)).rgb);
+            float ly = lumaf(texture(uScene, vUv + vec2(0.0, uTexel.y)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(0.0, uTexel.y)).rgb);
+            vec2 grd = vec2(lx / (2.0 * uTexel.x), ly / (2.0 * uTexel.y));
+            float it = (l1 - l0) / max(uDt, 1e-3);
+            vec2 flowRaw = -it * grd / (dot(grd, grd) + 40.0);
+            flowRaw = clamp(flowRaw, vec2(-VMAX), vec2(VMAX));
+            vec2 flow = uReset == 1 ? vec2(0.0)
+              : mix(decV(prev.ba), flowRaw, uAlphaMot);
+
+            fragColor = vec4(clamp(mask, 0.0, 1.0), 0.0, encV(flow));
+          }
+        `;
+
+        // Separable Gaussian (all channels). Used to soften the mask edge.
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -10; i <= 10; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P3 — curl of the velocity field (for vorticity confinement).
+        const curlFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float vr = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).rg).y;
+            float vl = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).rg).y;
+            float vt = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).rg).x;
+            float vb = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).rg).x;
+            float c = 0.5 * ((vr - vl) - (vt - vb));
+            fragColor = vec4(encS(c), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P4 — semi-Lagrangian advection + forces: buoyancy lifts dense smoke,
+        // curl noise adds exhaust turbulence, vorticity confinement re-sharpens
+        // eddies, and the body motion field drags the gas so it wafts.
+        const velFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uCurl;
+          uniform sampler2D uMask;
+          uniform sampler2D uDen;
+          uniform vec2 uTexel;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uRise;
+          uniform float uSwirl;
+          uniform float uPresent;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          void main() {
+            vec2 vHere = decV(texture(uVel, vUv).rg);
+            vec2 back = vUv - vHere * uDt;
+            vec2 v = decV(texture(uVel, back).rg);
+
+            vec4 mk = texture(uMask, vUv);
+            float mask = mk.r;
+            vec2 flow = decV(mk.ba);
+            float den = texture(uDen, vUv).r;
+
+            // buoyancy — petals rise and drift up off the body as they detach.
+            v.y += (0.30 + 1.30 * uRise) * den * uDt;
+            // a lift rooted in the body so blooms lift away from it
+            v.y += mask * uPresent * (0.15 + 0.50 * uRise) * uDt * 0.6;
+
+            // MOTION = WIND (invariant 5,強め): the body motion field is a
+            // strong external force applied to the WHOLE neighbourhood (not just
+            // on the mask) so detached petals are blown too. The more the person
+            // moves, the stronger the gust — big motion → big swirling gusts.
+            float windMag = length(flow);
+            v += flow * (1.6 + 6.5 * uSwirl) * (0.35 + mask) * uDt;
+
+            // curl noise turbulence — folds density into swirling petal streams.
+            // Boosted by wind magnitude so motion spins up real vortices.
+            float wSmoke = smoothstep(0.02, 0.12, den) * (0.5 + 0.9 * mask)
+              + windMag * 1.6;
+            vec2 np = vUv * 3.4 + vec2(0.0, -uTime * 0.05);
+            vec2 np2 = vUv * 7.0 + vec2(uTime * 0.04, -uTime * 0.02);
+            vec2 np3 = vUv * 13.0 + vec2(-uTime * 0.05, uTime * 0.03);
+            vec2 cn = curlN(np) + 0.8 * curlN(np2) + 0.6 * curlN(np3);
+            v += cn * (0.30 + 2.2 * uSwirl) * wSmoke * uDt;
+
+            // vorticity confinement — curl eddies into churning clumps (modest)
+            float cC = decS(texture(uCurl, vUv).r);
+            float cL = decS(texture(uCurl, vUv - vec2(uTexel.x, 0.0)).r);
+            float cR = decS(texture(uCurl, vUv + vec2(uTexel.x, 0.0)).r);
+            float cB = decS(texture(uCurl, vUv - vec2(0.0, uTexel.y)).r);
+            float cT = decS(texture(uCurl, vUv + vec2(0.0, uTexel.y)).r);
+            vec2 gAbs = 0.5 * vec2(abs(cR) - abs(cL), abs(cT) - abs(cB));
+            vec2 nDir = gAbs / max(length(gAbs), 1e-4);
+            v += vec2(nDir.y, -nDir.x) * cC * (0.7 + uSwirl * 2.6) * uDt;
+
+            // moderate damping — looser than the gas engine so petals CAN
+            // travel off the body on the wind, but still bounded (no blow-up).
+            v *= exp(-uDt * 0.68);
+            fragColor = vec4(encV(v), 0.0, 1.0);
+          }
+        `;
+
+        // P5 — divergence of the forced velocity.
+        const divFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float vr = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).rg).x;
+            float vl = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).rg).x;
+            float vt = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).rg).y;
+            float vb = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).rg).y;
+            fragColor = vec4(encS(0.5 * ((vr - vl) + (vt - vb))), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P6..P29 — Jacobi pressure iterations (fixed count from JS,
+        // warm-started from the previous frame's pressure).
+        const jacobiFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrs;
+          uniform sampler2D uDiv;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float pl = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).r);
+            float pr = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).r);
+            float pb = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).r);
+            float pt = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).r);
+            float dv = decS(texture(uDiv, vUv).r);
+            fragColor = vec4(encS((pl + pr + pb + pt - dv) * 0.25), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P30 — subtract the pressure gradient (projection).
+        const projFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uPrs;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            vec2 v = decV(texture(uVel, vUv).rg);
+            float pl = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).r);
+            float pr = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).r);
+            float pb = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).r);
+            float pt = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).r);
+            v -= 0.5 * vec2(pr - pl, pt - pb);
+            fragColor = vec4(encV(v), 0.0, 1.0);
+          }
+        `;
+
+        // P31 — density: advect + dissipate the smoke, inject a granular plume
+        // over the WHOLE person mask (full-body gas), multiply in fbm mottle
+        // (exhaust particulate), and tatter thin edges with a position-seeded
+        // noise dither. Clamped to [0,1] so it stays bounded (no whiteout).
+        const denFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDen;
+          uniform sampler2D uVel;
+          uniform sampler2D uMask;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uSmoke;
+          uniform float uGrain;
+          uniform float uPresent;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          void main() {
+            vec2 v = decV(texture(uVel, vUv).rg);
+            float d = texture(uDen, vUv - v * uDt).r;
+
+            float cover = clamp(texture(uMask, vUv).r, 0.0, 1.0);
+            // DISSIPATION: inside the mask the petals persist (slow decay); off
+            // the body they fade, but far more gently than the gas engine so
+            // petals detach and DRIFT out into the black flower field on the
+            // wind before dissolving (「花びらに溶けて還る」). Still bounded →
+            // no whiteout (invariant 4).
+            float diss = mix(1.55, 0.52, cover) + 0.25 * (1.0 - uSmoke);
+            d *= exp(-uDt * diss);
+
+            // injection over the whole (softened) person mask → full-body gas.
+            // multi-octave mottle → granular churn (invariant 3). Frozen &
+            // deterministic under ?freeze=1 (uTime = 0).
+            float mott = fbm(vUv * 7.0 + vec2(0.0, -uTime * 0.14));
+            mott += 0.6 * fbm(vUv * 15.0 + vec2(uTime * 0.06, -uTime * 0.18));
+            mott = pow(clamp(mott / 1.6, 0.0, 1.0), 1.6);
+            // strong gain across the mask: the simulated density now CARRIES
+            // the visual (the composite only floors the body lightly), so the
+            // body must run dense and structured. The taper keeps it bounded
+            // and granular instead of a flat white blob.
+            // CRITICAL: never let the body saturate to a flat d=1 — a flat
+            // field has zero gradients, so lighting/detail die and the smoke
+            // reads as a solid plaster cutout. The mottle carries most of the
+            // gain and the taper caps d in the 0.6–0.85 band with spatial
+            // structure the composite can light.
+            // the body edge band only receives gas where the mottle is high,
+            // so the smoke's own footprint is lumpy at the boundary — the
+            // silhouette must NOT be the segmentation contour.
+            float edgeGate = smoothstep(0.55, 0.95, cover);
+            float rimBand = cover * (1.0 - edgeGate);
+            float src = edgeGate + rimBand * smoothstep(0.35, 0.75, mott) * 1.4;
+            float inj = uPresent * uSmoke * (0.18 + 1.55 * mott) * src;
+            inj *= 1.0 - 0.85 * smoothstep(0.35, 0.85, d);
+            d += inj * uDt * 2.4;
+
+            // edge tatter — soften: hard cutouts read as torn paper, smoke
+            // wants gradual thick→thin transitions with only mild raggedness
+            float en = fbm(vUv * 9.0 + 11.3);
+            float tat = smoothstep(-0.12, 0.30, d + (en - 0.5) * 0.55);
+            d *= mix(1.0, tat, 0.5 * uGrain);
+
+            fragColor = vec4(clamp(d, 0.0, 1.0), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P32 — COLOURED emission (bloom / halo source). Density is tinted by a
+        // slowly-varying flower colour so the bloom chain carries the极彩色 glow
+        // (region hue via low-freq noise; freeze-safe — no time in the hash).
+        const emisFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDen;
+          ${CHUNK_NOISE}
+          ${CHUNK_FLOWER}
+          void main() {
+            float d = texture(uDen, vUv).r;
+            float e = pow(max(d, 0.0), 0.85);
+            float hueSel = vnoise(vUv * 3.2) * 0.7 + vnoise(vUv * 9.0) * 0.3;
+            vec3 tint = flowerPalette(hueSel);
+            fragColor = vec4(tint * e, 1.0);
+          }
+        `;
+
+        // P33 — afterglow feedback: max(current, previous · decay).
+        // Under ?freeze=1 decay = 1 (dt = 0), so the buffer holds still.
+        const fbFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uEmis;
+          uniform sampler2D uPrev;
+          uniform float uDecay;
+          void main() {
+            vec3 e = texture(uEmis, vUv).rgb;
+            vec3 p = texture(uPrev, vUv).rgb * uDecay;
+            fragColor = vec4(max(e, p), 1.0);
+          }
+        `;
+
+        // P38 — final composite (FLOWER FIELD). Background is BLACK — the real
+        // camera footage is NEVER drawn (invariant 1). On the black ground we
+        // paint discrete, glowing极彩色 flowers with voronoi petal stamps: a
+        // clustered environment layer everywhere, denser blooms driven by the
+        // simulated density (the person + the petals that have flowed off the
+        // body on the wind), and scattered drifting petals that streak with
+        // motion. Colored bloom is added for the glow. The person reads as an
+        // implicit dark silhouette shaped by where the flowers cluster (the
+        // black gaps ARE the silhouette) — no cut-out edge, no live footage.
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;   // (unused in output; kept for parity)
+          uniform sampler2D uMask;
+          uniform sampler2D uMaskRaw;
+          uniform sampler2D uDen;
+          uniform sampler2D uVel;
+          uniform sampler2D uFb;
+          uniform sampler2D uB1;
+          uniform sampler2D uB2;
+          uniform vec2 uResolution;
+          uniform vec2 uDenTexel;
+          uniform float uBloom;
+          uniform float uAmbient;
+          uniform float uTrail;
+          uniform float uGrain;
+          uniform float uFilmGrain;
+          uniform float uTime;
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_FLOWER}
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+          void main() {
+            float den = clamp(texture(uDen, vUv).r, 0.0, 1.0);
+            vec2 vel = decV(texture(uVel, vUv).rg);
+
+            if (uDebug == 1) {
+              fragColor = vec4(vec3(clamp(texture(uMaskRaw, vUv).r, 0.0, 1.0)), 1.0);
+              return;
+            }
+            if (uDebug == 2) {
+              fragColor = vec4(vec3(den), 1.0);        // flower density
+              return;
+            }
+            if (uDebug == 3) {
+              fragColor = vec4(clamp(vel / (2.0 * VMAX) + 0.5, 0.0, 1.0), 0.4, 1.0);
+              return;
+            }
+            if (uDebug == 4) {
+              // palette specimen: horizontal sweep through the flower palette
+              float strip = 1.0 - smoothstep(0.13, 0.15, abs(vUv.y - 0.5));
+              fragColor = vec4(flowerPalette(vUv.x) * strip, 1.0);
+              return;
+            }
+
+            float aspect = uResolution.x / uResolution.y;
+            vec2 ap = vec2(vUv.x * aspect, vUv.y);   // keep flowers round
+
+            // turbulent warp so the sampling (and thus the silhouette edge) is
+            // broken up by the flowers — the segmentation contour never shows.
+            vec2 wq = vUv * 6.0;
+            vec2 wob = vec2(
+                fbm(wq + vec2(0.0, -uTime * 0.08)),
+                fbm(wq + vec2(31.0, 7.0) + vec2(uTime * 0.05, 0.0))) - 0.5;
+
+            // ---- environment flowers: low-freq fbm shapes them into drifting
+            // clumps on the black ground (like the reference wall of flowers).
+            // Kept present everywhere (never fully gated to zero) so the black
+            // ground always carries a scatter of blooms. ----
+            float clump = fbm(vUv * 2.2 + vec2(0.0, -uTime * 0.02));
+            clump = smoothstep(0.30, 0.85, clump);
+            float ambAmt = uAmbient * (0.45 + 0.65 * clump);
+
+            // total flower "fuel": environment + simulated density (the person
+            // and the petals blown off the body). Density dominates on the body.
+            float fuel = clamp(ambAmt * 1.05 + den * 1.75, 0.0, 1.9);
+
+            // wind warps the flower sampling so petals streak with motion.
+            float windMag = length(vel);
+            vec2 fuv = ap + vel * 0.05 + wob * 0.03;
+
+            // two voronoi flower scales (large blooms + small florets) + a
+            // sparse scatter layer for舞い散る petals (stronger with wind).
+            vec4 F1 = flowerLayer(fuv * 7.5, uTime * 0.05);
+            vec4 F2 = flowerLayer(fuv * 15.0 + vec2(19.0, 5.0), -uTime * 0.04);
+            vec4 F3 = flowerLayer(fuv * 30.0 + vel * 0.4 + vec2(3.0, 11.0),
+                                  uTime * 0.09);
+            float fleck = smoothstep(0.72, 1.2, F3.a);
+
+            float g1 = smoothstep(0.03, 0.5, fuel);
+            float g2 = smoothstep(0.18, 0.9, fuel);
+            vec3 flowers = vec3(0.0);
+            flowers += F1.rgb * F1.a * g1;
+            flowers += F2.rgb * F2.a * g2 * 0.8;
+            flowers += F3.rgb * fleck * smoothstep(0.02, 0.4, fuel)
+                     * (0.5 + 1.3 * windMag);
+
+            // flowers glow additively. Dense (body / wind-carried) areas get
+            // MORE and brighter flowers, but the multiplier is kept modest so
+            // the dark voronoi gaps survive — the body reads as a CLUSTER of
+            // discrete flowers (an implicit silhouette), never a solid blob.
+            float glow = 0.85 + 0.75 * den + 0.40 * ambAmt;
+            vec3 col = flowers * glow;
+
+            // a dim coloured wash where flowers clump, so the voronoi gaps are
+            // not dead black — the soft glow bleed of the reference. Subtle, so
+            // it stays flowers-on-black, not flat fog. Deliberately does NOT
+            // scale with density (that made the body a solid glow).
+            vec3 washCol = flowerPalette(vnoise(vUv * 2.0 + 4.0));
+            col += washCol * ambAmt * (0.08 + 0.12 * clump);
+
+            // near-black ground with a whisper of deep violet so it is not a
+            // dead flat black (still reads as black in the reference).
+            col += vec3(0.012, 0.005, 0.026) * (1.0 - 0.35 * vUv.y);
+
+            // ---- coloured bloom HALO from the (flower-tinted) emission chain.
+            // Kept as a soft glow accent — NOT a fill — so it haloes the flowers
+            // instead of washing the body out to white.
+            vec3 b1 = texture(uB1, vUv).rgb;
+            vec3 b2 = texture(uB2, vUv).rgb;
+            vec3 fbv = texture(uFb, vUv).rgb;
+            vec3 bloom = b1 * 0.55 + b2 * 0.85 + fbv * (0.12 + 0.35 * uTrail);
+            col += bloom * (0.22 + 0.75 * uBloom);
+
+            // fine petal grain so the flowers do not read as smooth blobs
+            float fine = 0.6 * fbm(fuv * 22.0) + 0.4 * fbm(vUv * 40.0);
+            col *= 1.0 - 0.18 * uGrain * (1.0 - fine);
+
+            // vignette (mild) — pulls focus to the immersive centre
+            vec2 vq = (vUv - 0.5) * vec2(aspect, 1.0);
+            col *= mix(0.82, 1.0, smoothstep(1.25, 0.30, length(vq)));
+
+            // filmic exposure tonemap → vivid but never a white blowout
+            // (invariant 4). Only flower cores approach white.
+            col = vec3(1.0) - exp(-col * 1.05);
+
+            // static film grain (cell hash, no time → freeze-safe)
+            float h1 = hash12(floor(gl_FragCoord.xy));
+            float h2 = hash12(floor(gl_FragCoord.xy * 0.5) + 17.0);
+            float lc = lumaf(col);
+            float gAmt = uFilmGrain * (0.05 + 0.10 * (1.0 - smoothstep(0.05, 0.6, lc)));
+            col += (h1 - 0.5) * gAmt + (h2 - 0.5) * uFilmGrain * 0.02;
+
+            col = min(col, vec3(0.985));            // hard whiteout guard
+            fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program + target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, fullscreenVS));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          mask: createProgram(maskFS),
+          blur: createProgram(blurFS),
+          curl: createProgram(curlFS),
+          vel: createProgram(velFS),
+          div: createProgram(divFS),
+          jacobi: createProgram(jacobiFS),
+          proj: createProgram(projFS),
+          den: createProgram(denFS),
+          emis: createProgram(emisFS),
+          fb: createProgram(fbFS),
+          composite: createProgram(compositeFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uCx", "uCy",
+            "uMirror", "uFake", "uHasVideo",
+          ]),
+          mask: getLocations(programs.mask, [
+            "uScene", "uScenePrev", "uPrev", "uSeg", "uTexel", "uSegScale",
+            "uAspect", "uCx", "uCy", "uDt", "uAlphaMask", "uAlphaMot", "uReset",
+            "uSource", "uMirror",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          curl: getLocations(programs.curl, ["uVel", "uTexel"]),
+          vel: getLocations(programs.vel, [
+            "uVel", "uCurl", "uMask", "uDen", "uTexel", "uDt", "uTime",
+            "uRise", "uSwirl", "uPresent",
+          ]),
+          div: getLocations(programs.div, ["uVel", "uTexel"]),
+          jacobi: getLocations(programs.jacobi, ["uPrs", "uDiv", "uTexel"]),
+          proj: getLocations(programs.proj, ["uVel", "uPrs", "uTexel"]),
+          den: getLocations(programs.den, [
+            "uDen", "uVel", "uMask", "uDt", "uTime", "uSmoke", "uGrain", "uPresent",
+          ]),
+          emis: getLocations(programs.emis, ["uDen"]),
+          fb: getLocations(programs.fb, ["uEmis", "uPrev", "uDecay"]),
+          composite: getLocations(programs.composite, [
+            "uScene", "uMask", "uMaskRaw", "uDen", "uVel", "uFb", "uB1", "uB2",
+            "uResolution", "uDenTexel", "uBloom", "uAmbient", "uTrail", "uGrain",
+            "uFilmGrain", "uTime", "uDebug",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          return tex;
+        }
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        // Video texture (DOM source → UNPACK_FLIP_Y). Segmentation texture is a
+        // plain R8 upload from MediaPipe (already oriented, no flip).
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const segTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, segTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 2, 2, 0, gl.RED, gl.UNSIGNED_BYTE,
+          new Uint8Array([0, 0, 0, 0]));
+        let segSize = [2, 2];
+
+        let targets = null;
+        let paintW = 2, paintH = 2, fieldW = 2, fieldH = 2, glowW = 2, glowH = 2;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          const b1W = Math.max(2, Math.round(glowW / 2));
+          const b1H = Math.max(2, Math.round(glowH / 2));
+          const b2W = Math.max(2, Math.round(glowW / 4));
+          const b2H = Math.max(2, Math.round(glowH / 4));
+          targets = {
+            sceneA: createTarget(paintW, paintH, false),
+            sceneB: createTarget(paintW, paintH, false),
+            maskA: createTarget(fieldW, fieldH, true),
+            maskB: createTarget(fieldW, fieldH, true),
+            softT: createTarget(fieldW, fieldH, true),
+            softTmp: createTarget(fieldW, fieldH, true),
+            curlT: createTarget(fieldW, fieldH, true),
+            velA: createTarget(fieldW, fieldH, true),
+            velB: createTarget(fieldW, fieldH, true),
+            divT: createTarget(fieldW, fieldH, true),
+            prsA: createTarget(fieldW, fieldH, true),
+            prsB: createTarget(fieldW, fieldH, true),
+            denA: createTarget(fieldW, fieldH, true),
+            denB: createTarget(fieldW, fieldH, true),
+            emisT: createTarget(glowW, glowH, true),
+            fbA: createTarget(glowW, glowH, true),
+            fbB: createTarget(glowW, glowH, true),
+            b1Tmp: createTarget(b1W, b1H, true),
+            b1: createTarget(b1W, b1H, true),
+            b2Tmp: createTarget(b2W, b2H, true),
+            b2: createTarget(b2W, b2H, true),
+          };
+          needsReset = true;
+        }
+
+        // Encoded targets must clear to encoded zero (0.5), else "clear"
+        // decodes to -VMAX.
+        function clearSimTargets() {
+          clearTarget(targets.sceneA, 0.1, 0.12, 0.15, 1);
+          clearTarget(targets.sceneB, 0.1, 0.12, 0.15, 1);
+          clearTarget(targets.maskA, 0, 0, 0.5, 0.5);
+          clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.velA, 0.5, 0.5, 0, 1);
+          clearTarget(targets.velB, 0.5, 0.5, 0, 1);
+          clearTarget(targets.prsA, 0.5, 0, 0, 1);
+          clearTarget(targets.prsB, 0.5, 0, 0, 1);
+          clearTarget(targets.divT, 0.5, 0, 0, 1);
+          clearTarget(targets.curlT, 0.5, 0, 0, 1);
+          clearTarget(targets.denA, 0, 0, 0, 1);
+          clearTarget(targets.denB, 0, 0, 0, 1);
+          clearTarget(targets.emisT, 0, 0, 0, 1);
+          clearTarget(targets.fbA, 0, 0, 0, 1);
+          clearTarget(targets.fbB, 0, 0, 0, 1);
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            const paintScale = Math.min(1, 1280 / maxSide);
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            const fieldScale = Math.min(1, 512 / maxSide);
+            fieldW = Math.max(8, Math.round(width * fieldScale));
+            fieldH = Math.max(8, Math.round(height * fieldScale));
+            const glowScale = Math.min(0.5, 960 / maxSide);
+            glowW = Math.max(4, Math.round(width * glowScale));
+            glowH = Math.max(4, Math.round(height * glowScale));
+            rebuildTargets();
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        function blurPass(src, tmp, dst, sigma) {
+          renderPass(tmp, programs.blur, () => {
+            bindTexture(0, src.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 1 / tmp.width, 0);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 0, 1 / dst.height);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+        }
+
+        /* ------------------------------------------------------------------
+           Detection state (person mask + presence). All quantities live in
+           SCREEN UV so fakesource and MediaPipe drive the exact same shader
+           path. Everything is EMA-smoothed (invariant 5). The segmentation
+           mask (full-body silhouette) is the gas source; pose is loaded for
+           parity with overflowing_aura but not required by the effect.
+        ------------------------------------------------------------------ */
+
+        const det = {
+          cx: 0.5, cy: 0, present: 0,       // smoothed (screen uv; cy = fake bob)
+          tcx: 0.5, tcy: 0, tpresent: 0,    // targets
+          segScale: [1, 1],
+          segReady: false,
+        };
+
+        // MediaPipe handles (real camera only; loaded lazily via dynamic
+        // import). URLs / models / options match overflowing_aura_4taigyo_v2.
+        // The verify_static allowlist covers the MediaPipe CDN + model hosts,
+        // so these are plain string literals.
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+
+        let mpSegmenter = null;
+        let mpState = "idle"; // idle | loading | ready | error
+        let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
+        let segU8 = new Uint8Array(4);
+        // Inference reads a SMALL offscreen copy of the video, never the full
+        // 1280x720 frame: the mask is consumed at fluid resolution (≤512)
+        // anyway, and a ~288px input is 10-20x cheaper — the difference
+        // between a phone that keeps up and one that janks to a crawl.
+        const SEG_MAX_SIDE = 288;
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;   // EMA of inference ms → adaptive cadence + readout
+        let segBadRun = 0;  // consecutive degenerate masks (GPU-health check)
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
+
+        async function loadMediaPipe() {
+          if (FAKE || mpState === "loading" || mpState === "ready") return;
+          mpState = "loading";
+          mpProgress = 0.05;
+          try {
+            const mod = await import(/* @vite-ignore */ MP_PKG);
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
+            try {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
+            } catch (_e) {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
+            }
+            mpProgress = 1;
+            mpState = "ready";
+          } catch (error) {
+            console.error("MediaPipe load failed", error);
+            mpState = "error";
+          }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("gas-head: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
+        }
+
+        // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
+        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
+        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the
+        // real mask. Person occupies the TOP ~60% of the image, centered band —
+        // so a correct Y-flip renders the gas in the TOP of the screen.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const inTop = y < h * 0.6;          // image top = head/upper body
+              const inBand = x > w * 0.22 && x < w * 0.78;
+              arr[y * w + x] = inTop && inBand ? 255 : 0;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+        }
+
+        // Uploads the confidence mask and returns its mean coverage (0..1).
+        function uploadSegMask(mask) {
+          const w = mask.width, h = mask.height;
+          const f = mask.getAsFloat32Array();
+          if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
+          let sum = 0;
+          for (let i = 0; i < w * h; i++) {
+            const v = Math.max(0, Math.min(255, (f[i] * 255) | 0));
+            segU8[i] = v;
+            sum += v;
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (segSize[0] !== w || segSize[1] !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, segU8);
+            segSize = [w, h];
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, segU8);
+          }
+          det.segReady = true;
+          return sum / (w * h * 255);
+        }
+
+        // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
+        function runDetection(now) {
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
+          try {
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
+            const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
+            if (cm) {
+              const cover = uploadSegMask(cm);
+              // presence from real coverage — the gas turns off when nobody
+              // is in frame instead of clinging to a stale mask.
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
+            if (seg && seg.close) seg.close();
+          } catch (_e) {
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
+          }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
+        }
+
+        let detTimer = 0;
+        function detectionTick() {
+          if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
+            runDetection(performance.now());
+          }
+          // Adaptive cadence: inference must never own the main thread. Slow
+          // devices (phones, CPU delegate) detect less often and the mask EMA
+          // bridges the gaps; fast devices stay at ~30Hz.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
+        }
+
+        /* ------------------------------------------------------------------
+           Render loop
+        ------------------------------------------------------------------ */
+
+        const JACOBI_ITERATIONS = 24;
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let scenePing = false, maskPing = false, denPing = false, fbPing = false;
+        let readyStamped = false;
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        function updateDetection(dt) {
+          const canvasAspect = canvas.width / Math.max(canvas.height, 1);
+          const videoAspect = (video.videoWidth && video.videoHeight)
+            ? video.videoWidth / video.videoHeight : 4 / 3;
+          det.segScale = videoAspect > canvasAspect
+            ? [canvasAspect / videoAspect, 1]
+            : [1, videoAspect / canvasAspect];
+
+          if (FAKE) {
+            // sway + slow vertical bob so the mask moves like a real person,
+            // which drives the motion field, turbulence and rising plume.
+            det.tcx = 0.5 + 0.07 * Math.sin(animTime * 0.33);
+            det.tcy = 0.03 * Math.sin(animTime * 0.5 + 1.0);
+            det.tpresent = 1;
+          } else if (mpState !== "ready") {
+            det.tpresent = 0;
+          }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
+          const k = FREEZE ? 0 : 1 - Math.exp(-dt * 6);
+          det.cx += (det.tcx - det.cx) * k;
+          det.cy += (det.tcy - det.cy) * k;
+          det.present += (det.tpresent - det.present) * k;
+        }
+
+        function detectionLabel() {
+          if (FAKE) return "合成";
+          if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
+          if (mpState === "error") return "検知エラー";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
+          return "待機";
+        }
+
+        function updateChip() {
+          statusChip.textContent = FAKE
+            ? "入力 · 合成 (fakesource=1)"
+            : `検知 · ${detectionLabel()}`;
+          statusChip.classList.toggle(
+            "hidden", FAKE ? performance.now() - bootWall > 4000 : false);
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          const dt = FREEZE ? 0 : rawDt;
+          if (!state.pauseAnim) animTime += dt;
+
+          const haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || haveVideo || mpState === "ready";
+
+          updateDetection(dt);
+
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          // FAKESEG forces the real-camera seg path (uSource==1) with the
+          // synthetic mask so the Y-flip can be validated offline.
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
+
+          const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
+          const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
+          const maskOut = maskPing ? targets.maskA : targets.maskB;
+          const maskPrev = maskPing ? targets.maskB : targets.maskA;
+          const denOut = denPing ? targets.denA : targets.denB;
+          const denPrev = denPing ? targets.denB : targets.denA;
+          const fbOut = fbPing ? targets.fbA : targets.fbB;
+          const fbPrev = fbPing ? targets.fbB : targets.fbA;
+          const fieldTexel = [1 / fieldW, 1 / fieldH];
+
+          // P0 — scene (real background)
+          renderPass(sceneCur, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize,
+              Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+          });
+
+          // P1 — mask / motion field
+          renderPass(maskOut, programs.mask, () => {
+            const u = locations.mask;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, scenePrev.tex);
+            bindTexture(2, maskPrev.tex);
+            bindTexture(3, segTexture);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uScenePrev, 1);
+            gl.uniform1i(u.uPrev, 2);
+            gl.uniform1i(u.uSeg, 3);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAlphaMask, 1 - Math.exp(-Math.max(dt, 1e-4) * 8));
+            gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+            gl.uniform1i(u.uSource, source);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // P2 — soft mask (boundary softening drives injection region)
+          const sdfSigma = 1.5 + 4.5 * state.edge;
+          blurPass(maskOut, targets.softTmp, targets.softT, sdfSigma);
+
+          // P3 — curl
+          renderPass(targets.curlT, programs.curl, () => {
+            bindTexture(0, targets.velA.tex);
+            gl.uniform1i(locations.curl.uVel, 0);
+            gl.uniform2f(locations.curl.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P4 — advect velocity + forces
+          renderPass(targets.velB, programs.vel, () => {
+            const u = locations.vel;
+            bindTexture(0, targets.velA.tex);
+            bindTexture(1, targets.curlT.tex);
+            bindTexture(2, maskOut.tex);
+            bindTexture(3, denPrev.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uCurl, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1i(u.uDen, 3);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uRise, state.rise);
+            gl.uniform1f(u.uSwirl, state.swirl);
+            gl.uniform1f(u.uPresent, det.present);
+          });
+
+          // P5 — divergence
+          renderPass(targets.divT, programs.div, () => {
+            bindTexture(0, targets.velB.tex);
+            gl.uniform1i(locations.div.uVel, 0);
+            gl.uniform2f(locations.div.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P6..P29 — Jacobi pressure solve (warm-started)
+          let prsIn = targets.prsA;
+          let prsOut = targets.prsB;
+          for (let i = 0; i < JACOBI_ITERATIONS; i++) {
+            const src = prsIn;
+            renderPass(prsOut, programs.jacobi, () => {
+              bindTexture(0, src.tex);
+              bindTexture(1, targets.divT.tex);
+              gl.uniform1i(locations.jacobi.uPrs, 0);
+              gl.uniform1i(locations.jacobi.uDiv, 1);
+              gl.uniform2f(locations.jacobi.uTexel, fieldTexel[0], fieldTexel[1]);
+            });
+            const swap = prsIn; prsIn = prsOut; prsOut = swap;
+          }
+
+          // P30 — projection → velA
+          renderPass(targets.velA, programs.proj, () => {
+            bindTexture(0, targets.velB.tex);
+            bindTexture(1, prsIn.tex);
+            gl.uniform1i(locations.proj.uVel, 0);
+            gl.uniform1i(locations.proj.uPrs, 1);
+            gl.uniform2f(locations.proj.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P31 — density: advect + dissipate + full-body injection + grain
+          renderPass(denOut, programs.den, () => {
+            const u = locations.den;
+            bindTexture(0, denPrev.tex);
+            bindTexture(1, targets.velA.tex);
+            bindTexture(2, targets.softT.tex);
+            gl.uniform1i(u.uDen, 0);
+            gl.uniform1i(u.uVel, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uSmoke, state.smoke);
+            gl.uniform1f(u.uGrain, state.grain);
+            gl.uniform1f(u.uPresent, det.present);
+          });
+
+          // P32 — emission (bloom source)
+          renderPass(targets.emisT, programs.emis, () => {
+            bindTexture(0, denOut.tex);
+            gl.uniform1i(locations.emis.uDen, 0);
+          });
+
+          // P33 — afterglow feedback
+          const fbDecay = Math.exp(-dt * (2.8 + (0.25 - 2.8) * state.trail));
+          renderPass(fbOut, programs.fb, () => {
+            bindTexture(0, targets.emisT.tex);
+            bindTexture(1, fbPrev.tex);
+            gl.uniform1i(locations.fb.uEmis, 0);
+            gl.uniform1i(locations.fb.uPrev, 1);
+            gl.uniform1f(locations.fb.uDecay, fbDecay);
+          });
+
+          // P34..P37 — two-stage separable bloom
+          blurPass(fbOut, targets.b1Tmp, targets.b1, 2.4);
+          blurPass(targets.b1, targets.b2Tmp, targets.b2, 2.4);
+
+          // P38 — composite
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, targets.softT.tex);
+            bindTexture(2, maskOut.tex);
+            bindTexture(3, denOut.tex);
+            bindTexture(4, targets.velA.tex);
+            bindTexture(5, fbOut.tex);
+            bindTexture(6, targets.b1.tex);
+            bindTexture(7, targets.b2.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uMask, 1);
+            gl.uniform1i(u.uMaskRaw, 2);
+            gl.uniform1i(u.uDen, 3);
+            gl.uniform1i(u.uVel, 4);
+            gl.uniform1i(u.uFb, 5);
+            gl.uniform1i(u.uB1, 6);
+            gl.uniform1i(u.uB2, 7);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform2f(u.uDenTexel, 1 / fieldW, 1 / fieldH);
+            gl.uniform1f(u.uBloom, state.bloom);
+            gl.uniform1f(u.uAmbient, state.ambient);
+            gl.uniform1f(u.uTrail, state.trail);
+            gl.uniform1f(u.uGrain, state.grain);
+            gl.uniform1f(u.uFilmGrain, state.filmGrain);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+
+          scenePing = !scenePing;
+          maskPing = !maskPing;
+          denPing = !denPing;
+          fbPing = !fbPing;
+
+          if (!readyStamped && hasInput) {
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
+              canvas.height} / 流体 ${fieldW}×${fieldH} / 検知 ${detectionLabel()}`;
+            updateChip();
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. With ?fakesource=1 the synthetic scene drives the
+           pipeline and MediaPipe is never touched, but getUserMedia still runs
+           so the three error paths stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay("requesting", "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.");
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay("error", "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8899) or HTTPS, then reload.");
+            retryCamera.disabled = false;
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.");
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 }, height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            retryCamera.disabled = false;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+            if (!FAKE) loadMediaPipe();
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay("error", "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true });
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay("error", "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true });
+            } else {
+              setOverlay("error", "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true });
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => { startCamera(); });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+        window.addEventListener("beforeunload", stopCamera);
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
+          // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
+          // scene drives the whole pipeline regardless of the camera (the video
+          // texture is never sampled, MediaPipe stays untouched), so the camera
+          // is only exercised to keep the three error overlays observable: on
+          // success the overlay hides and the fake art shows; on denial/no-camera
+          // the matching error overlay appears over the still-rendering scene.
+          startCamera();
+          detectionTick();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay("error", "WEBGL SETUP ERROR",
+            error && error.message ? error.message : "Could not initialize the renderer.");
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
