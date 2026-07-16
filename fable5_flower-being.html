@@ -627,7 +627,17 @@
             // than the old bokeh dots so petals are actually visible.
             float sizePx = mix(20.0, 34.0, s2);
             sizePx = mix(sizePx, mix(44.0, 78.0, s0), step(0.80, s2));
-            float pal = h11(idx * 0.017 + 21.1);
+            // HUE SEPARATION (figure legibility): the person's flowers draw
+            // from the WARM bands (magenta rose / pink / gold / warm white),
+            // the environment from the COOL bands (violet / blue / cyan, with
+            // a pink accent). Even at equal brightness the warm cluster reads
+            // as a figure against the cool field.
+            float pr = h11(idx * 0.017 + 21.1);
+            float palBody = pr < 0.30 ? 0.07 : pr < 0.55 ? 0.21
+                          : pr < 0.82 ? 0.77 : 0.92;
+            float palEnv  = pr < 0.36 ? 0.35 : pr < 0.72 ? 0.49
+                          : pr < 0.90 ? 0.63 : 0.21;
+            float pal = mix(palEnv, palBody, body);
             return vec4(life, body, sizePx, pal);
           }
           float partRotSpeed(float idx) { return (h11(idx * 0.017 + 31.0) - 0.5) * 0.6; }
@@ -639,22 +649,38 @@
           // between (like the reference wall of flowers) instead of a uniform
           // wash. If nobody is present, body particles fall back to environment
           // placement, so an empty room shows only environment flowers.
-          vec2 placePart(float idx, float rseed, float body, float present, sampler2D maskT) {
+          // Environment placement: fbm clumps on the black ground. MOAT: while
+          // someone is detected, refuse candidates on/near the person so the
+          // figure keeps a black margin and its outline never drowns.
+          vec2 placeEnv(float rseed, float present, sampler2D maskT) {
             vec2 np = vec2(h11(rseed + 3.1), h11(rseed + 7.7));
-            if (body > 0.5 && present > 0.5) {
-              for (int k = 0; k < 12; k++) {
-                float a = h11(rseed + float(k) * 1.7 + 0.3);
-                float b = h11(rseed + float(k) * 1.7 + 9.1);
-                if (texture(maskT, vec2(a, b)).r > 0.5) { np = vec2(a, b); break; }
-              }
-            } else {
-              for (int k = 0; k < 8; k++) {
-                vec2 cand = vec2(h11(rseed + float(k) * 2.3 + 0.7),
-                                 h11(rseed + float(k) * 2.3 + 4.1));
-                if (fbm(cand * 3.0) > 0.55) { np = cand; break; }
-              }
+            for (int k = 0; k < 8; k++) {
+              vec2 cand = vec2(h11(rseed + float(k) * 2.3 + 0.7),
+                               h11(rseed + float(k) * 2.3 + 4.1));
+              float m = present > 0.5 ? texture(maskT, cand).r : 0.0;
+              if (fbm(cand * 3.0) > 0.55 && m < 0.05) { np = cand; break; }
             }
             return np;
+          }
+          vec2 placePart(float idx, float rseed, float body, float present, sampler2D maskT) {
+            if (body > 0.5 && present > 0.5) {
+              // ~45% of body particles are RIM particles: they accept only the
+              // soft EDGE band of the mask, tracing the person's outline with
+              // flowers so the figure is unmistakable. The rest fill the body.
+              // Thresholds are forgiving (the EMA mask dims while the person
+              // moves) and a total miss falls back to ENV placement — a bright
+              // uniform scatter here floods the frame and erases the figure.
+              float rim = h11(idx * 0.017 + 61.0);
+              bool onRim = rim < 0.45;
+              for (int k = 0; k < 16; k++) {
+                float a = h11(rseed + float(k) * 1.7 + 0.3);
+                float b = h11(rseed + float(k) * 1.7 + 9.1);
+                float m = texture(maskT, vec2(a, b)).r;
+                bool ok = onRim ? (m > 0.14 && m < 0.62) : (m > 0.35);
+                if (ok) { return vec2(a, b); }
+              }
+            }
+            return placeEnv(rseed, present, maskT);
           }
         `;
 
@@ -916,12 +942,14 @@
           precision highp float;
           uniform sampler2D uStateA;
           uniform sampler2D uStateB;
+          uniform sampler2D uMask;
           uniform float uTexW;
           uniform vec2 uResolution;
           uniform float uSize;
           uniform float uSmoke;
           uniform float uAmbient;
           uniform float uBodyFrac;
+          uniform float uPresent;
           out vec2 vCorner;
           out vec3 vCol;
           out float vAlpha;
@@ -963,6 +991,25 @@
             // additive overlaps never blow the black ground white (invariant 4).
             float bright = body > 0.5 ? (0.15 + 0.26 * uSmoke)
                                       : (0.05 + 0.11 * uAmbient);
+            // live MOAT: environment flowers that drift onto / near the person
+            // fade out, so the black margin around the figure survives motion
+            // (spawn-time rejection alone goes stale when the person moves).
+            float mRaw = texture(uMask, pos).r;
+            float mNear = mRaw * uPresent;
+            if (body < 0.5) {
+              bright *= 1.0 - 0.9 * smoothstep(0.02, 0.30, mNear);
+            } else {
+              // warm body flowers belong ON the figure. Strays that spawned
+              // off the mask — or petals that drifted off the body — dim to a
+              // faint drifting glint instead of flooding the field and
+              // erasing the figure (with nobody present nothing is dimmed).
+              float onBody = mix(1.0, smoothstep(0.08, 0.35, mRaw), uPresent);
+              bright *= mix(0.28, 1.0, onBody);
+              // RIM particles (the outline tracers from placePart) pop a
+              // little brighter so the contour of the figure stays crisp.
+              float rim = h11(idx * 0.017 + 61.0);
+              bright *= 1.0 + 0.4 * step(rim, 0.45) * onBody;
+            }
             vCol = col * bright;
             vAlpha = fade;
             vPetals = partPetals(idx);
@@ -1170,8 +1217,8 @@
             "uSwirl", "uBodyFrac", "uPresent01",
           ]),
           pDraw: getLocations(programs.pDraw, [
-            "uStateA", "uStateB", "uTexW", "uResolution", "uSize", "uSmoke",
-            "uAmbient", "uBodyFrac",
+            "uStateA", "uStateB", "uMask", "uTexW", "uResolution", "uSize",
+            "uSmoke", "uAmbient", "uBodyFrac", "uPresent",
           ]),
           composite: getLocations(programs.composite, [
             "uField", "uB1", "uB2", "uMask", "uResolution", "uBloom", "uTrail",
@@ -1654,7 +1701,10 @@
             gl.uniform1f(u.uCx, det.cx);
             gl.uniform1f(u.uCy, det.cy);
             gl.uniform1f(u.uDt, dt);
-            gl.uniform1f(u.uAlphaMask, 1 - Math.exp(-Math.max(dt, 1e-4) * 8));
+            // brisk mask EMA: a slow follow smears a moving figure into a dim
+            // trail, which starves the body-spawn sampling and blurs the
+            // figure's outline (still slow enough to bridge detection gaps).
+            gl.uniform1f(u.uAlphaMask, 1 - Math.exp(-Math.max(dt, 1e-4) * 11));
             gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
             gl.uniform1i(u.uReset, doReset ? 1 : 0);
             gl.uniform1i(u.uSource, source);
@@ -1709,14 +1759,17 @@
           gl.useProgram(programs.pDraw);
           bindTexture(0, partDst.texA);
           bindTexture(1, partDst.texB);
+          bindTexture(2, targets.softT.tex);
           gl.uniform1i(locations.pDraw.uStateA, 0);
           gl.uniform1i(locations.pDraw.uStateB, 1);
+          gl.uniform1i(locations.pDraw.uMask, 2);
           gl.uniform1f(locations.pDraw.uTexW, PART_W);
           gl.uniform2f(locations.pDraw.uResolution, targets.field.width, targets.field.height);
           gl.uniform1f(locations.pDraw.uSize, state.grain);
           gl.uniform1f(locations.pDraw.uSmoke, state.smoke);
           gl.uniform1f(locations.pDraw.uAmbient, state.ambient);
           gl.uniform1f(locations.pDraw.uBodyFrac, BODY_FRAC);
+          gl.uniform1f(locations.pDraw.uPresent, det.present);
           gl.bindVertexArray(vao);
           gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, PART_N);
           gl.bindVertexArray(null);
