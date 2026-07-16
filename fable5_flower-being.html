@@ -471,7 +471,7 @@
         // a person is present. High so the body cluster clearly dominates and
         // the human reads; when nobody is present these fall back to the
         // environment, so an empty room still shows a full field of flowers.
-        const BODY_FRAC = 0.72;
+        const BODY_FRAC = 0.78;
 
         const fullscreenVS = `#version 300 es
           precision highp float;
@@ -1102,6 +1102,7 @@
           uniform float uTrail;
           uniform float uFilmGrain;
           uniform float uTime;
+          uniform float uPresent;
           uniform int uDebug;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
@@ -1134,6 +1135,17 @@
             vec3 col = field;
             col += (b1 * 0.35 + b2 * 0.55 * (0.5 + 0.9 * uTrail))
                  * (0.18 + 0.75 * uBloom);
+
+            // CONTINUOUS figure underlay (gated by presence): the flowers are
+            // discrete, so between them the silhouette used to break apart.
+            // A faint warm body-shaped aura + a delicate luminous contour
+            // along the mask edge keep the figure readable at all times —
+            // subtle enough to stay an aura, never a video cut-out.
+            float m = clamp(texture(uMask, vUv).r, 0.0, 1.0);
+            float mCore = smoothstep(0.35, 0.85, m);
+            float mEdge = smoothstep(0.20, 0.46, m) * (1.0 - smoothstep(0.54, 0.85, m));
+            col += vec3(1.00, 0.58, 0.52) * (mCore * 0.075) * uPresent;
+            col += vec3(1.00, 0.80, 0.70) * (mEdge * 0.24) * uPresent;
 
             // faint deep-violet ground so black is not dead flat (still black)
             col += vec3(0.010, 0.004, 0.022) * (1.0 - 0.30 * vUv.y);
@@ -1222,7 +1234,7 @@
           ]),
           composite: getLocations(programs.composite, [
             "uField", "uB1", "uB2", "uMask", "uResolution", "uBloom", "uTrail",
-            "uFilmGrain", "uTime", "uDebug",
+            "uFilmGrain", "uTime", "uPresent", "uDebug",
           ]),
         };
 
@@ -1795,6 +1807,7 @@
             gl.uniform1f(u.uTrail, state.trail);
             gl.uniform1f(u.uFilmGrain, state.filmGrain);
             gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uPresent, det.present);
             gl.uniform1i(u.uDebug, state.debugView);
           });
 
