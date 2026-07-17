@@ -225,6 +225,82 @@
       let poseLandmarker = null;
       let wristUV = null;
 
+      /* ---- Mobile detection recipe (from fable5_gas-head.html) ----
+         Coarse-pointer devices run MediaPipe on a ≤288px copy of the frame,
+         on an adaptive cadence, and rebuild the segmenter on CPU when the
+         GPU delegate emits degenerate masks. Desktop (fine pointer) keeps
+         the original per-video-frame full-resolution inference. */
+      const SEG_SMALL = matchMedia("(pointer: coarse)").matches;
+      const SEG_MAX_SIDE = 288;
+      const inferCanvas = document.createElement("canvas");
+      const inferCtx = inferCanvas.getContext("2d");
+      let latestMask = null,
+        latestMaskW = 0,
+        latestMaskH = 0;
+      let segCost = 20,
+        segBadRun = 0,
+        segSwitching = false,
+        lastInferAt = -1e9;
+      let segDelegate = "GPU",
+        visionRef = null,
+        segOptsRef = null;
+
+      /* Mobile only: MediaPipe reads a ≤288px copy of the frame (5x cheaper
+         at 640x480 input; the mask lands in the 160px person grid anyway).
+         Desktop returns the raw video element — identical to before. */
+      function segInput() {
+        if (!SEG_SMALL) return video;
+        const vw = video.videoWidth,
+          vh = video.videoHeight;
+        const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+        const cw = Math.max(2, Math.round(vw * s)),
+          ch = Math.max(2, Math.round(vh * s));
+        if (inferCanvas.width !== cw || inferCanvas.height !== ch) {
+          inferCanvas.width = cw;
+          inferCanvas.height = ch;
+        }
+        inferCtx.drawImage(video, 0, 0, cw, ch);
+        return inferCanvas;
+      }
+
+      /* Some mobile GPU delegates "succeed" but emit degenerate masks
+         (all-zero or all-one). When that persists, rebuild on CPU. */
+      async function switchToCpuDelegate() {
+        if (segSwitching || segDelegate === "CPU" || !visionRef || !segOptsRef)
+          return;
+        segSwitching = true;
+        try {
+          const next = await ImageSegmenter.createFromOptions(
+            visionRef,
+            segOptsRef("CPU"),
+          );
+          try {
+            segmenter?.close?.();
+          } catch {}
+          segmenter = next;
+          segDelegate = "CPU";
+          segBadRun = 0;
+          console.warn(
+            "overflowing_aura: GPU segmentation output looked broken — switched to CPU delegate",
+          );
+        } catch {}
+        segSwitching = false;
+      }
+
+      /* ?debug=1 — tiny on-screen inference readout for on-device checks */
+      const DBG_ON = new URLSearchParams(location.search).has("debug");
+      let dbgEl = null;
+      function dbgShow(text) {
+        if (!DBG_ON) return;
+        if (!dbgEl) {
+          dbgEl = document.createElement("div");
+          dbgEl.style.cssText =
+            "position:fixed;left:8px;bottom:8px;z-index:99;font:11px ui-monospace,monospace;color:#9fe;background:rgba(0,0,0,.55);padding:4px 8px;border-radius:4px;pointer-events:none";
+          document.body.appendChild(dbgEl);
+        }
+        dbgEl.textContent = text;
+      }
+
       /* ---- Nen state management ---- */
       const PRESETS = {
         default: {
@@ -814,26 +890,37 @@ void main() {
             outputCategoryMask: false,
             outputConfidenceMasks: true,
           });
+          visionRef = vision;
+          segOptsRef = segOpts;
           try {
             segmenter = await ImageSegmenter.createFromOptions(
               vision,
               segOpts("GPU"),
             );
+            segDelegate = "GPU";
           } catch {
             segmenter = await ImageSegmenter.createFromOptions(
               vision,
               segOpts("CPU"),
             );
+            segDelegate = "CPU";
           }
 
-          poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath:
-                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
-            },
-            runningMode: "VIDEO",
-            numPoses: 1,
-          });
+          /* Pose is an enhancement (hand-focused aura) — if it fails to
+             load (common on low-end mobiles) the artwork still runs. */
+          try {
+            poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath:
+                  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+              },
+              runningMode: "VIDEO",
+              numPoses: 1,
+            });
+          } catch (e) {
+            poseLandmarker = null;
+            console.warn("overflowing_aura: pose unavailable — hand focus disabled", e);
+          }
 
           const stream = await navigator.mediaDevices.getUserMedia({
             video: { width: 640, height: 480, facingMode: "user" },
@@ -987,14 +1074,82 @@ void main() {
         /* ---- updatePerson: MediaPipe segmentation + color extraction ---- */
         function updatePerson(now) {
           if (video.readyState < 2) return;
-          let mask = null;
-          try {
-            const res = segmenter.segmentForVideo(video, now);
-            if (res?.confidenceMasks?.[0]) {
-              mask = res.confidenceMasks[0].getAsFloat32Array();
-              res.close?.();
+          /* Inference (segmentation + pose). Desktop: every video frame,
+             exactly as before (interval 0). Mobile: adaptive cadence on a
+             ≤288px input — between inferences the person grid reuses
+             latestMask and the maskSmooth EMA bridges the gaps. */
+          const interval = SEG_SMALL
+            ? Math.max(33, Math.min(250, segCost * 1.7))
+            : 0;
+          if (!segSwitching && now - lastInferAt >= interval) {
+            lastInferAt = now;
+            const inp = segInput();
+            const t0 = performance.now();
+            try {
+              const res = segmenter.segmentForVideo(inp, now);
+              const cm = res?.confidenceMasks?.[0];
+              if (cm) {
+                latestMask = cm.getAsFloat32Array();
+                latestMaskW = cm.width;
+                latestMaskH = cm.height;
+                res.close?.();
+                if (SEG_SMALL) {
+                  /* GPU-health watchdog: mean coverage ~0 or ~1 for >40
+                     consecutive results = delegate garbage, not "no person" */
+                  let sum = 0;
+                  for (let i = 0; i < latestMask.length; i++)
+                    sum += latestMask[i];
+                  const cover = sum / latestMask.length;
+                  segBadRun = cover < 0.002 || cover > 0.97 ? segBadRun + 1 : 0;
+                  if (segBadRun > 40) switchToCpuDelegate();
+                }
+              }
+            } catch {
+              if (SEG_SMALL && ++segBadRun > 40) switchToCpuDelegate();
             }
-          } catch {}
+
+            /* Right hand tracking for ハツ aura focus — average of wrist/pinky/index/thumb */
+            try {
+              const pr = poseLandmarker.detectForVideo(inp, now, {
+                imageSize: {
+                  width: inp.videoWidth || inp.width,
+                  height: inp.videoHeight || inp.height,
+                },
+              });
+              const lm = pr?.landmarks?.[0];
+              const p16 = lm?.[16],
+                p18 = lm?.[18],
+                p20 = lm?.[20],
+                p22 = lm?.[22];
+              const raw =
+                p16 && p18 && p20 && p22
+                  ? {
+                      x: (p16.x + p18.x + p20.x + p22.x) / 4,
+                      y: (p16.y + p18.y + p20.y + p22.y) / 4,
+                    }
+                  : (p16 ?? null);
+              if (raw) {
+                const cx = 1 - raw.x;
+                const cy = 1 - raw.y;
+                const sar = innerWidth / innerHeight;
+                if (sar >= vAspect) {
+                  wristUV = { x: cx, y: (cy - 0.5) * (sar / vAspect) + 0.5 };
+                } else {
+                  wristUV = { x: (cx - 0.5) * (vAspect / sar) + 0.5, y: cy };
+                }
+              } else {
+                wristUV = null;
+              }
+            } catch {
+              wristUV = null;
+            }
+
+            segCost = segCost * 0.8 + (performance.now() - t0) * 0.2;
+            dbgShow(
+              `seg ${segDelegate} ${segCost.toFixed(0)}ms${SEG_SMALL ? " ·288px" : ""}`,
+            );
+          }
+          const mask = latestMask;
 
           /* Mirror the image (selfie convention) */
           srcCtx.save();
@@ -1003,8 +1158,8 @@ void main() {
           srcCtx.restore();
           const img = srcCtx.getImageData(0, 0, GRID_W, GRID_H).data;
 
-          const mw = video.videoWidth,
-            mh = video.videoHeight;
+          const mw = latestMaskW,
+            mh = latestMaskH;
           for (let gy = 0; gy < GRID_H; gy++) {
             for (let gx = 0; gx < GRID_W; gx++) {
               let mv = 0.0;
@@ -1089,38 +1244,6 @@ void main() {
             }
           }
 
-          /* Right hand tracking for ハツ aura focus — average of wrist/pinky/index/thumb */
-          try {
-            const pr = poseLandmarker.detectForVideo(video, now, {
-              imageSize: { width: video.videoWidth, height: video.videoHeight },
-            });
-            const lm = pr?.landmarks?.[0];
-            const p16 = lm?.[16],
-              p18 = lm?.[18],
-              p20 = lm?.[20],
-              p22 = lm?.[22];
-            const raw =
-              p16 && p18 && p20 && p22
-                ? {
-                    x: (p16.x + p18.x + p20.x + p22.x) / 4,
-                    y: (p16.y + p18.y + p20.y + p22.y) / 4,
-                  }
-                : (p16 ?? null);
-            if (raw) {
-              const cx = 1 - raw.x;
-              const cy = 1 - raw.y;
-              const sar = innerWidth / innerHeight;
-              if (sar >= vAspect) {
-                wristUV = { x: cx, y: (cy - 0.5) * (sar / vAspect) + 0.5 };
-              } else {
-                wristUV = { x: (cx - 0.5) * (vAspect / sar) + 0.5, y: cy };
-              }
-            } else {
-              wristUV = null;
-            }
-          } catch {
-            wristUV = null;
-          }
         }
 
         /* ---- Navier-Stokes fluid step ---- */
