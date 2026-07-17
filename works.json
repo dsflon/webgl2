@@ -30,20 +30,6 @@
     "thumb": "thumbs/fable5_flower-being.jpg"
   },
   {
-    "slug": "fable5_depth-suibokuga",
-    "file": "fable5_depth-suibokuga.html",
-    "title": "深度の水墨山水",
-    "date": "2026-07-12",
-    "desc": "単眼深度推定で奥行きを「三遠」の墨の階調に写像し、カメラ映像が水墨山水画になる。近景は濃く明瞭、遠景は淡く大気に溶ける。Fable 5 で制作。",
-    "model": "Fable 5",
-    "tags": [
-      "WebGL2",
-      "Depth"
-    ],
-    "series": "FABLE5",
-    "thumb": "thumbs/fable5_depth-suibokuga.jpg"
-  },
-  {
     "slug": "fable5_gas-head",
     "file": "fable5_gas-head.html",
     "title": "ガスヘッド",
