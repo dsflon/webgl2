@@ -1,0 +1,328 @@
+{
+  "fable5_mosaic": {
+    "query": "fakesource=1",
+    "warmMs": 8000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "合成人型+金地で全駆動。パネルはデスクトップ幅で初期オープン→#closePanelで閉じる。"
+  },
+  "fable5_flower-being": {
+    "query": "fakesource=1",
+    "warmMs": 10000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "花びらパーティクルが人型に密集するまで待つ蓄積系。",
+    "hideCss": ".panel,#panel,#togglePanel{display:none!important}"
+  },
+  "fable5_depth-suibokuga": {
+    "query": "fakesource=1",
+    "warmMs": 8000,
+    "click": [],
+    "hide": [
+      "#togglePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "合成深度場で全パス駆動。#closePanel は無く #togglePanel で折り畳む(初期オープン)。"
+  },
+  "fable5_gas-head": {
+    "query": "fakesource=1",
+    "warmMs": 10000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "ガス密度が人型に満ちるまで待つ蓄積系。"
+  },
+  "fable5_smoke-portrait": {
+    "query": "fakesource=1",
+    "warmMs": 12000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "煙密度で顔が読めるまで育てる蓄積系。長めの warm 推奨。"
+  },
+  "fable5_blue-dissolve": {
+    "query": "fakesource=1",
+    "warmMs": 12000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "溶解帯からの煙注入+残光が育つまで待つ蓄積系。"
+  },
+  "fable5_papercraft-cam": {
+    "query": "fakedepth=1",
+    "warmMs": 8000,
+    "click": [],
+    "hide": [
+      "#togglePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "合成深度で駆動(色は fakeCameraInit の映像を使用)。パネルは #togglePanel で折り畳む。"
+  },
+  "sakana_papercraft-cam": {
+    "query": "fakedepth=1",
+    "warmMs": 6000,
+    "click": [],
+    "hide": [
+      "#togglePanel"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "fakedepth はあるが __artReady 無し(固定待ち)。色は実カメラ映像なので fakeCameraInit 必須。"
+  },
+  "fable5_van-gogh": {
+    "query": "",
+    "warmMs": 5000,
+    "click": [],
+    "hide": [
+      "#togglePanel"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "検証フック無し。fakeCameraInit 必須。カメラ自動起動、overlay は起動成功で自動消滅。"
+  },
+  "fable5_oneline-cam": {
+    "query": "",
+    "warmMs": 9000,
+    "click": [],
+    "hide": [
+      "#hud summary"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "fable5_scribble-cam": {
+    "query": "",
+    "warmMs": 6000,
+    "click": [],
+    "hide": [
+      "#hud summary"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "fable5_typo-cam": {
+    "query": "",
+    "warmMs": 9000,
+    "click": [],
+    "hide": [
+      "#hud summary"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "fable5_water-cam": {
+    "query": "",
+    "warmMs": 5000,
+    "click": [],
+    "hide": [
+      "#toggle"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "van-gogh_sakana": {
+    "query": "",
+    "warmMs": 4000,
+    "click": [],
+    "hide": [
+      "#togglePanel"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "静的変換系。fakeCameraInit 必須。カメラ自動起動。"
+  },
+  "ascii_opus4_8": {
+    "query": "",
+    "warmMs": 4000,
+    "click": [],
+    "hide": [
+      "#toggle"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "静的変換系。fakeCameraInit 必須。カメラ自動起動。パネルは #toggle で折り畳み。"
+  },
+  "ascii_sakana": {
+    "query": "",
+    "warmMs": 4000,
+    "click": [],
+    "hide": [
+      "#togglePanel"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "静的変換系。fakeCameraInit 必須。ロード時に requestCamera() 自動実行。"
+  },
+  "suibokuga_opus4_8": {
+    "query": "",
+    "warmMs": 5000,
+    "click": [],
+    "hide": [
+      "#controlsToggle"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "画像は base64 内蔵で自動描画。無操作では原画中心。#pour(墨を一滴)をクリックすると滲みが出て絵になる(任意)。",
+    "hideCss": "#panel,#controlsToggle{display:none!important}"
+  },
+  "suibokuga_sakana": {
+    "query": "",
+    "warmMs": 5000,
+    "click": [],
+    "hide": [
+      "#controlsToggle"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "assets/suibokuga.png(コミット済み)を読み込み自動描画。無操作では原画が静止表示。ポインタ移動やクリック合成があると滲みが写る。"
+  },
+  "iwashi_ball_opus4_8": {
+    "query": "",
+    "warmMs": 6000,
+    "click": [],
+    "hide": [
+      "#controlsToggle"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "カメラ不要・自動再生。ベイトボールが形成されるまで待つ。左上 HUD テキストは演出の一部(pointer-events なし)。"
+  },
+  "iwashi_ball_sakanaai": {
+    "query": "",
+    "warmMs": 6000,
+    "click": [],
+    "hide": [
+      "#controlsToggle"
+    ],
+    "readyFlag": false,
+    "audio": false,
+    "note": "カメラ不要・自動再生。左上の #readme 説明パネルは H キーでのみ消える(クリックボタン無し)→ keyboard.press('h') が必要。",
+    "keys": [
+      "h"
+    ]
+  },
+  "suibokuga_particle": {
+    "query": "",
+    "warmMs": 5000,
+    "click": [],
+    "hide": [],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "suibokuga_fluid": {
+    "query": "",
+    "warmMs": 5000,
+    "click": [],
+    "hide": [],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "overflowing_aura_4taigyo_v2": {
+    "query": "",
+    "warmMs": 8000,
+    "click": [
+      "#startBtn"
+    ],
+    "hide": [],
+    "readyFlag": false,
+    "audio": true,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "overflowing_aura_4taigyo": {
+    "query": "",
+    "warmMs": 8000,
+    "click": [
+      "#startBtn"
+    ],
+    "hide": [],
+    "readyFlag": false,
+    "audio": true,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "overflowing_aura": {
+    "query": "",
+    "warmMs": 8000,
+    "click": [
+      "#startBtn"
+    ],
+    "hide": [],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  },
+  "dogra-magra": {
+    "query": "",
+    "warmMs": 9000,
+    "click": [
+      "#gate"
+    ],
+    "hide": [],
+    "readyFlag": false,
+    "audio": false,
+    "note": "カメラ不要。#gate(全画面ゲート)クリックで開始し、反応拡散の模様が育つまで待つ。音は WebAudio 出力のみ(マイク不使用)。"
+  },
+  "ds": {
+    "query": "",
+    "warmMs": 4000,
+    "click": [],
+    "hide": [],
+    "readyFlag": false,
+    "audio": false,
+    "note": "カメラ不要。base64 内蔵ポートレートで自動描画。ポインタを合成するとボクセルの飛散が写る(任意)。"
+  },
+  "ds_voice": {
+    "query": "",
+    "warmMs": 4000,
+    "click": [],
+    "hide": [],
+    "readyFlag": false,
+    "audio": true,
+    "note": "マイク入力作品だが LISTEN/VOICE は既定 OFF のボタン式。無音のまま基本のボクセル肖像が自動描画されるため撮影自体は可。"
+  },
+  "live_portrait_in_flux": {
+    "query": "",
+    "warmMs": 6000,
+    "click": [
+      "#startBtn"
+    ],
+    "hide": [],
+    "readyFlag": false,
+    "audio": false,
+    "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
+    "placeholder": true
+  }
+}
