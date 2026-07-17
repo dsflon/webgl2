@@ -157,11 +157,13 @@ fetch して描画する(ビルド工程なしでデータと見た目を分離�
 - 概要文(29本)は実装 PR で執筆する(各作品のヘッダコメント1節から要約)。
   **末尾に制作モデルへの軽い言及を含める**。`model` はデータとしても保持
   (表示は概要文内のみ。バッジ化しない)。
-- **モデル帰属の確認(P1 の要ユーザー確認事項)**: ファイル名から自明なもの
-  (`fable5_*` = Fable 5、`*_opus4_8` = Opus 4.8)以外 — 初期作品
-  (dogra-magra / ds / ds_voice / live_portrait_in_flux / overflowing_aura 系 /
-  suibokuga_fluid・particle)と `*_sakana` / `*_sakanaai` 系 — は推測で書かず、
-  一覧表にしてユーザーに確認してから記載する。
+- **モデル帰属**: ファイル名から自明なもの+オーナー確認済みは以下のとおり。
+  - `fable5_*` = **Fable 5**
+  - `*_opus4_8` = **Opus 4.8**
+  - `*_sakana` / `*_sakanaai` / `sakana_*` = **Sakana Fugu**(オーナー確認済み 2026-07-17)
+  - **残りの要確認(P1)**: 初期作品(dogra-magra / ds / ds_voice /
+    live_portrait_in_flux / overflowing_aura 系 / suibokuga_fluid・particle)は
+    推測で書かず、一覧表にしてユーザーに確認してから記載する。
 - 絞り込み UI は設けない(単一グリッド・新しい順のみ)。
 
 ## 4. サムネイル生成パイプライン
