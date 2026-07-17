@@ -144,20 +144,6 @@
     "thumb": "thumbs/fable5_water-cam.jpg"
   },
   {
-    "slug": "ascii_opus4_8",
-    "file": "ascii_opus4_8.html",
-    "title": "テキストモード・カム",
-    "date": "2026-06-29",
-    "desc": "カメラ映像がASCII文字・ブロック・網点の混成モザイクになる。セルごとに輝度でモードを選び、16色のEGA/ANSI風パレットへ量子化する。Opus 4.8 で制作。",
-    "model": "Opus 4.8",
-    "tags": [
-      "WebGL2",
-      "ASCII"
-    ],
-    "series": "ASCII",
-    "thumb": "thumbs/ascii_opus4_8.jpg"
-  },
-  {
     "slug": "ascii_sakana",
     "file": "ascii_sakana.html",
     "title": "ASCIIグリフモザイク",
@@ -170,20 +156,6 @@
     ],
     "series": "ASCII",
     "thumb": "thumbs/ascii_sakana.jpg"
-  },
-  {
-    "slug": "suibokuga_opus4_8",
-    "file": "suibokuga_opus4_8.html",
-    "title": "墨戯",
-    "date": "2026-06-25",
-    "desc": "内蔵の水墨画をポインタでかき混ぜて遊ぶ流体インク。墨を一滴落として滲ませ、放置すると原画へ静かに戻る。Opus 4.8 で制作。",
-    "model": "Opus 4.8",
-    "tags": [
-      "WebGL2",
-      "Fluid"
-    ],
-    "series": "SUIBOKUGA",
-    "thumb": "thumbs/suibokuga_opus4_8.jpg"
   },
   {
     "slug": "suibokuga_sakana",
@@ -200,21 +172,6 @@
     "thumb": "thumbs/suibokuga_sakana.jpg"
   },
   {
-    "slug": "iwashi_ball_opus4_8",
-    "file": "iwashi_ball_opus4_8.html",
-    "title": "イワシ玉",
-    "date": "2026-06-24",
-    "desc": "数万尾のイワシの群れが深海で渦を巻くベイトボール。カーソルは捕食者で、近づくと群れが裂け、離れると再び玉になる。Opus 4.8 で制作。",
-    "model": "Opus 4.8",
-    "tags": [
-      "WebGL2",
-      "Boids",
-      "Particles"
-    ],
-    "series": "IWASHI",
-    "thumb": "thumbs/iwashi_ball_opus4_8.jpg"
-  },
-  {
     "slug": "iwashi_ball_sakanaai",
     "file": "iwashi_ball_sakanaai.html",
     "title": "イワシ玉(GPGPU)",
@@ -228,34 +185,6 @@
     ],
     "series": "IWASHI",
     "thumb": "thumbs/iwashi_ball_sakanaai.jpg"
-  },
-  {
-    "slug": "suibokuga_particle",
-    "file": "suibokuga_particle.html",
-    "title": "水墨画・パーティクル",
-    "date": "2026-06-20",
-    "desc": "水墨画がパーティクルの集合として揺らぎ、クリックで別の絵へ切り替わる。粒が墨のかたちを保ちながら流動する。",
-    "model": null,
-    "tags": [
-      "WebGL2",
-      "Particles"
-    ],
-    "series": "SUIBOKUGA",
-    "thumb": "thumbs/suibokuga_particle.jpg"
-  },
-  {
-    "slug": "suibokuga_fluid",
-    "file": "suibokuga_fluid.html",
-    "title": "水墨・流体",
-    "date": "2026-06-19",
-    "desc": "水墨画を流体シミュレーションで滲ませる。クリックとドラッグで墨が流れ、和紙の上でゆっくり広がっていく。",
-    "model": null,
-    "tags": [
-      "WebGL2",
-      "Fluid"
-    ],
-    "series": "SUIBOKUGA",
-    "thumb": "thumbs/suibokuga_fluid.jpg"
   },
   {
     "slug": "overflowing_aura_4taigyo_v2",
