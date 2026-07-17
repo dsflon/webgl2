@@ -15,6 +15,14 @@ const video=document.getElementById("video");
 const srcCanvas=document.getElementById("src");
 const srcCtx=srcCanvas.getContext("2d",{willReadFrequently:true});
 let segmenter=null;
+/* Mobile detection recipe (from fable5_gas-head.html): coarse-pointer devices infer on a ≤288px copy at an adaptive cadence and rebuild on CPU when the GPU delegate emits degenerate masks. Desktop keeps the original per-frame full-res inference. */
+const SEG_SMALL=matchMedia("(pointer: coarse)").matches,SEG_MAX_SIDE=288;
+const inferCanvas=document.createElement("canvas"),inferCtx=inferCanvas.getContext("2d");
+let latestMask=null,latestMaskW=0,latestMaskH=0,segCost=20,segBadRun=0,segSwitching=false,lastInferAt=-1e9,segDelegate="GPU",visionRef=null,segOptsRef=null;
+function segInput(){if(!SEG_SMALL)return video;const vw=video.videoWidth,vh=video.videoHeight,s=Math.min(1,SEG_MAX_SIDE/Math.max(vw,vh)),cw=Math.max(2,Math.round(vw*s)),ch=Math.max(2,Math.round(vh*s));if(inferCanvas.width!==cw||inferCanvas.height!==ch){inferCanvas.width=cw;inferCanvas.height=ch;}inferCtx.drawImage(video,0,0,cw,ch);return inferCanvas;}
+async function switchToCpuDelegate(){if(segSwitching||segDelegate==="CPU"||!visionRef||!segOptsRef)return;segSwitching=true;try{const next=await ImageSegmenter.createFromOptions(visionRef,segOptsRef("CPU"));try{segmenter?.close?.();}catch{}segmenter=next;segDelegate="CPU";segBadRun=0;console.warn("overflowing_aura: GPU segmentation output looked broken — switched to CPU delegate");}catch{}segSwitching=false;}
+const DBG_ON=new URLSearchParams(location.search).has("debug");let dbgEl=null;
+function dbgShow(t){if(!DBG_ON)return;if(!dbgEl){dbgEl=document.createElement("div");dbgEl.style.cssText="position:fixed;left:8px;bottom:8px;z-index:99;font:11px ui-monospace,monospace;color:#9fe;background:rgba(0,0,0,.55);padding:4px 8px;border-radius:4px;pointer-events:none";document.body.appendChild(dbgEl);}dbgEl.textContent=t;}
 const vsQuad=`#version 300 es
 layout(location=0) in vec2 a_pos; out vec2 v_uv; void main() { v_uv = a_pos * 0.5 + 0.5; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
 const fsAdvect=`#version 300 es
@@ -49,7 +57,7 @@ function useFBO(fbo){gl.bindFramebuffer(gl.FRAMEBUFFER,fbo.fb);gl.viewport(0,0,f
 function bindFBOTex(unit,fbo){gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,fbo.tex);}
 let started=false;
 document.getElementById("startBtn").addEventListener("click",start);
-async function start(){if(started)return;started=true;try{const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm");const modelAssetPath="https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";const segOpts=(delegate)=>({baseOptions:{modelAssetPath,delegate},runningMode:"VIDEO",outputCategoryMask:false,outputConfidenceMasks:true});try{segmenter=await ImageSegmenter.createFromOptions(vision,segOpts("GPU"));}catch{segmenter=await ImageSegmenter.createFromOptions(vision,segOpts("CPU"));}const stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:"user"},audio:false});video.srcObject=stream;await video.play();document.getElementById("panel").classList.add("hide");setTimeout(()=>(document.getElementById("hint").style.opacity=0),4000);boot();}catch(e){console.error(e);fatal("起動に失敗しました："+(e?.message??e));started=false;}}
+async function start(){if(started)return;started=true;try{const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm");const modelAssetPath="https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";const segOpts=(delegate)=>({baseOptions:{modelAssetPath,delegate},runningMode:"VIDEO",outputCategoryMask:false,outputConfidenceMasks:true});visionRef=vision;segOptsRef=segOpts;try{segmenter=await ImageSegmenter.createFromOptions(vision,segOpts("GPU"));segDelegate="GPU";}catch{segmenter=await ImageSegmenter.createFromOptions(vision,segOpts("CPU"));segDelegate="CPU";}const stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:"user"},audio:false});video.srcObject=stream;await video.play();document.getElementById("panel").classList.add("hide");setTimeout(()=>(document.getElementById("hint").style.opacity=0),4000);boot();}catch(e){console.error(e);fatal("起動に失敗しました："+(e?.message??e));started=false;}}
 function boot(){const vAspect=video.videoWidth/video.videoHeight||640/480;GRID_H=Math.round(GRID_W/vAspect);srcCanvas.width=GRID_W;srcCanvas.height=GRID_H;
 const progAdvect=mkProg(fsAdvect),progDiv=mkProg(fsDiv),progPres=mkProg(fsPres),progGrad=mkProg(fsGrad),progBoundary=mkProg(fsBoundary),progSplat=mkProg(fsSplat),progBackground=mkProg(fsBackground),progInjectVel=mkProg(fsInjectVel),progInjectDye=mkProg(fsInjectDye),progDisplay=mkProg(fsDisplay),progManga=mkProg(fsManga);
 const vel=mkDouble(SIM,SIM),dye=mkDouble(DYE_W,DYE_H),pres=mkDouble(SIM,SIM),divFBO=mkFBO(SIM,SIM);
@@ -68,9 +76,17 @@ let prevTX=null,prevTY=null;
 glc.addEventListener("touchmove",(e)=>{e.preventDefault();const t=e.touches[0];if(prevTX===null){prevTX=t.clientX;prevTY=t.clientY;}onMove(t.clientX,t.clientY,prevTX,prevTY);prevTX=t.clientX;prevTY=t.clientY;},{passive:false});
 glc.addEventListener("touchend",()=>{prevTX=null;prevTY=null;});
 let lastVideoT=-1;
-function updatePerson(now){if(video.readyState<2)return;let mask=null;try{const res=segmenter.segmentForVideo(video,now);if(res?.confidenceMasks?.[0]){mask=res.confidenceMasks[0].getAsFloat32Array();res.close?.();}}catch{}
+function updatePerson(now){if(video.readyState<2)return;
+/* desktop: infer every video frame as before (interval 0); mobile: adaptive cadence on a ≤288px input, latestMask reused in between (maskSmooth EMA bridges the gaps) */
+const interval=SEG_SMALL?Math.max(33,Math.min(250,segCost*1.7)):0;
+if(!segSwitching&&now-lastInferAt>=interval){lastInferAt=now;const t0=performance.now();
+try{const res=segmenter.segmentForVideo(segInput(),now);const cm=res?.confidenceMasks?.[0];if(cm){latestMask=cm.getAsFloat32Array();latestMaskW=cm.width;latestMaskH=cm.height;res.close?.();
+if(SEG_SMALL){let s=0;for(let i=0;i<latestMask.length;i++)s+=latestMask[i];const cover=s/latestMask.length;segBadRun=(cover<0.002||cover>0.97)?segBadRun+1:0;if(segBadRun>40)switchToCpuDelegate();}}}
+catch{if(SEG_SMALL&&++segBadRun>40)switchToCpuDelegate();}
+segCost=segCost*0.8+(performance.now()-t0)*0.2;dbgShow(`seg ${segDelegate} ${segCost.toFixed(0)}ms${SEG_SMALL?" ·288px":""}`);}
+const mask=latestMask;
 srcCtx.save();srcCtx.scale(-1,1);srcCtx.drawImage(video,-GRID_W,0,GRID_W,GRID_H);srcCtx.restore();const img=srcCtx.getImageData(0,0,GRID_W,GRID_H).data;
-const mw=video.videoWidth,mh=video.videoHeight;
+const mw=latestMaskW,mh=latestMaskH;
 for(let gy=0;gy<GRID_H;gy++){for(let gx=0;gx<GRID_W;gx++){let mv=0.0;if(mask){const sx=Math.min(mw-1,(((GRID_W-1-gx+0.5)/GRID_W)*mw)|0);const sy=Math.min(mh-1,(((gy+0.5)/GRID_H)*mh)|0);mv=mask[sy*mw+sx];}const gi=gy*GRID_W+gx;maskSmooth[gi]+=(mv-maskSmooth[gi])*0.35;const di=gi*4,si=gi*4;let r=img[si],g=img[si+1],b=img[si+2];const avg=(r+g+b)/3;const SAT=1.15;r=Math.min(255,Math.max(0,avg+(r-avg)*SAT));g=Math.min(255,Math.max(0,avg+(g-avg)*SAT));b=Math.min(255,Math.max(0,avg+(b-avg)*SAT));personPix[di]=r;personPix[di+1]=g;personPix[di+2]=b;personPix[di+3]=maskSmooth[gi]>0.45?255:Math.floor(maskSmooth[gi]*255);}}
 gl.bindTexture(gl.TEXTURE_2D,personTex);gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,GRID_W,GRID_H,gl.RGBA,gl.UNSIGNED_BYTE,personPix);
 gl.bindTexture(gl.TEXTURE_2D,videoTex);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);}
