@@ -208,8 +208,14 @@
 const CDN_BUNDLE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs";
 const CDN_WASM   = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm";
 const MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
-const SEG_INTERVAL = 33;        // run segmentation at ~30 Hz; render at full fps
 const MASK_FBO = 384;           // resolution of the mask blur/field passes
+
+/* Mobile detection recipe (proven in fable5_gas-head.html): coarse-pointer
+   devices segment a downscaled copy of the frame on an adaptive cadence and
+   auto-switch GPU→CPU when the delegate emits degenerate masks. Desktop
+   (fine pointer) keeps the exact full-resolution pipeline it always had. */
+const SEG_SMALL    = matchMedia("(pointer: coarse)").matches;
+const SEG_MAX_SIDE = 288;       // longest side of the mobile inference input
 
 /* ============================== state ============================== */
 const S = {
@@ -567,17 +573,31 @@ addEventListener("pagehide", ()=>{ if (stream) stream.getTracks().forEach(t=>t.s
 
 /* ============================== MediaPipe model ============================== */
 let segmenter = null, personIdx = -1, modelStatus = "idle";
-let maskReady = false, maskDirty = false, lastSeg = 0;
+let maskReady = false, maskDirty = false;
+let segDelegate = "GPU", segCost = 20, segBadRun = 0, segSwitching = false;
+let SegClass = null, segFiles = null;
+const segSrc = document.createElement("canvas");
+const segSrcCtx = segSrc.getContext("2d");
+
+const segOpts = (delegate)=>({
+  baseOptions:{ modelAssetPath: MODEL_URL, delegate },
+  runningMode:"VIDEO", outputCategoryMask:false, outputConfidenceMasks:true
+});
 
 async function loadModel(){
   modelStatus = "loading"; chip.classList.add("show"); updateReadout();
   try{
     const { ImageSegmenter, FilesetResolver } = await import(CDN_BUNDLE);
-    const files = await FilesetResolver.forVisionTasks(CDN_WASM);
-    segmenter = await ImageSegmenter.createFromOptions(files, {
-      baseOptions:{ modelAssetPath: MODEL_URL, delegate:"GPU" },
-      runningMode:"VIDEO", outputCategoryMask:false, outputConfidenceMasks:true
-    });
+    SegClass = ImageSegmenter;
+    segFiles = await FilesetResolver.forVisionTasks(CDN_WASM);
+    try{
+      segmenter = await ImageSegmenter.createFromOptions(segFiles, segOpts("GPU"));
+      segDelegate = "GPU";
+    }catch(_){
+      // some mobile GPUs reject the GPU delegate outright — fall back to CPU
+      segmenter = await ImageSegmenter.createFromOptions(segFiles, segOpts("CPU"));
+      segDelegate = "CPU";
+    }
     // find which confidence mask is the person (labels differ across models)
     try{
       const labels = segmenter.getLabels ? (segmenter.getLabels()||[]) : [];
@@ -591,9 +611,72 @@ async function loadModel(){
   updateReadout();
 }
 
+// Some mobile GPU delegates "succeed" but emit degenerate masks (all-zero or
+// all-one). When that persists, rebuild the segmenter on the CPU delegate.
+async function switchToCpuDelegate(){
+  if (segSwitching || segDelegate === "CPU" || !SegClass || !segFiles) return;
+  segSwitching = true;
+  try{
+    const next = await SegClass.createFromOptions(segFiles, segOpts("CPU"));
+    try{ if (segmenter && segmenter.close) segmenter.close(); }catch(_){}
+    segmenter = next; segDelegate = "CPU"; segBadRun = 0;
+    console.warn("water-cam: GPU segmentation output looked broken — switched to CPU delegate");
+  }catch(_){ /* keep the GPU segmenter */ }
+  segSwitching = false;
+}
+
+// Mobile only: segment a ≤288px copy of the frame (10-20x cheaper, and the
+// mask is consumed through a 384px blur anyway). Desktop returns the raw
+// video element — byte-identical to the original pipeline.
+function segInput(){
+  if (!SEG_SMALL) return video;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+  const cw = Math.max(2, Math.round(vw*s)), ch = Math.max(2, Math.round(vh*s));
+  if (segSrc.width !== cw || segSrc.height !== ch){ segSrc.width = cw; segSrc.height = ch; }
+  segSrcCtx.drawImage(video, 0, 0, cw, ch);
+  return segSrc;
+}
+
+function runSegmentation(){
+  if (!segmenter || segSwitching || !videoReady || video.readyState < 2 || !video.videoWidth) return;
+  const t0 = performance.now();
+  try{
+    segmenter.segmentForVideo(segInput(), t0, (res)=>{
+      const masks = res.confidenceMasks;
+      if (masks && masks.length){
+        const idx = (personIdx >= 0 && personIdx < masks.length) ? personIdx : masks.length-1;
+        uploadMask(masks[idx]);          // copy out inside the callback (masks freed after)
+      }
+    });
+  }catch(_){
+    if (SEG_SMALL && ++segBadRun > 40) switchToCpuDelegate();
+  }
+  segCost = segCost*0.8 + (performance.now() - t0)*0.2;
+}
+
+// Inference must never own the main thread: it runs on its own timer, outside
+// rAF. Desktop keeps the original ~30 Hz; slow phones (CPU delegate) back off
+// up to 250 ms and the latest mask is simply reused between results.
+function segTick(){
+  if (!document.hidden) runSegmentation();
+  const interval = SEG_SMALL ? Math.max(33, Math.min(250, segCost*1.7)) : 33;
+  setTimeout(segTick, interval);
+}
+segTick();
+
 function uploadMask(mpMask){
   maskW = mpMask.width; maskH = mpMask.height;
   const data = mpMask.getAsUint8Array();            // confidence 0..255
+  if (SEG_SMALL){
+    // GPU-health watchdog: mean coverage ~0 or ~1 for >40 consecutive
+    // results means the delegate is emitting garbage, not "no person".
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) sum += data[i];
+    const cover = sum / (data.length * 255);
+    segBadRun = (cover < 0.002 || cover > 0.97) ? segBadRun + 1 : 0;
+    if (segBadRun > 40) switchToCpuDelegate();
+  }
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);    // keep raw top-row-first; shader flips
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.bindTexture(gl.TEXTURE_2D, maskRawTex);
@@ -634,19 +717,7 @@ function frame(now){
   gl.bindTexture(gl.TEXTURE_2D, videoTex);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
 
-  // segmentation at ~30 Hz; the latest mask is reused between results
-  if (segmenter && video.readyState >= 2 && now - lastSeg >= SEG_INTERVAL){
-    lastSeg = now;
-    try{
-      segmenter.segmentForVideo(video, now, (res)=>{
-        const masks = res.confidenceMasks;
-        if (masks && masks.length){
-          const idx = (personIdx >= 0 && personIdx < masks.length) ? personIdx : masks.length-1;
-          uploadMask(masks[idx]);          // copy out inside the callback (masks freed after)
-        }
-      });
-    }catch(_){ /* transient — keep rendering with the previous mask */ }
-  }
+  // segmentation runs on its own adaptive timer (segTick) — never in rAF
 
   // 1+2) mask blur + field — only when a fresh mask arrived
   if (maskDirty){
@@ -751,8 +822,9 @@ $("save").addEventListener("click", ()=>{
 });
 function updateReadout(){
   const res = videoReady ? `${video.videoWidth}×${video.videoHeight}` : "—";
+  const seg = modelStatus === "ready" ? ` (${segDelegate} ${segCost.toFixed(0)}ms)` : "";
   $("readout").innerHTML =
-    `cam <b>${res}</b> · mask <b>${maskReady?"on":"off"}</b> · model <b>${modelStatus}</b> · <b>${fps}</b> fps`;
+    `cam <b>${res}</b> · mask <b>${maskReady?"on":"off"}</b> · model <b>${modelStatus}${seg}</b> · <b>${fps}</b> fps`;
 }
 updateReadout();
 
