@@ -206,6 +206,11 @@
       @media (max-width: 640px) {
         header { padding: 56px 0 30px; }
         noscript ul { columns: 1; }
+        /* スマホは常に2カラム */
+        .grid {
+          grid-template-columns: repeat(2, 1fr);
+          gap: 12px;
+        }
       }
       @media (prefers-reduced-motion: reduce) {
         .card, .thumb img { transition: none; }
