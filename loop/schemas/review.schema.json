@@ -19,6 +19,11 @@
       "description": "「拒否する理由を探す」姿勢で採点したことの宣言(指南書 §3.2-2)",
       "const": "reject-seeking"
     },
+    "first_impression": {
+      "description": "手順0: brief を読む前に final 縮小版が「何に見えるか」の言語化(checker_prompt.md)。テーマと別物に見えるゲシュタルト失敗(花→星雲 等)の検出用",
+      "type": "string",
+      "minLength": 10
+    },
     "scores": {
       "description": "brief の不変量ごとの採点。score<4 の行は fix_instructions 必須",
       "type": "array",

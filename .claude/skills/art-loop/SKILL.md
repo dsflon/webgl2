@@ -51,6 +51,9 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
   `loop/schemas/invariants.schema.json` のとおり(references / signals / vocabulary /
   invariants 5±2 / priority)。vocabulary は制作規約 §5 の正式名称から選ぶ。
   不変量は「実装可能な構造の言葉」で書き、各 principle に vocabulary の語を含める。
+- **参照画像があれば `loop/state/<slug>/refs/` にコピーする**(ユーザー添付・既存作品の
+  スクショ等)。これは S4 Checker と Maker の目視比較の一次証拠になる(文章化した
+  references より強い)。
 - 検証: `node loop/runner/verify_brief.mjs loop/state/<slug>/brief.json`
 - 合格 → `status briefed`
 
@@ -79,17 +82,27 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
 - **brief の不変量に担当軸「時間」を含む行がある場合は `--motion` を必ず付ける**
   (運動応答チェック。fakesource の合成シーンに動く要素が必要 — 発注書 §4 で要求する)。
   この結果(pass/fail と diff 値)は S4 で Checker に渡す。
+- **蓄積系(密度・残像・feedback で絵が育つ)作品は `--longrun` も付ける**
+  (長時間安定チェック: 非 freeze で輝度が発散= whiteout しないこと。CRAFT §A5)。
+  結果は S4 で Checker に渡す。
+- **検知もの(人物マスク駆動)は `?fakescale=` 対応時、スケール両端でも回す**:
+  `...&fakesource=1&fakescale=2` を付けた URL で `--longrun` をもう1周+final スクショ。
+  実機バグ(whiteout・図地反転)はスケール依存で、既定スケールでは素通しになる
+  (CRAFT §C2 — 実測で確認済みの限界)。
 - 不合格 → checks の fail 内容をエラーリストとして Maker(repair)へ。
 - 合格 → `status runtime_ok`。スクショ一式(final + uDebug 主要モード + 縮小版 +
-  等倍クロップ)を `loop/state/<slug>/shots/` に揃える。
+  等倍クロップ。**final は非 freeze で絵が育ってから**= 8〜15 秒 warm)を
+  `loop/state/<slug>/shots/` に揃える。
 
 ### S4 aesthetic(美的レビュー — V2)
 
-- 生成側の禁止事項: このステージでの修正も Maker サブエージェント(repair)で行う。
+- 生成側の禁止事項: このステージでの修正も Maker(repair)で行う。
   オーケストレータ自身が作品を直接編集しない。
 - 検証: **Checker サブエージェント**を起動する。プロンプトは
-  `loop/templates/checker_prompt.md` に SHOTS_DIR / BRIEF_PATH / REVIEW_OUT_PATH と
-  MOTION_CHECK_RESULT(S3 の `--motion` の結果。時間軸の不変量がない作品は「該当なし」)を
+  `loop/templates/checker_prompt.md` に SHOTS_DIR / BRIEF_PATH / REVIEW_OUT_PATH /
+  **REFS_DIR**(`loop/state/<slug>/refs/`。無ければ「なし」)と
+  MOTION_CHECK_RESULT(S3 の `--motion` の結果。時間軸の不変量がない作品は「該当なし」)/
+  LONGRUN_CHECK_RESULT(S3 の `--longrun` の結果。蓄積系でない作品は「該当なし」)を
   差し込んだもの。**Maker の文脈・ソースコードを渡さない。**
   出力を `node loop/runner/verify_review.mjs <review.json> --brief <brief.json>` で機械検証
   (スキーマ不適合・verdict 矛盾は Checker に差し戻す。これは attempts を消費しない)。
@@ -97,8 +110,16 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
   独立した Checker をもう1回起動する(文脈の再利用禁止)。2回目も pass なら
   `status aesthetic_ok`。2回目が fail ならその fix_instructions で修正ループへ
   (成果物が変わるので連続カウントはリセット)。
-- fail 時: 全 score<4 行の fix_instructions を「原文のまま」Maker(repair)へ。
-  修正後は S3 の runtime 検証を再実行してから再レビュー(修正が動作を壊していないこと)。
+- fail 時の修正ループ(CRAFT §D2/§D4 — 実セッションで品質が跳ねた手順の制度化):
+  1. **証拠化**: オーケストレータは fix_instructions の症状を**自分のスクショで再現**
+     してから指示を出す(final・該当 uDebug・必要なら縮小フィギュア相当の変種)。
+     再現できない指摘はその旨を添えて Checker の evidence と突き合わせる。
+  2. **同一 Maker の継続**: 美的修正は初回実装の Maker を **resume** して行う
+     (アーキテクチャ理解の保持。fresh 起動はエラー修正=verify 不合格時のみ)。
+     渡すもの = Checker の fix_instructions 原文(因果診断つき)+ オーケストレータの
+     再現スクショ所見。Checker 側の隔離は維持されるのでバイアス遮断は保たれる。
+  3. Maker には**1まとまりごとにスクショ目視**(maker_prompt の目視の規律)を要求する。
+  4. 修正後は S3 の runtime 検証を再実行してから再レビュー(修正が動作を壊していないこと)。
 
 ### S5 submit(提出 — L2 ゲートは人間のマージ)
 
@@ -120,6 +141,18 @@ V2: 1回目・2回目のスコア表
 コスト: loops / approx_tokens / wall_minutes
 次のアクション: PRレビュー依頼 or needs_review の判断依頼(Inbox)
 ```
+
+## 事後の知識還元(メタループ — 毎実行の最後に必ず行う)
+
+この実行で「検証は通るのに見た目が悪い」失敗を修正した場合、その教訓を
+**必ずどれか1つに還元**してから終了する(DESIGN §9 の3点):
+
+1. 決定的に判定できるもの → V1 lint ルール案として needs_review/PR に記載
+2. 採点軸にできるもの → V2 ルーブリック(checker_prompt)追記案として記載
+3. レンダリング工芸の知見 → **`loop/CRAFT.md` に失敗モードとして追記**
+   (症状/根本原因/処方/出典の4点。既存 ID 体系 A〜D に沿う)
+
+該当がなければ「新規教訓なし」と実行サマリに明記する。
 
 ## 禁止事項(アンチパターン — 指南書 §9)
 

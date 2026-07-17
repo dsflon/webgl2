@@ -49,12 +49,21 @@ node selftest.mjs --skip-runtime
 実行時検証(`verify_runtime.mjs`)はすべて①扱い:
 `ready`(`__artReady`)/ `pageerror` / `alive`(黒・白画面検査)/ `flicker`(freeze差分 <2.0/255)/
 `sliders`(6本以上・両端掃引で生存)/ `debugViews` / `resize` / `uiToggle` / `cameraDenied` /
-`motionResponse`(`--motion` 指定時。freeze を外し動く合成シーンで unfrozen 差分 >0.5/255)。
+`motionResponse`(`--motion` 指定時。freeze を外し動く合成シーンで unfrozen 差分 >0.5/255)/
+`longrunStability`(`--longrun` 指定時。freeze を外し 4s/15s の全画面輝度で
+whiteout/発散を弾く: late mean ≤200・白画素 ≤5%・+50 超の上昇で 165 を超えない)。
 
 > **メタループ #1**(blue-dissolve パイロット, PR #9): 「動きに反応する」型の時間的不変量は
 > 静止スクショの V2 では原理的に判定できず、2回連続の偽不合格を生んだ。対処として
 > 時間的挙動の担保を V1 `motionResponse` に格上げし、V2(checker_prompt.md)には
 > 「V1 pass 時、静止画で時間性が見えないことだけを理由に減点しない」規則を追加した。
+
+> **メタループ #2**(gas-head 実機 whiteout / flower-being 星化, 本改訂):
+> (a) 蓄積系の飽和は fakesource 短時間検証で見えない → `longrunStability` を新設。
+> (b) 「検証は通るが別物に見える」ゲシュタルト失敗 → V2 に第一印象テスト
+> (`first_impression`)と参照画像(REFS_DIR)を追加。
+> (c) レンダリング工芸の教訓の置き場として `loop/CRAFT.md` を新設
+> (メタループの第3の還元先)。美的修正は同一 Maker の継続で行う(CRAFT §D4)。
 
 ## 3点同期の対応先(これを変えるときは他も見る)
 

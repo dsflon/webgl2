@@ -2,10 +2,12 @@
 // See loop/DESIGN.md §4 (V1) and loop/runner/README.md.
 //
 // Usage:
-//   node verify_runtime.mjs <url> [--timeout ms] [--settle ms] [--shots dir] [--motion]
+//   node verify_runtime.mjs <url> [--timeout ms] [--settle ms] [--shots dir] [--motion] [--longrun]
 //
-// --motion: 運動応答チェックを追加する(brief に担当軸「時間」の不変量がある作品用。
-//           freeze を外した URL で「動く合成シーンに画面が追従して変化するか」を測る)
+// --motion:  運動応答チェックを追加する(brief に担当軸「時間」の不変量がある作品用。
+//            freeze を外した URL で「動く合成シーンに画面が追従して変化するか」を測る)
+// --longrun: 長時間安定チェックを追加する(蓄積系=密度・残像・feedback の作品用。
+//            freeze を外した URL で 4s/15s の全画面輝度を計測し whiteout/発散を弾く)
 //
 // The URL should already carry the verification params the artwork supports,
 // e.g. ?fakesource=1&freeze=1 (papercraft-cam: ?fakedepth=1&freeze=1).
@@ -100,6 +102,58 @@ export async function checkMotion(url, opts = {}) {
     return { pass: diff > threshold, diff, threshold };
   } catch (e) {
     return { pass: false, diff: -1, threshold, error: e.message };
+  } finally {
+    await browser.close();
+  }
+}
+
+// Long-run stability (メタループ: gas-head 実機 whiteout からの還元 — CRAFT §A5):
+// 蓄積系(密度・残像・feedback)は「注入>散逸」だと数秒〜十数秒で画面が白/明灰に飽和する。
+// fakesource の短時間検証では見えないため、非 freeze で絵が育ったあとの全画面輝度を
+// 2点計測し、発散(平均輝度の上昇継続+高輝度到達)と白飽和(白画素率)を弾く。
+// 使い方: 蓄積系の作品は --longrun を付けて実行する(オプトイン。既存作品に影響なし)。
+export async function checkLongrun(url, opts = {}) {
+  const t1 = opts.early ?? 4000; // 絵が立ち上がった直後
+  const t2 = opts.late ?? 15000; // 定常のはずの時点
+  const timeout = opts.timeout ?? 60000;
+  const browser = await chromium.launch(chromiumOptions());
+  try {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 750 } });
+    await page.addInitScript(fakeCameraInit);
+    await page.goto(url);
+    await page.waitForFunction(() => window.__artReady === true, null, { timeout });
+    const FULL_FN = () => {
+      const c = document.getElementById("gl");
+      const g = c.getContext("webgl2");
+      const w = c.width;
+      const h = c.height;
+      const px = new Uint8Array(4 * w * h);
+      g.readPixels(0, 0, w, h, g.RGBA, g.UNSIGNED_BYTE, px);
+      let sum = 0;
+      let white = 0;
+      const n = w * h;
+      for (let i = 0; i < px.length; i += 4) {
+        const m = (px[i] + px[i + 1] + px[i + 2]) / 3;
+        sum += m;
+        if (px[i] > 245 && px[i + 1] > 245 && px[i + 2] > 245) white++;
+      }
+      return { mean: sum / n, whitePct: (100 * white) / n };
+    };
+    await page.waitForTimeout(t1);
+    const a = await page.evaluate(FULL_FN);
+    await page.waitForTimeout(t2 - t1);
+    const b = await page.evaluate(FULL_FN);
+    // 実測アンカー: 健全 ~80-150 / whiteout 実例は late で ~222・上昇継続
+    const saturated = b.mean > 200;
+    const whiteout = b.whitePct > 5;
+    const diverging = b.mean - a.mean > 50 && b.mean > 165;
+    const pass = !(saturated || whiteout || diverging);
+    const detail =
+      `mean ${a.mean.toFixed(1)}→${b.mean.toFixed(1)} /255, white ` +
+      `${b.whitePct.toFixed(2)}% (要: late≤200, white≤5%, 上昇+50超で165超えない)`;
+    return { pass, detail, early: a, late: b };
+  } catch (e) {
+    return { pass: false, detail: `longrun 計測失敗: ${e.message}`, error: e.message };
   } finally {
     await browser.close();
   }
@@ -266,6 +320,15 @@ export async function verifyRuntime(url, opts = {}) {
     });
   }
 
+  // Long-run stability check (opt-in): 蓄積系の whiteout/発散を弾く(CRAFT §A5)
+  if (opts.longrun) {
+    const runUrl = url
+      .replace(/([?&])freeze=1&?/, "$1")
+      .replace(/[?&]$/, "");
+    const l = await checkLongrun(runUrl, { timeout: opts.timeout });
+    checks.push({ id: "longrunStability", pass: l.pass, detail: l.detail });
+  }
+
   return { url, pass: checks.every((c) => c.pass), checks };
 }
 
@@ -281,6 +344,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     settle: Number(argVal("--settle", 25000)),
     shotsDir: argVal("--shots", null),
     motion: process.argv.includes("--motion"),
+    longrun: process.argv.includes("--longrun"),
   });
   console.log(JSON.stringify(report, null, 2));
   process.exit(report.pass ? 0 : 1);
