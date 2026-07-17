@@ -184,7 +184,18 @@ V1/V2 の結果サマリ・needs_review 事項(§8 Inbox)。
   収束しなかった理由の仮説」をセットで残し、人間は選ぶだけにする。
 - **人間の判断は還元する**: PR レビューでの指摘は、その場限りにせず
   「V1 の新 lint ルール」「V2 ルーブリックの新軸」「制作規約 §1 の新しい失敗モード行」
-  のいずれかに翻訳して追加する(§9 メタループ)。
+  「**loop/CRAFT.md の失敗モード追記**」のいずれかに翻訳して追加する(§9 メタループ)。
+- **隔離の線引き(実運用からの改訂)**: 入力の隔離は「初回実装の Maker」と「Checker」に
+  適用する。**S4 美的修正ラウンドは同一 Maker の継続(resume)で行う** —
+  gas-head/flower-being の実セッションで、アーキテクチャ理解を保持した継続 Maker の
+  修正精度が fresh 起動を大きく上回った(CRAFT §D4)。バイアス遮断は Checker 側の
+  隔離(実装文脈なし・2回連続 pass)で担保されるため、Maker 側の隔離を修正ラウンドまで
+  広げる必要はない。
+- **V2 の一次証拠は実物**: brief の references に画像がある場合は
+  `loop/state/<slug>/refs/` に置き、Checker に渡す(文章化した参照より強い)。
+  Checker は採点前に**第一印象テスト**(brief を読まずに final が「何に見えるか」)を
+  行い `first_impression` に記録する — 不変量照合では漏れるゲシュタルト失敗
+  (花のつもりが星雲に見える等)の検出器(flower-being からの還元)。
 
 ## 9. サーキットブレーカーと運用指標(指南書 §3.3, §7)
 
@@ -215,6 +226,7 @@ loop/
   LOOP_ENGINEERING_GUIDE.md   # 方法論(指南書)
   DESIGN.md                   # 本書
   IMPLEMENTATION_PLAN.md      # 実装計画
+  CRAFT.md                    # レンダリング工芸知識ベース(失敗モードと処方。メタループの第3の還元先)
   themes.md                   # テーマキュー(Discovery の対象)
   runner/
     verify_static.mjs         # V1 静的 lint(規約ID・禁止/要求パターン)
