@@ -812,23 +812,45 @@ window.addEventListener("pagehide", () => {
 let segmenter = null, modelFailed = false, maskReady = false;
 let modelStatus = "loading";
 let maskArr = null, maskW = 0, maskH = 0;
-let lastSegTs = -1, lastSegAt = 0;
+let lastSegTs = -1;
+
+/* Mobile detection recipe (proven in fable5_gas-head.html): coarse-pointer
+   devices segment a downscaled copy of the frame on an adaptive cadence and
+   auto-switch GPU→CPU when the delegate emits degenerate masks. Desktop
+   (fine pointer) keeps the exact full-resolution pipeline it always had
+   (the mask lands in the 160px CPU field either way, so 288px loses nothing). */
+const SEG_SMALL    = matchMedia("(pointer: coarse)").matches;
+const SEG_MAX_SIDE = 288;
+const segSrc = document.createElement("canvas");
+const segSrcCtx = segSrc.getContext("2d");
+let segDelegate = "GPU", segCost = 20, segBadRun = 0, segSwitching = false;
+let SegClass = null, segVision = null;
+
+const segOpts = (delegate) => ({
+  baseOptions: {
+    modelAssetPath:
+      "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+    delegate,
+  },
+  runningMode: "VIDEO",
+  outputConfidenceMasks: true,
+  outputCategoryMask: false,
+});
 
 async function loadModel() {
   modelStatus = "loading"; modelFailed = false;
   try {
-    const vision = await FilesetResolver.forVisionTasks(
+    segVision = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
-    segmenter = await ImageSegmenter.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
-        delegate: "GPU",
-      },
-      runningMode: "VIDEO",
-      outputConfidenceMasks: true,
-      outputCategoryMask: false,
-    });
+    SegClass = ImageSegmenter;
+    try {
+      segmenter = await ImageSegmenter.createFromOptions(segVision, segOpts("GPU"));
+      segDelegate = "GPU";
+    } catch (_) {
+      // some mobile GPUs reject the GPU delegate outright — fall back to CPU
+      segmenter = await ImageSegmenter.createFromOptions(segVision, segOpts("CPU"));
+      segDelegate = "CPU";
+    }
     modelStatus = "ok";
     $("banner").style.display = "none";
   } catch (err) {
@@ -843,30 +865,77 @@ async function loadModel() {
   }
 }
 
+// Some mobile GPU delegates "succeed" but emit degenerate masks (all-zero or
+// all-one). When that persists, rebuild the segmenter on the CPU delegate.
+async function switchToCpuDelegate() {
+  if (segSwitching || segDelegate === "CPU" || !SegClass || !segVision) return;
+  segSwitching = true;
+  try {
+    const next = await SegClass.createFromOptions(segVision, segOpts("CPU"));
+    try { if (segmenter && segmenter.close) segmenter.close(); } catch (_) {}
+    segmenter = next; segDelegate = "CPU"; segBadRun = 0;
+    console.warn("typo-cam: GPU segmentation output looked broken — switched to CPU delegate");
+  } catch (_) { /* keep the GPU segmenter */ }
+  segSwitching = false;
+}
+
+// Mobile only: segment a ≤288px copy of the frame (10-20x cheaper). Desktop
+// returns the raw video element — byte-identical to the original pipeline.
+function segInput() {
+  if (!SEG_SMALL) return video;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+  const cw = Math.max(2, Math.round(vw * s)), ch = Math.max(2, Math.round(vh * s));
+  if (segSrc.width !== cw || segSrc.height !== ch) { segSrc.width = cw; segSrc.height = ch; }
+  segSrcCtx.drawImage(video, 0, 0, cw, ch);
+  return segSrc;
+}
+
 function runSegmentation() {
-  if (!segmenter || !camReady || video.readyState < 2) return;
+  if (!segmenter || segSwitching || !camReady || video.readyState < 2 || !video.videoWidth) return;
   let ts = performance.now();
   if (ts <= lastSegTs) ts = lastSegTs + 0.1;
   lastSegTs = ts;
+  const t0 = performance.now();
   try {
-    segmenter.segmentForVideo(video, ts, (result) => {
+    segmenter.segmentForVideo(segInput(), ts, (result) => {
       const masks = result.confidenceMasks;
       if (!masks || !masks.length) return;
       // selfie_segmenter: 2 masks ⇒ index 1 = "person"; 1 mask ⇒ foreground
       const m = masks.length > 1 ? masks[1] : masks[0];
       maskArr = m.getAsUint8Array(); maskW = m.width; maskH = m.height;
       maskReady = true;
+      if (SEG_SMALL) {
+        // GPU-health watchdog: mean coverage ~0 or ~1 for >40 consecutive
+        // results means the delegate is emitting garbage, not "no person".
+        let sum = 0;
+        for (let i = 0; i < maskArr.length; i++) sum += maskArr[i];
+        const cover = sum / (maskArr.length * 255);
+        segBadRun = (cover < 0.002 || cover > 0.97) ? segBadRun + 1 : 0;
+        if (segBadRun > 40) switchToCpuDelegate();
+      }
     });
-  } catch (_) { /* reuse the latest mask */ }
+  } catch (_) {
+    if (SEG_SMALL && ++segBadRun > 40) switchToCpuDelegate();
+  }
+  segCost = segCost * 0.8 + (performance.now() - t0) * 0.2;
 }
 
-// field at video rate (angles need continuity); segmentation ~30 Hz.
+// Inference must never own the main thread: it runs on its own timer, outside
+// the video loop. Desktop keeps the original ~30 Hz; slow phones (CPU
+// delegate) back off up to 250 ms and the field reuses the latest mask.
+function segTick() {
+  if (!document.hidden) runSegmentation();
+  const interval = SEG_SMALL ? Math.max(33, Math.min(250, segCost * 1.7)) : 33;
+  setTimeout(segTick, interval);
+}
+segTick();
+
+// field at video rate (angles need continuity); segmentation on segTick.
 // Keeps running while paused — Pause freezes SLOT MOTION only.
 function startVideoLoop() {
   const onFrame = () => {
     updateField();
-    const now = performance.now();
-    if (now - lastSegAt >= 33) { lastSegAt = now; runSegmentation(); }
   };
   if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
     const tick = () => { onFrame(); video.requestVideoFrameCallback(tick); };
@@ -1013,10 +1082,11 @@ function frame(now) {
   /* ---------- readout ~2 Hz ---------- */
   if (now - lastReadout > 500) {
     lastReadout = now;
+    const seg = modelStatus === "ok" ? ` (${segDelegate} ${segCost.toFixed(0)}ms)` : "";
     $("readout").textContent =
       `fps ${fpsEMA.toFixed(0).padStart(3)}  words ${visibleWords}/${activeN}` +
       `${autoReduced ? " (auto-reduced)" : ""}\n` +
-      `atlas ${atlasW}×${atlasH}  ·  model: ${modelStatus}`;
+      `atlas ${atlasW}×${atlasH}  ·  model: ${modelStatus}${seg}`;
   }
   requestAnimationFrame(frame);
 }

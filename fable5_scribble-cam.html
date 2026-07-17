@@ -651,20 +651,41 @@ window.addEventListener("pagehide", () => {
 let segmenter = null, modelFailed = false, maskReady = false;
 let lastSegTs = -1;
 
+/* Mobile detection recipe (proven in fable5_gas-head.html): coarse-pointer
+   devices segment a downscaled copy of the frame on an adaptive cadence and
+   auto-switch GPU→CPU when the delegate emits degenerate masks. Desktop
+   (fine pointer) keeps the exact full-resolution pipeline it always had. */
+const SEG_SMALL    = matchMedia("(pointer: coarse)").matches;
+const SEG_MAX_SIDE = 288;
+const segSrc = document.createElement("canvas");
+const segSrcCtx = segSrc.getContext("2d");
+let segDelegate = "GPU", segCost = 20, segBadRun = 0, segSwitching = false;
+let SegClass = null, segVision = null;
+
+const segOpts = (delegate) => ({
+  baseOptions: {
+    modelAssetPath:
+      "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+    delegate,
+  },
+  runningMode: "VIDEO",
+  outputConfidenceMasks: true,
+  outputCategoryMask: false,
+});
+
 async function loadModel() {
   try {
-    const vision = await FilesetResolver.forVisionTasks(
+    segVision = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
-    segmenter = await ImageSegmenter.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
-        delegate: "GPU",
-      },
-      runningMode: "VIDEO",
-      outputConfidenceMasks: true,
-      outputCategoryMask: false,
-    });
+    SegClass = ImageSegmenter;
+    try {
+      segmenter = await ImageSegmenter.createFromOptions(segVision, segOpts("GPU"));
+      segDelegate = "GPU";
+    } catch (_) {
+      // some mobile GPUs reject the GPU delegate outright — fall back to CPU
+      segmenter = await ImageSegmenter.createFromOptions(segVision, segOpts("CPU"));
+      segDelegate = "CPU";
+    }
     if (camReady) hideStatus();
   } catch (err) {
     modelFailed = true;
@@ -673,6 +694,33 @@ async function loadModel() {
       (err && err.message || err) +
       "\nrendering ungated scribble (mask: off).");
   }
+}
+
+// Some mobile GPU delegates "succeed" but emit degenerate masks (all-zero or
+// all-one). When that persists, rebuild the segmenter on the CPU delegate.
+async function switchToCpuDelegate() {
+  if (segSwitching || segDelegate === "CPU" || !SegClass || !segVision) return;
+  segSwitching = true;
+  try {
+    const next = await SegClass.createFromOptions(segVision, segOpts("CPU"));
+    try { if (segmenter && segmenter.close) segmenter.close(); } catch (_) {}
+    segmenter = next; segDelegate = "CPU"; segBadRun = 0;
+    console.warn("scribble-cam: GPU segmentation output looked broken — switched to CPU delegate");
+  } catch (_) { /* keep the GPU segmenter */ }
+  segSwitching = false;
+}
+
+// Mobile only: segment a ≤288px copy of the frame (10-20x cheaper; the mask
+// edge is feathered by the blur pass anyway). Desktop returns the raw video
+// element — byte-identical to the original pipeline.
+function segInput() {
+  if (!SEG_SMALL) return video;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+  const cw = Math.max(2, Math.round(vw * s)), ch = Math.max(2, Math.round(vh * s));
+  if (segSrc.width !== cw || segSrc.height !== ch) { segSrc.width = cw; segSrc.height = ch; }
+  segSrcCtx.drawImage(video, 0, 0, cw, ch);
+  return segSrc;
 }
 
 function uploadMask(data, w, h) {
@@ -686,45 +734,53 @@ function uploadMask(data, w, h) {
 }
 
 function runSegmentation() {
-  if (!segmenter || !camReady || video.readyState < 2) return;
+  if (!segmenter || segSwitching || !camReady || video.readyState < 2 || !video.videoWidth) return;
   // timestamps must be strictly increasing for VIDEO mode
   let ts = performance.now();
   if (ts <= lastSegTs) ts = lastSegTs + 0.1;
   lastSegTs = ts;
+  const t0 = performance.now();
   try {
     // callback form: masks are only valid inside the callback and are
     // freed automatically afterwards — copy out what we need.
-    segmenter.segmentForVideo(video, ts, (result) => {
+    segmenter.segmentForVideo(segInput(), ts, (result) => {
       const masks = result.confidenceMasks;
       if (!masks || !masks.length) return;
       // selfie_segmenter: with 2 confidence masks, index 1 = "person";
       // with 1 mask, it is the foreground confidence directly.
       const mask = masks.length > 1 ? masks[1] : masks[0];
-      uploadMask(mask.getAsUint8Array(), mask.width, mask.height);
+      const data = mask.getAsUint8Array();
+      if (SEG_SMALL) {
+        // GPU-health watchdog: mean coverage ~0 or ~1 for >40 consecutive
+        // results means the delegate is emitting garbage, not "no person".
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        const cover = sum / (data.length * 255);
+        segBadRun = (cover < 0.002 || cover > 0.97) ? segBadRun + 1 : 0;
+        if (segBadRun > 40) switchToCpuDelegate();
+      }
+      uploadMask(data, mask.width, mask.height);
     });
-  } catch (_) { /* if a frame fails, keep reusing the latest mask */ }
+  } catch (_) {
+    if (SEG_SMALL && ++segBadRun > 40) switchToCpuDelegate();
+  }
+  segCost = segCost * 0.8 + (performance.now() - t0) * 0.2;
 }
 
-// Segment on real video frames (decoupled from the render loop). If the
-// mask lags, the render loop simply keeps reusing the latest uploaded mask.
+// Inference must never own the main thread: it runs on its own timer, outside
+// rAF/rVFC (the old per-video-frame loop meant up to 60 inferences/s on
+// phones). Desktop runs ~30 Hz; slow phones back off up to 250 ms and the
+// render loop simply keeps reusing the latest uploaded mask.
+let segLoopStarted = false;
 function startSegLoop() {
-  if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
-    const tick = () => {
-      if (!params.pause) runSegmentation();
-      video.requestVideoFrameCallback(tick);
-    };
-    video.requestVideoFrameCallback(tick);
-  } else {
-    let lastT = -1;
-    const tick = () => {
-      if (!params.pause && video.currentTime !== lastT) {
-        lastT = video.currentTime;
-        runSegmentation();
-      }
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  }
+  if (segLoopStarted) return;   // startCamera can retry — never double-start
+  segLoopStarted = true;
+  const tick = () => {
+    if (!params.pause && !document.hidden) runSegmentation();
+    const interval = SEG_SMALL ? Math.max(33, Math.min(250, segCost * 1.7)) : 33;
+    setTimeout(tick, interval);
+  };
+  tick();
 }
 
 /* ========================================================================
@@ -836,9 +892,10 @@ function frame(now) {
   // readout ~2 Hz
   if (now - lastReadout > 500) {
     lastReadout = now;
+    const maskOn = maskReady && !modelFailed;
     $("readout").textContent =
       `fps ${fpsEMA.toFixed(0).padStart(3)}  ·  ${canvas.width}×${canvas.height}` +
-      `  ·  mask: ${maskReady && !modelFailed ? "on" : "off"}`;
+      `  ·  mask: ${maskOn ? `on (${segDelegate} ${segCost.toFixed(0)}ms)` : "off"}`;
   }
   requestAnimationFrame(frame);
 }
