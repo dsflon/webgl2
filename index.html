@@ -1,0 +1,487 @@
+<!doctype html>
+<!--
+  index.html — 作品一覧ギャラリー「黒の展示室」(docs/gallery_plan.md)
+
+  データ: works.json(単一の情報源。日付降順で描画)
+  サムネ: thumbs/<slug>.jpg(800x500 JPEG。tools/thumbs.mjs で再現可能に生成)
+
+  作品を追加するとき:
+    1. works.json に1エントリ追記(slug/file/title/date/desc/model/tags/series/thumb)
+    2. node tools/thumbs.mjs <slug> でサムネ生成(要 http://localhost:8888)
+    3. README.md にもリンク1行(リポジトリの目次として併存)
+    ※ 下の <noscript> のリンク一覧にも1行足すとJS無効環境でも辿れる(任意)
+
+  背景演出「展示室の光と塵」: WebGL2 の単一フルスクリーンパス。
+    - 左上からの光の帯(スクロールで後退・減衰)
+    - セルハッシュ由来の塵(curl風ドリフト、帯の中でだけ輝く。ほぼ白+淡ティール/淡金)
+    - ポインタ周りの小さな渦
+    - prefers-reduced-motion: 静止1フレーム / document.hidden: 停止
+    - WebGL2 不可・context lost: キャンバスを消して CSS 地のみ(機能は完全維持)
+    - 乱数シードはセル座標由来のみ(時間シード禁止 — 作品と同じ規律)
+-->
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>WEBGL2 — Realtime Webcam Art Works</title>
+    <meta name="description" content="Webカメラの映像がリアルタイムに絵画・煙・花・金モザイクになる WebGL2 作品集。" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="WEBGL2 — Realtime Webcam Art Works" />
+    <meta property="og:description" content="Webカメラの映像がリアルタイムに絵画・煙・花・金モザイクになる WebGL2 作品集。" />
+    <meta property="og:url" content="https://dsflon.github.io/webgl2/" />
+    <meta property="og:image" content="https://dsflon.github.io/webgl2/thumbs/fable5_mosaic.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0b0e'/%3E%3Cpath d='M32 10 L52 32 L32 54 L12 32 Z' fill='%23d9a83c'/%3E%3Cpath d='M32 16 L46 32 L32 48 L18 32 Z' fill='%23f0cf7a'/%3E%3C/svg%3E" />
+    <style>
+      :root {
+        --bg: #0a0b0e;
+        --surface: #14161b;
+        --line: rgba(255, 255, 255, 0.07);
+        --ink: #e8ecf0;
+        --muted: #97a0ad;
+        --accent: #6ee7dc;
+        --gold: #d9a83c;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: var(--bg);
+        background-image: radial-gradient(1200px 700px at 18% -8%, #12141c 0%, var(--bg) 55%);
+        color: var(--ink);
+        font-family: system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        letter-spacing: 0.08em;
+      }
+      #dust {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+        pointer-events: none;
+      }
+      .wrap {
+        position: relative;
+        z-index: 1;
+        max-width: 1240px;
+        margin: 0 auto;
+        padding: 0 20px 64px;
+      }
+      /* ---- hero ---- */
+      header {
+        padding: 88px 0 44px;
+      }
+      .kicker {
+        font-size: 11px;
+        color: var(--accent);
+        letter-spacing: 0.34em;
+        margin: 0 0 14px;
+      }
+      h1 {
+        font-size: clamp(26px, 4.6vw, 44px);
+        font-weight: 650;
+        letter-spacing: 0.02em;
+        margin: 0 0 14px;
+        line-height: 1.25;
+      }
+      .statement {
+        font-size: 13.5px;
+        color: var(--muted);
+        max-width: 46em;
+        margin: 0 0 10px;
+      }
+      .heromata {
+        font-size: 10.5px;
+        color: var(--muted);
+        opacity: 0.85;
+      }
+      /* ---- grid ---- */
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 20px;
+      }
+      /* ---- card ---- */
+      .card {
+        display: block;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        text-decoration: none;
+        color: inherit;
+        transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+      }
+      .card:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+      .thumb {
+        aspect-ratio: 16 / 10;
+        overflow: hidden;
+        background: #0d0f13;
+      }
+      .thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        transition: transform 0.35s ease;
+      }
+      .body { padding: 14px 16px 15px; }
+      .meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 10px;
+        color: var(--muted);
+        margin: 0 0 7px;
+      }
+      .badge-new {
+        color: #08221f;
+        background: var(--accent);
+        border-radius: 999px;
+        padding: 1px 7px;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+      }
+      .title {
+        font-size: 15.5px;
+        font-weight: 640;
+        margin: 0 0 2px;
+        letter-spacing: 0.01em;
+      }
+      .slug {
+        font-size: 9.5px;
+        color: var(--muted);
+        opacity: 0.75;
+        margin: 0 0 8px;
+      }
+      .desc {
+        font-size: 12.5px;
+        color: var(--muted);
+        margin: 0 0 11px;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        min-height: 2.6em;
+      }
+      .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+      .tag {
+        font-size: 9px;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 2px 8px;
+      }
+      @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+        .card:hover {
+          transform: translateY(-4px);
+          border-color: rgba(110, 231, 220, 0.45);
+          box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+        }
+        .card:hover .thumb img { transform: scale(1.03); }
+      }
+      /* ---- footer ---- */
+      footer {
+        margin-top: 56px;
+        padding-top: 22px;
+        border-top: 1px solid var(--line);
+        font-size: 10.5px;
+        color: var(--muted);
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      footer a { color: var(--accent); text-decoration: none; }
+      footer a:hover { text-decoration: underline; }
+      noscript ul { columns: 2; font-size: 13px; }
+      @media (max-width: 640px) {
+        header { padding: 56px 0 30px; }
+        noscript ul { columns: 1; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .card, .thumb img { transition: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="dust" aria-hidden="true"></canvas>
+
+    <div class="wrap">
+      <header>
+        <p class="kicker mono">WEBGL2 — REALTIME WEBCAM ART</p>
+        <h1>カメラの前に立つと、<br />あなたが作品になる。</h1>
+        <p class="statement">
+          Webカメラの映像がリアルタイムに絵画・煙・花・黄金モザイクへ変わる、
+          単一HTMLの WebGL2 作品集。生成AIとの対話だけで制作しています。
+        </p>
+        <p class="heromata mono">
+          <span id="count">…</span> WORKS · 📷 各作品はWebカメラを使用します(映像は端末外に送信されません)
+        </p>
+      </header>
+
+      <main>
+        <div id="grid" class="grid" aria-label="作品一覧"></div>
+        <noscript>
+          <p>JavaScript が無効のため簡易リストを表示しています。</p>
+          <ul>
+            <li><a href="fable5_mosaic.html">黄金地モザイク</a></li>
+            <li><a href="fable5_flower-being.html">フラワービーイング</a></li>
+            <li><a href="fable5_smoke-portrait.html">スモークポートレート</a></li>
+            <li><a href="fable5_gas-head.html">ガスヘッド</a></li>
+            <li><a href="fable5_depth-suibokuga.html">深度水墨画</a></li>
+            <li><a href="fable5_blue-dissolve.html">ブルーディゾルブ</a></li>
+            <li><a href="sakana_papercraft-cam.html">ペーパークラフトカム(Sakana)</a></li>
+            <li><a href="fable5_papercraft-cam.html">ペーパークラフトカム</a></li>
+            <li><a href="fable5_van-gogh.html">ゴッホカム</a></li>
+            <li><a href="fable5_water-cam.html">ウォーターカム</a></li>
+            <li><a href="fable5_typo-cam.html">タイポカム</a></li>
+            <li><a href="fable5_scribble-cam.html">スクリブルカム</a></li>
+            <li><a href="fable5_oneline-cam.html">ワンラインカム</a></li>
+            <li><a href="van-gogh_sakana.html">ゴッホ(Sakana)</a></li>
+            <li><a href="ascii_sakana.html">ASCII(Sakana)</a></li>
+            <li><a href="ascii_opus4_8.html">ASCII(Opus)</a></li>
+            <li><a href="suibokuga_sakana.html">水墨画(Sakana)</a></li>
+            <li><a href="suibokuga_opus4_8.html">水墨画(Opus)</a></li>
+            <li><a href="iwashi_ball_sakanaai.html">イワシボール(Sakana)</a></li>
+            <li><a href="iwashi_ball_opus4_8.html">イワシボール(Opus)</a></li>
+            <li><a href="suibokuga_particle.html">水墨画パーティクル</a></li>
+            <li><a href="suibokuga_fluid.html">水墨画フルイド</a></li>
+            <li><a href="overflowing_aura_4taigyo_v2.html">湧き出るオーラ 四大魚 v2</a></li>
+            <li><a href="overflowing_aura_4taigyo.html">湧き出るオーラ 四大魚</a></li>
+            <li><a href="overflowing_aura.html">湧き出るオーラ</a></li>
+            <li><a href="live_portrait_in_flux.html">Live Portrait in Flux</a></li>
+            <li><a href="ds_voice.html">DS Voice</a></li>
+            <li><a href="ds.html">DS</a></li>
+            <li><a href="dogra-magra.html">ドグラ・マグラ</a></li>
+          </ul>
+        </noscript>
+      </main>
+
+      <footer>
+        <span>© dsflon — WebGL2 realtime webcam art works</span>
+        <a href="https://github.com/dsflon/webgl2">GitHub / dsflon/webgl2</a>
+      </footer>
+    </div>
+
+    <script>
+      "use strict";
+
+      /* ================= card grid (works.json driven) ================= */
+
+      const NEW_DAYS = 14;
+
+      function esc(s) {
+        return String(s).replace(/[&<>"]/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]),
+        );
+      }
+
+      async function renderGrid() {
+        const grid = document.getElementById("grid");
+        let works;
+        try {
+          const res = await fetch("works.json", { cache: "no-cache" });
+          works = await res.json();
+        } catch (e) {
+          grid.innerHTML =
+            '<p style="color:var(--muted)">作品リストを読み込めませんでした。' +
+            '<a style="color:var(--accent)" href="https://github.com/dsflon/webgl2">GitHub のREADME</a> をご覧ください。</p>';
+          return;
+        }
+        works.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+        document.getElementById("count").textContent = works.length;
+
+        const now = Date.now();
+        const frag = document.createDocumentFragment();
+        for (const w of works) {
+          const isNew = now - new Date(w.date + "T00:00:00Z").getTime() < NEW_DAYS * 864e5;
+          const a = document.createElement("a");
+          a.className = "card";
+          a.href = w.file;
+          a.innerHTML =
+            '<div class="thumb"><img loading="lazy" decoding="async" width="800" height="500" ' +
+            `src="${esc(w.thumb)}" alt="${esc(w.title)} のスクリーンショット"></div>` +
+            '<div class="body">' +
+            `<p class="meta mono">${esc(w.date)}${isNew ? ' <span class="badge-new">NEW</span>' : ""}</p>` +
+            `<h2 class="title">${esc(w.title)}</h2>` +
+            `<p class="slug mono">${esc(w.slug)}</p>` +
+            `<p class="desc">${esc(w.desc)}</p>` +
+            `<div class="tags">${(w.tags || [])
+              .map((t) => `<span class="tag mono">${esc(t)}</span>`)
+              .join("")}</div>` +
+            "</div>";
+          frag.appendChild(a);
+        }
+        grid.appendChild(frag);
+      }
+      renderGrid();
+
+      /* ============ background: 展示室の光と塵 (WebGL2, 1 pass) ============ */
+
+      (() => {
+        const canvas = document.getElementById("dust");
+        const gl = canvas.getContext("webgl2", {
+          alpha: true,
+          antialias: false,
+          depth: false,
+          preserveDrawingBuffer: false,
+        });
+        const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (!gl) { canvas.remove(); return; }
+        canvas.addEventListener("webglcontextlost", () => canvas.remove());
+
+        const VS = `#version 300 es
+          void main() {
+            vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+            gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+          }`;
+        const FS = `#version 300 es
+          precision highp float;
+          out vec4 o;
+          uniform vec2 uRes;
+          uniform float uTime;    // 0 when reduced-motion
+          uniform float uScroll;  // scrollY / viewportH
+          uniform vec2 uMouse;    // px, smoothed
+          uniform float uMouseW;  // 0..1 pointer presence
+
+          float h21(vec2 p) {
+            vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            q += dot(q, q.yzx + 33.33);
+            return fract((q.x + q.y) * q.z);
+          }
+
+          // one dust layer: each grid cell owns one mote (seeded by cell coords
+          // only). Motes drift on slow per-cell sine orbits + a global updraft.
+          float dust(vec2 px, float cell, float t, float par, out float hue) {
+            vec2 g = (px + vec2(t * 5.0, t * 9.0) * par) / cell;
+            vec2 id = floor(g);
+            float rnd = h21(id);
+            hue = h21(id + 71.3);
+            vec2 c = vec2(h21(id + 13.7), h21(id + 41.2));
+            c += 0.22 * vec2(sin(t * (0.25 + rnd * 0.4) + rnd * 6.28),
+                             cos(t * (0.21 + rnd * 0.33) + rnd * 4.1));
+            float d = length((fract(g) - c) * cell);
+            float r = 0.9 + rnd * 1.6;                 // px radius
+            float m = exp(-d * d / (r * r));
+            return m * step(0.45, rnd);                // ~55% of cells hold a mote
+          }
+
+          void main() {
+            vec2 px = gl_FragCoord.xy;                 // origin bottom-left
+            vec2 uv = px / uRes;
+            float vh = uRes.y;
+
+            // pointer swirl: rotate the sampling frame around the cursor
+            vec2 mpx = vec2(uMouse.x, uRes.y - uMouse.y);
+            vec2 dm = px - mpx;
+            float md = length(dm) / (0.22 * max(uRes.x, uRes.y));
+            float sw = uMouseW * 0.55 * exp(-md * md);
+            float cs = cos(sw), sn = sin(sw);
+            vec2 spx = mpx + mat2(cs, -sn, sn, cs) * dm;
+
+            // light shaft from upper-left, receding with scroll
+            vec2 dir = normalize(vec2(0.42, -1.0));    // down-right
+            vec2 org = vec2(uRes.x * (0.16 - uScroll * 0.10),
+                            uRes.y * (1.0 + uScroll * 0.55));
+            vec2 rel = px - org;
+            float along = dot(rel, dir);
+            float perp = dot(rel, vec2(-dir.y, dir.x));
+            float width = uRes.x * 0.16 + along * 0.22;
+            float shaft = exp(-perp * perp / (width * width))
+                        * smoothstep(-vh * 0.1, vh * 0.45, along)
+                        * exp(-along / (vh * 1.35));
+            shaft *= exp(-uScroll * 1.15);             // fades as you walk deeper
+            // airy shimmer inside the beam
+            shaft *= 0.82 + 0.18 * sin(perp / width * 3.0 + uTime * 0.4);
+
+            // three parallax dust layers, lit mostly inside the shaft
+            float hue, b = 0.0; vec3 col = vec3(0.0);
+            const vec3 WHITE = vec3(0.92, 0.95, 1.0);
+            const vec3 TEAL  = vec3(0.43, 0.91, 0.86);
+            const vec3 GOLD  = vec3(0.95, 0.79, 0.42);
+            for (int i = 0; i < 3; i++) {
+              float fi = float(i);
+              float cell = 90.0 - fi * 26.0;           // 90 / 64 / 38 px
+              float par = 0.5 + fi * 0.45;
+              float m = dust(spx + fi * 517.0, cell, uTime, par, hue);
+              vec3 tint = hue < 0.12 ? TEAL : hue < 0.24 ? GOLD : WHITE;
+              float vis = 0.10 + 0.90 * shaft;         // faint ambient, bright in beam
+              col += tint * m * vis * (0.35 + 0.2 * fi);
+              b += m;
+            }
+
+            // the beam itself: a whisper of volume
+            col += vec3(0.99, 0.98, 0.92) * shaft * 0.045;
+
+            float a = clamp(max(max(col.r, col.g), col.b), 0.0, 0.5);
+            o = vec4(col, a);
+          }`;
+
+        function compile(type, src) {
+          const s = gl.createShader(type);
+          gl.shaderSource(s, src);
+          gl.compileShader(s);
+          if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+          return s;
+        }
+        let prog;
+        try {
+          prog = gl.createProgram();
+          gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+          gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+          gl.linkProgram(prog);
+          if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+        } catch (e) { canvas.remove(); return; }
+        gl.useProgram(prog);
+        const U = {};
+        for (const n of ["uRes", "uTime", "uScroll", "uMouse", "uMouseW"])
+          U[n] = gl.getUniformLocation(prog, n);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+        const DPR = Math.min(devicePixelRatio || 1, 1.5);
+        function resize() {
+          canvas.width = Math.round(innerWidth * DPR);
+          canvas.height = Math.round(innerHeight * DPR);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+        resize();
+        addEventListener("resize", resize);
+
+        let mx = innerWidth * 0.5, my = innerHeight * 0.3, tx = mx, ty = my, mw = 0, tw = 0;
+        addEventListener("pointermove", (e) => { tx = e.clientX; ty = e.clientY; tw = 1; }, { passive: true });
+        addEventListener("pointerleave", () => { tw = 0; });
+
+        let raf = 0;
+        const t0 = performance.now();
+        function frame(now) {
+          mx += (tx - mx) * 0.06; my += (ty - my) * 0.06; mw += (tw - mw) * 0.04;
+          gl.uniform2f(U.uRes, canvas.width, canvas.height);
+          gl.uniform1f(U.uTime, reduced ? 0 : (now - t0) / 1000);
+          gl.uniform1f(U.uScroll, scrollY / Math.max(innerHeight, 1));
+          gl.uniform2f(U.uMouse, mx * DPR, my * DPR);
+          gl.uniform1f(U.uMouseW, mw);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+          if (!reduced) raf = requestAnimationFrame(frame);
+        }
+        raf = requestAnimationFrame(frame);
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) cancelAnimationFrame(raf);
+          else if (!reduced) raf = requestAnimationFrame(frame);
+        });
+        if (reduced) addEventListener("scroll", () => requestAnimationFrame(frame), { passive: true });
+      })();
+    </script>
+  </body>
+</html>
