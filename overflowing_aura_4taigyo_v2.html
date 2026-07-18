@@ -164,6 +164,35 @@
         background: #5599ff;
         box-shadow: 0 0 8px #5599ff;
       }
+      .camswitch {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        z-index: 12;
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        color: var(--fg);
+        background: rgba(20, 22, 28, 0.62);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+        padding: 8px 14px;
+        cursor: pointer;
+        opacity: 0;
+        pointer-events: none;
+        transition:
+          opacity 0.4s ease,
+          background 0.2s ease;
+        -webkit-backdrop-filter: blur(6px);
+        backdrop-filter: blur(6px);
+      }
+      .camswitch.show {
+        opacity: 0.9;
+        pointer-events: auto;
+      }
+      .camswitch:hover {
+        background: rgba(40, 44, 54, 0.85);
+      }
     </style>
   </head>
   <body>
@@ -177,6 +206,9 @@
     <div class="nen-state" id="nenState"></div>
     <div class="nen-flash" id="nenFlash"></div>
     <div class="voice-dot" id="voiceDot"></div>
+    <button class="camswitch" id="camSwitch" type="button" aria-label="カメラ切替">
+      ⇄ カメラ切替
+    </button>
 
     <div class="panel" id="panel">
       <div class="box">
@@ -224,6 +256,47 @@
       let segmenter = null;
       let poseLandmarker = null;
       let wristUV = null;
+
+      /* Camera facing + mirror. Front(user) = mirrored selfie view (the
+         original behavior). Rear(environment) = un-mirrored (真の向き).
+         `mirror` is threaded into every place the feed is flipped, so with
+         mirror=true the pipeline is byte-identical to before this change. */
+      let facing = "user";
+      let mirror = true;
+      let switchingCam = false;
+
+      async function openCamera() {
+        if (video.srcObject) {
+          for (const t of video.srcObject.getTracks()) t.stop();
+          video.srcObject = null;
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: facing },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+      }
+
+      async function switchCamera() {
+        if (switchingCam || !started) return;
+        switchingCam = true;
+        const pf = facing,
+          pm = mirror;
+        facing = facing === "user" ? "environment" : "user";
+        mirror = facing === "user";
+        try {
+          await openCamera();
+        } catch (e) {
+          facing = pf;
+          mirror = pm;
+          try {
+            await openCamera();
+          } catch {}
+          console.warn("camera switch failed", e);
+        }
+        switchingCam = false;
+      }
 
       /* ---- Mobile detection recipe (from fable5_gas-head.html) ----
          Coarse-pointer devices run MediaPipe on a ≤288px copy of the frame,
@@ -508,6 +581,7 @@ uniform sampler2D u_vel;
 uniform sampler2D u_person;
 uniform float     u_screenAR;
 uniform float     u_camAR;
+uniform float     u_mirror;
 out vec4 o;
 
 vec2 coverUV(vec2 uv) {
@@ -522,7 +596,8 @@ void main() {
   float mask  = texture(u_person, vec2(camUV0.x, 1.0 - camUV0.y)).a;
   float distort = mix(0.20, 0.04, mask);
   vec2 camUV  = camUV0 + vel * distort;
-  vec2 vUV    = vec2(1.0 - clamp(camUV.x, 0.0, 1.0), 1.0 - clamp(camUV.y, 0.0, 1.0));
+  float mvx   = mix(clamp(camUV.x, 0.0, 1.0), 1.0 - clamp(camUV.x, 0.0, 1.0), u_mirror);
+  vec2 vUV    = vec2(mvx, 1.0 - clamp(camUV.y, 0.0, 1.0));
   o = vec4(texture(u_video, vUV).rgb, 1.0);
 }`;
 
@@ -874,6 +949,9 @@ void main() {
 
       let started = false;
       document.getElementById("startBtn").addEventListener("click", start);
+      document
+        .getElementById("camSwitch")
+        .addEventListener("click", switchCamera);
 
       async function start() {
         if (started) return;
@@ -922,14 +1000,10 @@ void main() {
             console.warn("overflowing_aura: pose unavailable — hand focus disabled", e);
           }
 
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 640, height: 480, facingMode: "user" },
-            audio: false,
-          });
-          video.srcObject = stream;
-          await video.play();
+          await openCamera();
 
           document.getElementById("panel").classList.add("hide");
+          document.getElementById("camSwitch").classList.add("show");
           setTimeout(
             () => (document.getElementById("hint").style.opacity = 0),
             4000,
@@ -1129,7 +1203,7 @@ void main() {
                     }
                   : (p16 ?? null);
               if (raw) {
-                const cx = 1 - raw.x;
+                const cx = mirror ? 1 - raw.x : raw.x;
                 const cy = 1 - raw.y;
                 const sar = innerWidth / innerHeight;
                 if (sar >= vAspect) {
@@ -1151,10 +1225,15 @@ void main() {
           }
           const mask = latestMask;
 
-          /* Mirror the image (selfie convention) */
+          /* Mirror the image for the selfie (front) camera; draw the rear
+             camera as-is (真の向き) */
           srcCtx.save();
-          srcCtx.scale(-1, 1);
-          srcCtx.drawImage(video, -GRID_W, 0, GRID_W, GRID_H);
+          if (mirror) {
+            srcCtx.scale(-1, 1);
+            srcCtx.drawImage(video, -GRID_W, 0, GRID_W, GRID_H);
+          } else {
+            srcCtx.drawImage(video, 0, 0, GRID_W, GRID_H);
+          }
           srcCtx.restore();
           const img = srcCtx.getImageData(0, 0, GRID_W, GRID_H).data;
 
@@ -1164,9 +1243,10 @@ void main() {
             for (let gx = 0; gx < GRID_W; gx++) {
               let mv = 0.0;
               if (mask) {
+                const fx = mirror ? GRID_W - 1 - gx : gx;
                 const sx = Math.min(
                   mw - 1,
-                  (((GRID_W - 1 - gx + 0.5) / GRID_W) * mw) | 0,
+                  (((fx + 0.5) / GRID_W) * mw) | 0,
                 );
                 const sy = Math.min(mh - 1, (((gy + 0.5) / GRID_H) * mh) | 0);
                 mv = mask[sy * mw + sx];
@@ -1604,6 +1684,7 @@ void main() {
           gl.uniform1i(progBackground.u.u_person, 2);
           gl.uniform1f(progBackground.u.u_screenAR, innerWidth / innerHeight);
           gl.uniform1f(progBackground.u.u_camAR, vAspect);
+          gl.uniform1f(progBackground.u.u_mirror, mirror ? 1 : 0);
           drawQuad();
 
           /* 2. Aura fluid — additive blend → smooth glow */
