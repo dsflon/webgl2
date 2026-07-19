@@ -1359,7 +1359,7 @@
             gl.uniform2f(u.uTexel, texel[0], texel[1]);
           });
           // S4 Jacobi ×N (warm start: previous frame's pressure remains)
-          for (let i = 0; i < JACOBI_ITERS; i++) {
+          for (let i = 0; i < jIters; i++) {
             const src = prsPing ? targets.prsB : targets.prsA;
             const dst = prsPing ? targets.prsA : targets.prsB;
             renderPass(dst, programs.jacobi, () => {
@@ -1414,7 +1414,7 @@
             // The full-res composite is skipped until the roll completes —
             // software-GL verification environments pay dearly for it.
             const steps = Math.min(PREROLL_CHUNK, preRoll);
-            for (let i = 0; i < steps; i++) simStep(1 / 60);
+            for (let i = 0; i < steps; i++) simStep(1 / 60, PREROLL_JACOBI);
             preRoll -= steps;
             // never leave a sim FBO (RGBA16F) bound across the early return:
             // an external readPixels(RGBA/UNSIGNED_BYTE) — SAVE PNG, the
