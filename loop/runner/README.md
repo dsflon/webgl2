@@ -53,6 +53,13 @@ node selftest.mjs --skip-runtime
 `longrunStability`(`--longrun` 指定時。freeze を外し 4s/15s の全画面輝度で
 whiteout/発散を弾く: late mean ≤200・白画素 ≤5%・+50 超の上昇で 165 を超えない)。
 
+**無入力プロファイル**(2026-07-19 人間承認のメタループ改訂): 完全ジェネラティブ作品は
+`<meta name="art-input" content="none">` を宣言することで、カメラ関連規約のみ免除される
+— static: `camera.facingMode` / `camera.error_paths` / 規約ID `#video` `#retryCamera`、
+runtime: `cameraDenied`(skipped と記録)。使われないカメラエラー文字列の埋め込み(=偽装)を
+要求しないための改訂で、他の規約・検査は全作品共通のまま。カメラを使う作品がこの
+マーカーを付けるのは偽装であり禁止。
+
 > **メタループ #1**(blue-dissolve パイロット, PR #9): 「動きに反応する」型の時間的不変量は
 > 静止スクショの V2 では原理的に判定できず、2回連続の偽不合格を生んだ。対処として
 > 時間的挙動の担保を V1 `motionResponse` に格上げし、V2(checker_prompt.md)には

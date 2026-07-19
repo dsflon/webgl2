@@ -183,6 +183,12 @@ export async function verifyRuntime(url, opts = {}) {
     } catch {
       ready = false;
     }
+
+    // no-input profile (2026-07-19 人間承認のメタループ改訂): 無入力作品は
+    // <meta name="art-input" content="none"> を宣言し、camera-denied パスを免除
+    const noInput = await page
+      .evaluate(() => document.querySelector('meta[name="art-input"]')?.content === "none")
+      .catch(() => false);
     add("ready", ready, ready ? `__artReady within ${timeout}ms` : `__artReady NOT set within ${timeout}ms — 起動失敗か検証フック未実装`);
 
     if (ready) {
@@ -286,21 +292,25 @@ export async function verifyRuntime(url, opts = {}) {
     await page.close();
 
     // ---- camera-denied pass ----
-    const page2 = await browser.newPage({ viewport: { width: 900, height: 700 } });
-    await page2.addInitScript(deniedCameraInit);
-    await page2.goto(url);
-    await page2.waitForTimeout(2500);
-    const denied = await page2.evaluate(() => ({
-      shown: !document.getElementById("overlay").classList.contains("hidden"),
-      title: document.getElementById("overlayTitle").textContent,
-      retry: !document.getElementById("retryCamera").hidden,
-    }));
-    add(
-      "cameraDenied",
-      denied.shown && /PERMISSION/i.test(denied.title) && denied.retry,
-      `overlay=${denied.shown} title="${denied.title}" retry=${denied.retry}`,
-    );
-    await page2.close();
+    if (noInput) {
+      add("cameraDenied", true, "skipped: art-input=none(無入力作品プロファイル)");
+    } else {
+      const page2 = await browser.newPage({ viewport: { width: 900, height: 700 } });
+      await page2.addInitScript(deniedCameraInit);
+      await page2.goto(url);
+      await page2.waitForTimeout(2500);
+      const denied = await page2.evaluate(() => ({
+        shown: !document.getElementById("overlay").classList.contains("hidden"),
+        title: document.getElementById("overlayTitle").textContent,
+        retry: !document.getElementById("retryCamera").hidden,
+      }));
+      add(
+        "cameraDenied",
+        denied.shown && /PERMISSION/i.test(denied.title) && denied.retry,
+        `overlay=${denied.shown} title="${denied.title}" retry=${denied.retry}`,
+      );
+      await page2.close();
+    }
   } finally {
     await browser.close();
   }

@@ -47,6 +47,13 @@ export function verifyStatic(source) {
   const warn = (path, rule, message, hint, line) =>
     findings.push({ path, rule, severity: "warning", message, hint, line });
 
+  // --- no-input profile (2026-07-19 人間承認のメタループ改訂) ---
+  // 無入力(完全ジェネラティブ)作品は <meta name="art-input" content="none"> を
+  // 宣言することで、カメラ関連規約(facingMode / 3エラー経路 / #video / #retryCamera)
+  // のみ免除される。使われないカメラエラー文字列の埋め込み(=偽装)を要求しないため。
+  // それ以外の規約(hooks / DPR / overlay / reduced-motion 等)は全作品共通。
+  const noInput = /<meta\s+name=["']art-input["']\s+content=["']none["']/i.test(source);
+
   // --- header comment: the 5 mandatory sections (repo constraint block) ---
   const headerMatch = source.match(/<!--([\s\S]*?)-->/);
   const header = headerMatch ? headerMatch[1] : "";
@@ -84,10 +91,9 @@ export function verifyStatic(source) {
     "overlay",
     "overlayTitle",
     "overlayText",
-    "retryCamera",
+    ...(noInput ? [] : ["retryCamera", "video"]),
     "readout",
     "panel",
-    "video",
   ];
   for (const id of REQUIRED_IDS) {
     if (!new RegExp(`id=["']${id}["']`).test(source)) {
@@ -130,12 +136,16 @@ export function verifyStatic(source) {
       "devicePixelRatio の上限(Math.min(2, dpr))がありません",
       "モバイルでの過負荷防止。resize 処理で DPR を 2 に制限してください",
     ],
-    [
-      /facingMode/,
-      "camera.facingMode",
-      "getUserMedia の facingMode 指定がありません",
-      "facingMode: 'user'|'environment' を指定し、モバイルで切替ボタンを出してください",
-    ],
+    ...(noInput
+      ? []
+      : [
+          [
+            /facingMode/,
+            "camera.facingMode",
+            "getUserMedia の facingMode 指定がありません",
+            "facingMode: 'user'|'environment' を指定し、モバイルで切替ボタンを出してください",
+          ],
+        ]),
     [
       /window\.__artReady\s*=\s*true/,
       "hook.artReady",
@@ -160,7 +170,7 @@ export function verifyStatic(source) {
   }
 
   // --- the 3 camera error paths (fixture-derived message keys) ---
-  for (const key of ["SECURE CONTEXT", "PERMISSION DENIED", "NO CAMERA"]) {
+  for (const key of noInput ? [] : ["SECURE CONTEXT", "PERMISSION DENIED", "NO CAMERA"]) {
     if (!source.includes(key)) {
       err(
         "camera.errorPaths",
