@@ -1,0 +1,2228 @@
+<!doctype html>
+<!--
+  fable5_kotonoha-shigure.html — WebGL2「言の葉時雨(Words-Rain of Ink)」— マイク入力
+
+  概要:
+  マイクで集めた音が墨の活字になって画面上部から降ってくる作品。声が取れれば言葉
+  (Web Speech API — 対応環境のみの上乗せ層)、環境音は「ザー」「ゴロゴロ」「ポツ」等の
+  オノマトペになる。文字は剛体として落下・衝突・回転しながら物理演算で積もり、着地の
+  瞬間に墨が和紙ににじむ(潤)。時間が経つと定着し(渇)、古い層ほど圧密されて濃く沈み、
+  字形を失って墨痕に風化する。堆積が画面を満たすと風がひと払いして白紙に戻り、また
+  最初から始まる。本質:「言葉=墨=時間とともに沈殿する無常」。
+  <meta name="art-input" content="mic"> 宣言(カメラ不使用のマイク入力プロファイル)。
+  マイクが拒否/不在/非セキュアでも作品は死なない: 専用メッセージ+再試行ボタンを
+  出しつつ、背後でデモ時雨(手続き的なまばらなオノマトペ)が降り続ける。
+
+  実行方法:
+    python3 -m http.server 8888 → http://localhost:8888/fable5_kotonoha-shigure.html
+    (マイク許可を求めるオーバーレイが出る。「マイクなしで眺める」でデモ時雨モード)
+    ?fakesource=1 … WebAudio・マイクを一切開かず、決定的スクリプトの音イベント列
+                    (固定シーケンス: onset 時刻・音量・重心・語)で全パイプラインを駆動。
+                    常に一定間隔で文字が降り続ける(時間軸検証 --motion の前提)。
+    ?freeze=1     … 決定的静止フレーム: 固定 dt=1/60 でスクリプトイベント列を 1020 ステップ事前ロールして「積もった状態」を作り dt=0(シードは全て
+                    イベント連番・セル座標。時間をシードに混ぜない)。
+    デバッグ表示: 0=最終 1=物理(ボディ矩形ワイヤ+高さ場の線) 2=蓄積レイヤ raw
+                  (R=墨 G=定着年齢 B=朱) 3=音特徴量メータ(RMS・重心・ZCR・onset・
+                  書体クラス。fakesource ではスクリプト値。選択中の語は readout に表示)
+                  4=標本(紙地見本+墨の oklab ランプ+にじみ前後のグリフ標本+朱)
+
+  様式解析の要約(視覚的不変量。優先度 2 > 4 > 1 > 3 > 5 > 6):
+    2. 剛体堆積(場/時間) — 文字=回転つき矩形ボディの CPU 剛体物理(重力+空気抵抗+
+       ボディ間円衝突+カラム高さ場衝突+スリープ)。貫通・永久振動なし。静定したら
+       蓄積レイヤへ転写してボディ除去(アクティブ上限 200、総物量はレイヤに逃がして有界)。
+    4. 音駆動の発生(時間/知覚) — AnalyserNode から RMS・スペクトル重心・ゼロ交差率を
+       毎フレーム ema 平滑。onset はヒステリシス+リフラクトリ。音量→サイズ、
+       プロソディ→書体と朱。無音時は新規発生が止まり塵だけが漂う。
+    1. 和紙と墨と朱(色/物質) — 地= fbm の繊維流れ+漉きムラ+周縁の焼け。図=
+       oklab 無彩軸で紙色→淡墨→濃墨。彩色は高興奮イベントのみの朱ただ一色。
+       純白飛び(≤0.93)・純黒つぶれ(≥0.045)をしない。
+    3. にじみ→定着→風化(物質/時間) — 着地でレイヤへスタンプ(G=freshness)。
+       毎ステップ、繊維方向の異方性拡散を若い墨ほど強くかけ「潤→渇」を作る。
+       埋没深さ(高さ場との差)でコントラスト低下+濃度沈降(上限 0.85)=風化。
+    5. 風のひと払い(時間/場) — 高さ場の閾値到達で全ボディへ横風インパルス、
+       レイヤは横スミア+フェードで数秒かけ白紙化、高さ場ゼロ。輝度・物量は常に clamp。
+    6. オノマトペの運動翻訳(マーク/時間) — ザー=細く軽く速い斜め/ゴロゴロ=太く重く
+       転がる/ポツ=小さく単発/サラサラ=軽く漂う。種別ごとに初速・角速度・質量・
+       摩擦・字重(書体クラス)のプリセット。種別は音特徴量(持続・強度・ノイズ性)から。
+
+  パイプライン図(蓄積レイヤは ping-pong RGBA8・全画面 DPR≤2。高さ場は CPU 配列
+  192 カラム — readPixels は毎フレーム呼ばない):
+    [CPU audio  ] AnalyserNode(fft2048) → RMS/重心/ZCR → ema → onset(ヒステリシス)
+                  (fakesource: 決定的イベント列 / デモ時雨: 手続き列 — 同じ発生 API)
+    [CPU physics] 固定 substep 1/60(≤4/フレーム)。文字ボディ ≤200 → 高さ場衝突+
+                  空中の簡易円衝突+スリープ →[stamp]→ 高さ場更新+なだれ緩和
+    [P1 update  ] layerA + hTex(192×1 R8) → layerB   にじみ(繊維方向の異方性 4tap、
+                  freshness ゲート)+風化(埋没依存)+払いスミア/フェード+clamp
+    [P2 stamp   ] 着地ボディの instanced quad → layerB(加算ブレンド。イベント時のみ)
+    [P3 composite] layerB, hTex, atlas → canvas       紙 fbm × oklab 墨ランプ × 朱 +
+                  塵 + 周縁の焼け + uDebug 0..4
+    [P4 bodies  ] instanced quad(グリフアトラス 2048²・セル128・LRU≤256)→ canvas
+                  落下中はシャープな活字(uDebug 1 ではワイヤ枠)
+    [remap      ] リサイズ時: 旧レイヤ→新レイヤへ世界座標リマップ(白紙リセットでなく
+                  状態保持。高さ場は CPU で線形再標本化)
+
+  スライダーの説明(全て単一 state に集約):
+    amount  言葉の量     onset あたりの発生数・デモ時雨の密度
+    size    文字の大きさ 基準サイズと音量→サイズの利得
+    bleed   にじみ       着地直後の異方性拡散の強さ・時間
+    weather 風化         埋没によるコントラスト低下・沈降の速さ
+    paper   紙の風合い   繊維・漉きムラの振幅(0=無地に近い)
+    ink     墨の濃さ     墨ランプの濃度域(淡墨↔濃墨)
+    aka     朱のさし     朱が付与される興奮閾値(0=朱なし)
+    sweep   払いの敷居   風払いが発動する堆積高さの閾値
+
+  依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00。Web Speech API はブラウザ
+  内蔵機能の feature-detect — 非対応・失敗時は沈黙フォールバック、エラーを出さない)。
+-->
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="art-input" content="mic" />
+    <title>FABLE5 · 言の葉時雨 — Words-Rain of Ink (WebGL2 mic)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #171410;
+        --ink: #e8e0d0;
+        --muted: rgba(232, 224, 208, 0.66);
+        --panel: rgba(24, 20, 14, 0.88);
+        --line: rgba(232, 224, 208, 0.18);
+        --accent: #c96a4a;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #14110d, #1c1813 55%, #14110d);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        background: var(--bg); touch-action: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(232, 224, 208, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(232, 224, 208, 0.14); }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(232, 224, 208, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 92px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(232, 224, 208, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(15, 12, 8, 0.78);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0; font-size: 11px; line-height: 1.6; }
+      .overlay-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; justify-content: center; }
+      .overlay-btns button {
+        padding: 9px 14px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(232, 224, 208, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .overlay-btns button.primary { background: rgba(201, 106, 74, 0.28); border-color: rgba(201, 106, 74, 0.5); }
+      .overlay-btns button.hidden { display: none; }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 mic-driven ink-type rain"></canvas>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+
+    <section id="panel" class="panel" aria-label="Kotonoha shigure controls"></section>
+
+    <div id="overlay" class="hidden" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle"></h2>
+        <p id="overlayText"></p>
+        <div class="overlay-btns">
+          <button id="micStart" type="button" class="primary">マイクを許可して始める</button>
+          <button id="micSkip" type="button">マイクなしで眺める</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const micStartBtn = document.getElementById("micStart");
+        const micSkipBtn = document.getElementById("micSkip");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?freeze=1 — deterministic still frame: physics runs a fixed-dt
+        // (1/60) pre-roll of 1020 steps driven by the scripted event list, then
+        // holds dt = 0. Seeds are event ordinals / cell coordinates only —
+        // time never enters a hash — so the same pile renders every time.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakesource=1 — synthetic input: a deterministic scripted list of
+        // sound events (onset time / volume / centroid / word) drives the
+        // whole pipeline. WebAudio and the microphone are NEVER opened.
+        const FAKESOURCE = QUERY.get("fakesource") === "1";
+
+        const DEBUG_MODES = [
+          "最終",
+          "物理(ボディ+高さ場)",
+          "蓄積レイヤ raw",
+          "音特徴量メータ",
+          "標本(紙・墨・にじみ・朱)",
+        ];
+
+        const DEFAULTS = {
+          amount: 0.5,
+          size: 0.5,
+          bleed: 0.55,
+          weather: 0.5,
+          paper: 0.5,
+          ink: 0.55,
+          aka: 0.35,
+          sweep: 0.6,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["amount", "言葉の量", "onset あたりの発生数・デモ時雨の密度", 0, 1, 0.01],
+          ["size", "文字の大きさ", "基準サイズと音量→サイズの利得", 0, 1, 0.01],
+          ["bleed", "にじみ", "着地直後の異方性拡散の強さ・時間", 0, 1, 0.01],
+          ["weather", "風化", "埋没によるコントラスト低下・沈降の速さ", 0, 1, 0.01],
+          ["paper", "紙の風合い", "繊維・漉きムラの振幅(0=無地に近い)", 0, 1, 0.01],
+          ["ink", "墨の濃さ", "墨ランプの濃度域(淡墨↔濃墨)", 0, 1, 0.01],
+          ["aka", "朱のさし", "朱が付与される興奮閾値(0=朱なし)", 0, 1, 0.01],
+          ["sweep", "払いの敷居", "風払いが発動する堆積高さの閾値", 0, 1, 0.01],
+        ];
+
+        // 「写実 ↔ 様式の強さ」のプリセット(§6)。標本 = uDebug 4。
+        const PRESETS = {
+          写経: { amount: 0.22, size: 0.42, bleed: 0.78, weather: 0.68,
+            paper: 0.55, ink: 0.45, aka: 0.06, sweep: 0.8 },
+          時雨: { ...DEFAULTS },
+          喧騒: { amount: 0.88, size: 0.66, bleed: 0.35, weather: 0.4,
+            paper: 0.5, ink: 0.72, aka: 0.62, sweep: 0.34 },
+        };
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>FABLE5 · 言の葉時雨</h1>
+          <p>
+            マイクで集めた音が墨の活字になって降り、剛体として積もります。
+            着地の瞬間に墨が和紙ににじみ、古い層ほど圧密されて墨痕に風化し、
+            堆積が画面を満たすと風がひと払いして白紙に戻ります。
+            声が取れれば言葉が、環境音はオノマトペが降ります。
+            <b>音を出すと降り、黙ると止みます。</b>
+          </p>
+          <div class="select-row">
+            <span>プリセット</span>
+            <select id="presetSel" aria-label="プリセット">
+              <option value="">— 選択 —</option>
+              ${Object.keys(PRESETS)
+                .map((k) => `<option value="${k}">${k}</option>`)
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>時を止める</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+            <button id="hideUi" type="button">HIDE UI</button>
+            <button id="micBtn" type="button">MIC 再試行</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 描画 -- / 文字 --</div>
+            <span class="badge" id="glBadge">WebGL2 · 剛体×グリフアトラス · oklab · mic</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("presetSel").addEventListener("change", (event) => {
+          const preset = PRESETS[event.currentTarget.value];
+          if (preset) Object.keys(preset).forEach((k) => setSlider(k, preset[k]));
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          document.getElementById("presetSel").value = "";
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        document.getElementById("hideUi").addEventListener("click", () =>
+          setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-kotonoha-shigure-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          micStartBtn.classList.toggle("hidden", !buttons || !buttons.mic);
+          micSkipBtn.classList.toggle("hidden", !buttons || !buttons.skip);
+          if (buttons && buttons.micLabel) micStartBtn.textContent = buttons.micLabel;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup — RGBA8 only (no float extension needed): the ink
+           accumulation layer is a bounded [0,1] field by design.
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+            null,
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hash + value noise + fbm. Seeds are
+        // POSITION-ONLY (repo rule §8-9): time never enters a hash, so
+        // ?freeze=1 renders a deterministic, flicker-free still.
+        const CHUNK_NOISE = `
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = p - i;
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm(vec2 p) {
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 5; i++) {
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc;
+          }
+          float fbm3(vec2 p) {
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 3; i++) {
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc;
+          }
+        `;
+
+        // Shared: correct oklab transform (sRGB→linear→LMS→oklab and back).
+        // The paper→淡墨→濃墨 ramp interpolates on the neutral axis here.
+        const CHUNK_OKLAB = `
+          vec3 srgb2lin(vec3 c) {
+            return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),
+              step(0.04045, c));
+          }
+          vec3 lin2srgb(vec3 c) {
+            c = clamp(c, 0.0, 1.0);
+            return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+              step(0.0031308, c));
+          }
+          vec3 lin2oklab(vec3 c) {
+            float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+            float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+            float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+            float l_ = pow(max(l, 0.0), 1.0 / 3.0);
+            float m_ = pow(max(m, 0.0), 1.0 / 3.0);
+            float s_ = pow(max(s, 0.0), 1.0 / 3.0);
+            return vec3(
+              0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+              1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+              0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_);
+          }
+          vec3 oklab2srgb(vec3 lab) {
+            float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+            float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+            float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+            float l = l_ * l_ * l_;
+            float m = m_ * m_ * m_;
+            float s = s_ * s_ * s_;
+            vec3 lin = vec3(
+              4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+            return lin2srgb(lin);
+          }
+          vec3 oklabMix(vec3 a, vec3 b, float t) {
+            return oklab2srgb(mix(lin2oklab(srgb2lin(a)), lin2oklab(srgb2lin(b)), t));
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P1 — accumulation-layer update (ping-pong RGBA8, full resolution).
+           R = ink density / G = freshness (潤→渇) / B = vermilion.
+           Young ink (G≈1) diffuses ANISOTROPICALLY along the paper fibre —
+           the landing bleed — then fixes as G decays. Buried ink (below the
+           CPU height field) slowly loses its glyph shape (isotropic term)
+           and compacts darker toward a capped plateau (0.85 — never pure
+           black, and bounded: CRAFT §A5 in the dark direction). The wind
+           sweep advects + bleaches everything back to blank paper.
+        ------------------------------------------------------------------ */
+        const layerFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrev;
+          uniform sampler2D uH;
+          uniform vec2 uRes;
+          uniform float uAspect;
+          uniform float uDt;
+          uniform float uBleed;
+          uniform float uWeather;
+          uniform float uSweepAmt;
+          uniform float uWindDir;
+          uniform sampler2D uPaperT;   // .a = baked fibre waviness
+          void main() {
+            vec2 px = 1.0 / uRes;
+            // sweep smear: ink drifts downwind → sample upwind
+            vec2 wind = vec2(uWindDir * 0.62, 0.05) * uSweepAmt;
+            vec2 suv = vUv - vec2(wind.x / uAspect, wind.y) * uDt;
+            vec2 p = vec2(vUv.x * uAspect, vUv.y);
+            vec4 c = texture(uPrev, suv);
+            // paper fibre direction: mostly horizontal with slow waviness
+            float wav = texture(uPaperT, vUv).a - 0.5;
+            vec2 fdir = normalize(vec2(1.0, 1.4 * wav));
+            vec2 fprp = vec2(-fdir.y, fdir.x);
+            vec4 t1 = texture(uPrev, suv + fdir * px * 1.4);
+            vec4 t2 = texture(uPrev, suv - fdir * px * 1.4);
+            vec4 t3 = texture(uPrev, suv + fprp * px * 0.85);
+            vec4 t4 = texture(uPrev, suv - fprp * px * 0.85);
+            vec4 nAni = (t1 + t2) * 0.37 + (t3 + t4) * 0.13;
+            vec4 nIso = (t1 + t2 + t3 + t4) * 0.25;
+            // bleeding: gated by freshness² — wet ink spreads, dry ink is FIXED
+            float kB = uBleed * 4.5 * c.g * c.g;
+            float mB = 1.0 - exp(-uDt * kB);
+            // target is the AMPLIFIED neighbourhood: the edge swells while
+            // the stroke interior keeps its darkness (ink soaking outward,
+            // not evaporating). Bounded by the clamp below + c.g decay.
+            c.r = mix(c.r, min(nAni.r * 1.35, 1.0), mB);
+            c.b = mix(c.b, min(nAni.b * 1.35, 1.0), mB);
+            // weathering: buried ink SLOWLY (≈a minute, not seconds) loses
+            // its glyph shape while compacting darker — the shape loss must
+            // never outrun the darkening or the pile washes to pale mush
+            float hgt = texture(uH, vec2(vUv.x, 0.5)).r * 1.2;
+            float buried = clamp((hgt - p.y) / 0.16, 0.0, 1.0);
+            float kW = uWeather * buried;
+            float mW = 1.0 - exp(-uDt * kW * 0.07);
+            c.r = mix(c.r, nIso.r, mW);
+            c.b = mix(c.b, nIso.b, mW);
+            // 圧密: compaction must OUTRUN the shape loss — the old layers
+            // sink DARKER toward the 0.85 plateau (never pure black)
+            c.r += uDt * 0.30 * kW * smoothstep(0.06, 0.30, c.r)
+              * max(0.85 - c.r, 0.0);
+            // fixation: the wet 潤 state dries into 渇
+            c.g *= exp(-uDt * 0.85);
+            // the wind sweep bleaches the page back to blank
+            c *= exp(-uDt * 1.65 * uSweepAmt);
+            fragColor = clamp(c, vec4(0.0), vec4(1.0));
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P0 — paper bake: the kinari washi (fbm fibres + 漉きムラ + flecks)
+           and the fibre WAVINESS (alpha channel — the bleed direction field)
+           are rendered ONCE into a texture, re-baked only on resize or when
+           the paper slider moves. The per-frame passes then pay one texture
+           fetch instead of multi-octave fbm per pixel (software-GL relief).
+        ------------------------------------------------------------------ */
+        const paperFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform float uAspect;
+          uniform float uPaper;
+          ${CHUNK_NOISE}
+          void main() {
+            vec2 p = vec2(vUv.x * uAspect, vUv.y);
+            float amp = 0.35 + 1.3 * uPaper;
+            vec3 base = vec3(0.815, 0.772, 0.686);   // 生成り(never pure white)
+            float mura = fbm(p * 2.3 + 5.0);                 // 漉きムラ
+            float fib = fbm(vec2(p.x * 7.0, p.y * 120.0));   // 横に流れる繊維
+            float fib2 = fbm3(vec2(p.x * 130.0, p.y * 9.0)); // まばらな縦繊維
+            float fleck = step(0.9915, hash12(floor(p * 420.0) + 3.7));
+            float shade = 1.0 + amp * (0.15 * (mura - 0.5)
+              + 0.09 * (fib - 0.5) + 0.04 * (fib2 - 0.5)) - 0.16 * amp * fleck;
+            float wav = fbm3(p * 2.7 + 3.0);   // fibre waviness (bleed dir)
+            fragColor = vec4(base * shade, wav);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P3 — composite: baked paper × oklab neutral ink ramp × single
+           vermilion accent + drifting dust + uDebug views. White capped at
+           0.93, black floored at 0.045 (invariant 1: no pure white / no
+           crushed black; also keeps the full-frame mean well under the
+           longrun 200/255 bound).
+        ------------------------------------------------------------------ */
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uLayer;
+          uniform sampler2D uH;
+          uniform sampler2D uAtlas;
+          uniform sampler2D uPaperT;   // baked paper (rgb) + fibre waviness (a)
+          uniform vec2 uRes;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uInk;
+          uniform float uWeather;
+          uniform int uDebug;
+          uniform vec4 uMeterA;   // rms, centroid, zcr, onset flash (0..1)
+          uniform vec4 uMeterB;   // kind index 0..4, excitement, sustain, sweep env
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+
+          const float CELLUV = 0.0625;   // 128 / 2048
+
+          // oklab neutral-axis ink ramp: paper → 淡墨 → 濃墨 (uInk sets the
+          // density range; 濃墨 never reaches pure black).
+          vec3 inkRamp(vec3 pap, float den) {
+            float d = pow(clamp(den, 0.0, 1.0), mix(1.35, 0.75, uInk));
+            vec3 usu = vec3(0.500, 0.492, 0.488);
+            vec3 koi = mix(vec3(0.260, 0.255, 0.262),
+              vec3(0.118, 0.114, 0.124), uInk);
+            // full-coverage type (den≈0.5+) must read as DEEP sumi; the
+            // light greys are reserved for bled halos and thin washes
+            vec3 c = oklabMix(pap, usu, smoothstep(0.02, 0.42, d));
+            return oklabMix(c, koi, smoothstep(0.22, 0.80, d));
+          }
+
+          float bar(vec2 uv, float x0, float y0, float w, float h, float v) {
+            float inb = step(x0, uv.x) * step(uv.x, x0 + w)
+              * step(y0, uv.y) * step(uv.y, y0 + h);
+            float fill = step(uv.x, x0 + w * clamp(v, 0.0, 1.0));
+            return inb * (0.18 + 0.82 * fill);
+          }
+
+          void main() {
+            vec2 p = vec2(vUv.x * uAspect, vUv.y);
+            vec4 lay = texture(uLayer, vUv);
+
+            if (uDebug == 2) {   // 蓄積レイヤ raw: R=墨 G=年齢(freshness) B=朱
+              fragColor = vec4(lay.rgb, 1.0);
+              return;
+            }
+            if (uDebug == 3) {   // 音特徴量メータ(fakesource ではスクリプト値)
+              vec3 c = vec3(0.055, 0.06, 0.075);
+              c += vec3(0.85, 0.88, 0.92) * bar(vUv, 0.08, 0.80, 0.56, 0.055, uMeterA.x);
+              c += vec3(0.45, 0.70, 0.95) * bar(vUv, 0.08, 0.70, 0.56, 0.055, uMeterA.y);
+              c += vec3(0.55, 0.90, 0.60) * bar(vUv, 0.08, 0.60, 0.56, 0.055, uMeterA.z);
+              c += vec3(0.95, 0.30, 0.22) * bar(vUv, 0.08, 0.50, 0.56, 0.055, uMeterB.y);
+              c += vec3(0.75, 0.70, 0.55) * bar(vUv, 0.08, 0.20, 0.56, 0.040, uMeterB.z);
+              float fl = step(0.72, vUv.x) * step(vUv.x, 0.86)
+                * step(0.72, vUv.y) * step(vUv.y, 0.86);
+              c += vec3(0.95, 0.75, 0.35) * fl * (0.15 + 0.85 * uMeterA.w);
+              for (int i = 0; i < 5; i++) {   // 書体/種別: RAIN GORO POTSU SOFT WORD
+                float x0 = 0.08 + float(i) * 0.115;
+                float inb = step(x0, vUv.x) * step(vUv.x, x0 + 0.09)
+                  * step(0.32, vUv.y) * step(vUv.y, 0.40);
+                float hot = 1.0 - step(0.5, abs(uMeterB.x - float(i)));
+                c += vec3(0.80, 0.82, 0.88) * inb * (0.16 + 0.84 * hot);
+              }
+              fragColor = vec4(c, 1.0);
+              return;
+            }
+            vec3 pap = texture(uPaperT, vUv).rgb;
+            if (uDebug == 4) {   // 標本: 紙 / 墨ランプ / にじみ前後グリフ / 朱
+              vec3 c;
+              if (vUv.y > 0.74) {
+                c = pap;
+              } else if (vUv.y > 0.58) {
+                c = inkRamp(vec3(0.815, 0.772, 0.686),
+                  (vUv.x - 0.02) / 0.96);
+              } else if (vUv.y > 0.14) {
+                // 4 specimen glyphs (atlas slots 0..3): top row = sharp
+                // (falling), bottom row = the same glyph after the landing
+                // bleed (blur + fibre-warped edge + settled density).
+                float gy = (vUv.y - 0.14) / 0.44;
+                float gx = fract(vUv.x * 4.0);
+                float gi = min(floor(vUv.x * 4.0), 3.0);
+                float bled = step(gy, 0.5);
+                float ly = fract(gy * 2.0);
+                vec2 cuv = vec2((gi + gx) * CELLUV, (1.0 - ly) * CELLUV);
+                float a;
+                if (bled < 0.5) {
+                  a = texture(uAtlas, cuv).a;
+                } else {
+                  vec2 warp = (vec2(fbm3(cuv * 260.0 + 3.0),
+                    fbm3(cuv * 260.0 + 9.0)) - 0.5) * 0.010;
+                  float s = texture(uAtlas, cuv + warp).a * 0.30;
+                  s += texture(uAtlas, cuv + warp + vec2(0.0035, 0.0009)).a * 0.175;
+                  s += texture(uAtlas, cuv + warp - vec2(0.0035, 0.0009)).a * 0.175;
+                  s += texture(uAtlas, cuv + warp + vec2(0.0009, 0.0030)).a * 0.175;
+                  s += texture(uAtlas, cuv + warp - vec2(0.0009, 0.0030)).a * 0.175;
+                  a = clamp(s * 1.3, 0.0, 1.0) * 0.85;
+                }
+                c = inkRamp(pap, a * 0.95);
+              } else {
+                c = vUv.x < 0.5
+                  ? oklabMix(pap, vec3(0.702, 0.188, 0.118), 0.9)
+                  : inkRamp(pap, 0.85);
+              }
+              fragColor = vec4(clamp(c, vec3(0.045), vec3(0.93)), 1.0);
+              return;
+            }
+
+            float hgt = texture(uH, vec2(vUv.x, 0.5)).r * 1.2;
+            vec3 col = pap;
+
+            // burial: contrast reduction pulls BOTH ends toward a settled
+            // mid-dark (gaps silt up, peaks stay) — never a lightening
+            float buried = clamp((hgt - p.y) / 0.20, 0.0, 1.0) * uWeather;
+            float den = mix(lay.r, lay.r * 0.72 + 0.20, buried * 0.7);
+            col = inkRamp(col, den);
+            // aged ink warms slightly (old sumi browning)
+            col = mix(col, col * vec3(1.06, 1.0, 0.90),
+              buried * smoothstep(0.04, 0.35, lay.r));
+            // vermilion — the single accent colour
+            float akaA = clamp(lay.b * 1.8, 0.0, 1.0);
+            col = oklabMix(col, vec3(0.702, 0.188, 0.118),
+              akaA * smoothstep(0.02, 0.30, lay.b));
+            // fresh (wet) ink reads slightly deeper — the 潤 state
+            col *= 1.0 - 0.11 * lay.g * smoothstep(0.04, 0.45, lay.r);
+
+            // drifting dust motes (the quiet interlude). Time is a PHASE of
+            // the drift only — the speck pattern is seeded by cell coords.
+            float dust = 0.0;
+            for (int k = 0; k < 2; k++) {
+              float fk = float(k);
+              vec2 q = p * (6.5 + 4.5 * fk)
+                + vec2(uTime * (0.28 + 0.14 * fk), -uTime * (0.36 + 0.17 * fk));
+              vec2 cell = floor(q);
+              vec2 fp = q - cell;
+              float gate = step(0.91, hash12(cell * 1.13 + 17.0));
+              vec2 dp = vec2(hash12(cell + 7.7), hash12(cell + 3.3));
+              float dd = length(fp - dp);
+              dust += gate * smoothstep(0.055, 0.015, dd);
+            }
+            col *= 1.0 - 0.085 * clamp(dust, 0.0, 1.0);
+
+            // edge burn + vignette (aged paper, and keeps the frame mean low)
+            float rr = length((vUv - 0.5) * vec2(uAspect, 1.0))
+              / (0.5 * length(vec2(uAspect, 1.0)));
+            col *= 1.0 - 0.15 * smoothstep(0.55, 1.06, rr);
+            col = mix(col, col * vec3(0.86, 0.74, 0.58),
+              0.30 * smoothstep(0.80, 1.14, rr));
+
+            if (uDebug == 1) {   // 物理デバッグ: 高さ場の線+堆積下の領域
+              col *= 0.45;
+              float below = step(p.y, hgt);
+              col = mix(col, vec3(0.10, 0.55, 0.35), 0.22 * below);
+              float dl = abs(p.y - hgt);
+              float lw = 2.0 / uRes.y;
+              col = mix(col, vec3(0.95, 0.25, 0.20),
+                smoothstep(lw * 2.5, lw * 0.5, dl));
+            }
+
+            col = clamp(col, vec3(0.045), vec3(0.93));
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        // remap: resample the world-anchored accumulation layer from the
+        // pre-resize texture into the freshly allocated one (state-preserving
+        // resize; the horizontal world centre stays the screen centre).
+        const copyFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform float uAspect;      // new aspect
+          uniform float uOldAspect;
+          void main() {
+            float wx = vUv.x * uAspect - 0.5 * (uAspect - uOldAspect);
+            vec2 old = vec2(wx / uOldAspect, vUv.y);
+            if (old.x < 0.0 || old.x > 1.0) {
+              fragColor = vec4(0.0);
+              return;
+            }
+            fragColor = texture(uSrc, old);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P2/P4 — instanced glyph quads (one program, three modes):
+           uMode 0 = falling glyph onto the canvas (sharp movable type)
+           uMode 1 = landing stamp into the accumulation layer (additive:
+                     R += a·ink, G += a·freshness, B += a·vermilion)
+           uMode 2 = physics wireframe (uDebug 1)
+        ------------------------------------------------------------------ */
+        const glyphVS = `#version 300 es
+          precision highp float;
+          layout(location = 0) in vec2 aPos;      // world centre
+          layout(location = 1) in vec2 aSize;     // draw half extents (world)
+          layout(location = 2) in float aRot;
+          layout(location = 3) in vec2 aUv0;      // atlas cell origin
+          layout(location = 4) in vec3 aInkAka;   // ink, vermilion, wetness
+          uniform float uAspect;
+          out vec2 vUv;
+          out vec2 vLocal;
+          out vec3 vInkAka;
+          const vec2 CORN[6] = vec2[6](
+            vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+            vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0));
+          const float CELLUV = 0.0625;   // 128 / 2048
+          void main() {
+            vec2 l = CORN[gl_VertexID];
+            vLocal = l;
+            vec2 off = (l - 0.5) * (aSize * 2.0);
+            float c = cos(aRot);
+            float s = sin(aRot);
+            vec2 w = aPos + vec2(c * off.x - s * off.y, s * off.x + c * off.y);
+            gl_Position = vec4(w.x / uAspect * 2.0 - 1.0, w.y * 2.0 - 1.0, 0.0, 1.0);
+            // atlas cells were uploaded WITHOUT UNPACK_FLIP_Y (§8-10): the
+            // canvas top row sits at the cell's smallest v, so v runs 1-l.y.
+            vUv = vec2(aUv0.x + l.x * CELLUV, aUv0.y + (1.0 - l.y) * CELLUV);
+            vInkAka = aInkAka;
+          }
+        `;
+
+        const glyphFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          in vec2 vLocal;
+          in vec3 vInkAka;
+          out vec4 fragColor;
+          uniform sampler2D uAtlas;
+          uniform int uMode;
+          uniform vec3 uInkCol;
+          uniform vec3 uAkaCol;
+          void main() {
+            float a = texture(uAtlas, vUv).a;
+            // COVERAGE SHARPENING: minified thin strokes sample a≈0.3-0.5
+            // (stroke averaged with背景) — but small movable type prints
+            // SOLID black. Re-solidify mid coverage, keep a soft AA edge.
+            a = smoothstep(0.20, 0.56, a);
+            if (uMode == 2) {   // physics wireframe (uDebug 1)
+              float border = step(0.44, max(abs(vLocal.x - 0.5), abs(vLocal.y - 0.5)));
+              float mark = max(border, step(0.55, a) * 0.35);
+              if (mark < 0.05) discard;
+              fragColor = vec4(0.15, 0.85, 0.75, mark);
+              return;
+            }
+            if (uMode == 1) {   // stamp into the accumulation layer
+              // thicken thin strokes slightly (the press bites the paper);
+              // wetness (z) scales with glyph size — small type carries
+              // little water, so it FIXES fast instead of bleeding away
+              fragColor = vec4(min(a * 1.25, 1.0) * vInkAka.x,
+                a * vInkAka.z, a * vInkAka.y, 0.0);
+              return;
+            }
+            vec3 col = mix(uInkCol, uAkaCol, clamp(vInkAka.y * 2.0, 0.0, 1.0));
+            fragColor = vec4(col, a * clamp(0.55 + vInkAka.x, 0.0, 0.96));
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program + target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          paper: createProgram(fullscreenVS, paperFS),
+          layer: createProgram(fullscreenVS, layerFS),
+          composite: createProgram(fullscreenVS, compositeFS),
+          copy: createProgram(fullscreenVS, copyFS),
+          glyph: createProgram(glyphVS, glyphFS),
+        };
+
+        const locations = {
+          paper: getLocations(programs.paper, ["uAspect", "uPaper"]),
+          layer: getLocations(programs.layer, [
+            "uPrev", "uH", "uRes", "uAspect", "uDt", "uBleed", "uWeather",
+            "uSweepAmt", "uWindDir", "uPaperT",
+          ]),
+          composite: getLocations(programs.composite, [
+            "uLayer", "uH", "uAtlas", "uPaperT", "uRes", "uAspect", "uTime",
+            "uInk", "uWeather", "uDebug", "uMeterA", "uMeterB",
+          ]),
+          copy: getLocations(programs.copy, ["uSrc", "uAspect", "uOldAspect"]),
+          glyph: getLocations(programs.glyph, [
+            "uAspect", "uAtlas", "uMode", "uInkCol", "uAkaCol",
+          ]),
+        };
+
+        function createTarget(width, height) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0,
+            gl.RGBA, gl.UNSIGNED_BYTE, null);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D, tex, 0);
+          const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (!ok) throw new Error("RENDER TARGET INCOMPLETE");
+          return { tex, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        // True GPU sync point (CRAFT §C4): gl.finish() is not reliably
+        // blocking through Chromium's command buffer on software GL, so a
+        // 1×1 readPixels — an unavoidable round trip — is used instead.
+        const syncPx = new Uint8Array(4);
+        function glSync() {
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+        }
+
+        /* ------------------------------------------------------------------
+           Glyph atlas — canvas2D → texture, 2048², 128px cells (glyph ≈92px:
+           order §4 movable-type quality, magnification capped near 2×),
+           16×16 = 256 slots with LRU eviction. Font classes are SYNTHETIC
+           differences (weight/stroke/skew/scale) so they stay distinguishable
+           even where the font stack resolves to a single face (Unifont in
+           the verification sandbox); on real devices the family差 adds on top.
+        ------------------------------------------------------------------ */
+
+        const ATLAS_SIZE = 2048;
+        const CELL = 128;
+        const COLSN = 16;
+        const MAX_SLOTS = 256;
+        const GLYPH_PX = 92;
+
+        const FONT_CLASSES = [
+          { // 0 明朝系 — 細く静か(細身+わずかな斜勢)
+            stack: '"Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", "Noto Serif CJK JP", serif',
+            weight: 500, scale: 0.84, skew: -0.12, strokeW: 0 },
+          { // 1 ゴシック太 — 強い音(合成ボールド: 白フチのストローク加算)
+            stack: '"Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", "Noto Sans CJK JP", sans-serif',
+            weight: 800, scale: 1.0, skew: 0, strokeW: 0.085 },
+          { // 2 丸み — 柔らかい音(丸ジョイントの中間ストローク+小ぶり)
+            stack: '"Hiragino Maru Gothic ProN", "Rounded Mplus 1c", "Noto Sans JP", sans-serif',
+            weight: 400, scale: 0.88, skew: 0, strokeW: 0.045 },
+        ];
+
+        const glyphCanvas = document.createElement("canvas");
+        glyphCanvas.width = CELL;
+        glyphCanvas.height = CELL;
+        const glyphCtx = glyphCanvas.getContext("2d");
+
+        const atlasTex = gl.createTexture();
+        let atlasDirty = false;   // regenerate mipmaps once per frame at most
+        gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, ATLAS_SIZE, ATLAS_SIZE, 0,
+          gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const slotMap = new Map();      // "char|class" → { slot, stamp }
+        const permanentSlots = new Set();
+        let slotClock = 0;
+
+        function drawGlyphToSlot(ch, cls, slot) {
+          const fc = FONT_CLASSES[cls];
+          const g = glyphCtx;
+          g.setTransform(1, 0, 0, 1, 0, 0);
+          g.clearRect(0, 0, CELL, CELL);
+          g.save();
+          g.translate(CELL / 2, CELL / 2);
+          g.transform(1, 0, fc.skew, 1, 0, 0);
+          const pxSize = GLYPH_PX * fc.scale;
+          g.font = `${fc.weight} ${pxSize}px ${fc.stack}`;
+          g.textAlign = "center";
+          g.textBaseline = "middle";
+          g.fillStyle = "#fff";
+          if (fc.strokeW) {
+            g.strokeStyle = "#fff";
+            g.lineWidth = pxSize * fc.strokeW;
+            g.lineJoin = "round";
+            g.strokeText(ch, 0, 0);
+          }
+          g.fillText(ch, 0, 0);
+          g.restore();
+          gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+          // §8-10: DOM source upload — FLIP_Y stays FALSE and the glyph
+          // shader addresses cells with a top-left-origin v (see glyphVS).
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0,
+            (slot % COLSN) * CELL, Math.floor(slot / COLSN) * CELL,
+            gl.RGBA, gl.UNSIGNED_BYTE, glyphCanvas);
+          atlasDirty = true;   // mipmaps rebuilt lazily (small glyphs minify)
+        }
+
+        function refreshAtlasMips() {
+          if (!atlasDirty) return;
+          gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+          gl.generateMipmap(gl.TEXTURE_2D);
+          atlasDirty = false;
+        }
+
+        // Returns the atlas cell origin [u0, v0] for a glyph, drawing and
+        // uploading it on first use. Eviction skips permanent specimen slots
+        // and any slot referenced by a live body (no glyph swaps mid-fall).
+        function glyphUv(ch, cls, liveSlots) {
+          const key = ch + "|" + cls;
+          let entry = slotMap.get(key);
+          if (!entry) {
+            let slot;
+            if (slotMap.size < MAX_SLOTS) {
+              slot = slotMap.size;
+            } else {
+              let bestKey = null;
+              let bestStamp = Infinity;
+              for (const [k, v] of slotMap) {
+                if (permanentSlots.has(v.slot)) continue;
+                if (liveSlots && liveSlots.has(v.slot)) continue;
+                if (v.stamp < bestStamp) {
+                  bestStamp = v.stamp;
+                  bestKey = k;
+                }
+              }
+              if (bestKey === null) return null;   // atlas exhausted (extreme)
+              slot = slotMap.get(bestKey).slot;
+              slotMap.delete(bestKey);
+            }
+            drawGlyphToSlot(ch, cls, slot);
+            entry = { slot, stamp: 0 };
+            slotMap.set(key, entry);
+          }
+          entry.stamp = ++slotClock;
+          return entry;
+        }
+        function slotOrigin(slot) {
+          return [
+            ((slot % COLSN) * CELL) / ATLAS_SIZE,
+            (Math.floor(slot / COLSN) * CELL) / ATLAS_SIZE,
+          ];
+        }
+
+        // Prime the specimen glyphs (uDebug 4 shows atlas slots 0..3:
+        // thin 明朝 / synthetic-bold ゴシック / rounded / thin again).
+        ["言|0", "葉|1", "の|2", "雨|0"].forEach((key) => {
+          const [ch, cls] = key.split("|");
+          const entry = glyphUv(ch, Number(cls), null);
+          if (entry) permanentSlots.add(entry.slot);
+        });
+
+        /* ------------------------------------------------------------------
+           Instanced glyph buffer (bodies ≤200 + stamp queue). 9 floats per
+           instance: cx, cy, hw, hh, rot, u0, v0, ink, aka.
+        ------------------------------------------------------------------ */
+
+        const MAX_BODIES = 200;
+        const FLOATS_PER_INST = 10;
+        const instData = new Float32Array((MAX_BODIES + 32) * FLOATS_PER_INST);
+        const instBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, instData.byteLength, gl.DYNAMIC_DRAW);
+
+        const glyphVao = gl.createVertexArray();
+        gl.bindVertexArray(glyphVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+        const STRIDE = FLOATS_PER_INST * 4;
+        const attribs = [
+          [0, 2, 0],    // aPos
+          [1, 2, 8],    // aSize
+          [2, 1, 16],   // aRot
+          [3, 2, 20],   // aUv0
+          [4, 3, 28],   // aInkAka (ink, vermilion, wetness)
+        ];
+        for (const [loc, size, off] of attribs) {
+          gl.enableVertexAttribArray(loc);
+          gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STRIDE, off);
+          gl.vertexAttribDivisor(loc, 1);
+        }
+        gl.bindVertexArray(null);
+
+        // Fill instData from a list of {cx,cy,hw,hh,ang,u0,v0,ink,aka}.
+        function fillInstances(list) {
+          let o = 0;
+          const n = Math.min(list.length, MAX_BODIES + 32);
+          for (let i = 0; i < n; i++) {
+            const b = list[i];
+            instData[o] = b.cx;
+            instData[o + 1] = b.cy;
+            instData[o + 2] = b.dhw;
+            instData[o + 3] = b.dhh;
+            instData[o + 4] = b.ang;
+            instData[o + 5] = b.u0;
+            instData[o + 6] = b.v0;
+            instData[o + 7] = b.ink;
+            instData[o + 8] = b.aka;
+            instData[o + 9] = b.fresh || 0.9;
+            o += FLOATS_PER_INST;
+          }
+          gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, instData.subarray(0, n * FLOATS_PER_INST));
+          return n;
+        }
+
+        // mode: 0 falling glyphs → canvas, 1 stamps → layer target, 2 wire.
+        function drawGlyphInstances(list, mode, target, aspect) {
+          if (!list.length) return;
+          refreshAtlasMips();
+          const n = fillInstances(list);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(programs.glyph);
+          const u = locations.glyph;
+          bindTexture(0, atlasTex);
+          gl.uniform1i(u.uAtlas, 0);
+          gl.uniform1f(u.uAspect, aspect);
+          gl.uniform1i(u.uMode, mode);
+          const koi = inkColor();
+          gl.uniform3f(u.uInkCol, koi[0], koi[1], koi[2]);
+          gl.uniform3f(u.uAkaCol, 0.702, 0.188, 0.118);
+          gl.enable(gl.BLEND);
+          if (mode === 1) gl.blendFunc(gl.ONE, gl.ONE);
+          else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.bindVertexArray(glyphVao);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, n);
+          gl.bindVertexArray(null);
+          gl.disable(gl.BLEND);
+        }
+
+        function inkColor() {
+          const t = state.ink;
+          return [
+            0.260 + (0.118 - 0.260) * t,
+            0.255 + (0.114 - 0.255) * t,
+            0.262 + (0.124 - 0.262) * t,
+          ];
+        }
+
+        /* ------------------------------------------------------------------
+           World & simulation constants. World units: screen height = 1
+           (y up, 0 = floor), x ∈ [0, aspect]. Physics runs deterministic
+           fixed substeps; every random draw comes from hseed(event ordinal)
+           — time never enters a seed (§8-9), so ?freeze=1 is reproducible.
+        ------------------------------------------------------------------ */
+
+        const STEP = 1 / 60;
+        const MAX_SUBSTEPS = 4;
+        const NC = 192;              // height-field columns (CPU array; no readback)
+        const H_MAX = 1.15;
+        const PRE_STEPS = 1020;      // freeze pre-roll: 17s of scripted shigure
+        const PRE_CHUNK = 60;        // steps per rAF while pre-rolling (glSync each)
+
+        const hcol = new Float32Array(NC);
+        const hBytes = new Uint8Array(NC);
+        const bodies = [];
+        const pending = [];          // scheduled char spawns {t, ch, kindKey, ...}
+        const stampQueue = [];       // landed glyphs waiting for the layer stamp
+
+        let aspect = 1;
+        let simTime = 0;
+        let sweeping = false;
+        let sweepT = 0;
+        let sweepEnv = 0;
+        let sweepCount = 0;
+        let windDir = 1;
+        let meanH = 0;
+
+        // deterministic integer hash → [0,1) (pcg-flavoured; JS is exact here)
+        function hseed(n) {
+          let t = (n + 0x6d2b79f5) | 0;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+
+        /* ------------------------------------------------------------------
+           Onomatopoeia kinds (invariant 6): each kind is a preset of initial
+           velocity / angular velocity / gravity / drag / restitution /
+           friction / type weight (font class) — the sound's character is
+           performed by the MOTION, not just the glyph.
+        ------------------------------------------------------------------ */
+        const KIND_DEF = {
+          RAIN:  { font: 0, sizeMul: 0.70, vy0: -0.62, vxA: 0.34, tilt: 0.38,
+            spin: 1.4, grav: 2.1, drag: 0.22, rest: 0.05, fric: 0.6,
+            ink: 0.80, stagger: 0.05 },
+          GORO:  { font: 1, sizeMul: 1.38, vy0: -0.05, vxA: 0.05, tilt: 0.25,
+            spin: 2.8, grav: 1.45, drag: 0.10, rest: 0.28, fric: 0.25,
+            ink: 1.0, stagger: 0.12 },
+          POTSU: { font: 2, sizeMul: 0.60, vy0: -0.12, vxA: 0.03, tilt: 0.15,
+            spin: 0.9, grav: 1.85, drag: 0.32, rest: 0.14, fric: 0.55,
+            ink: 0.9, stagger: 0.10 },
+          SOFT:  { font: 2, sizeMul: 0.82, vy0: -0.05, vxA: 0.08, tilt: 0.25,
+            spin: 0.8, grav: 0.85, drag: 0.85, rest: 0.08, fric: 0.55,
+            ink: 0.72, stagger: 0.14, sway: 0.5 },
+          WORD:  { font: 0, sizeMul: 1.0, vy0: -0.08, vxA: 0.03, tilt: 0.12,
+            spin: 0.6, grav: 1.55, drag: 0.28, rest: 0.10, fric: 0.55,
+            ink: 0.95, stagger: 0.09 },
+          // slow drifting mote (fakesource centre stream / 塵): terminal
+          // velocity ≈0.39/s → a mote is ALWAYS inside the screen-centre
+          // sample band of the --motion check (order §9)
+          MOTE:  { font: 2, sizeMul: 1.0, vy0: -0.05, vxA: 0.004, tilt: 0.2,
+            spin: 0.3, grav: 0.5, drag: 1.3, rest: 0.08, fric: 0.55,
+            ink: 0.7, stagger: 0 },
+        };
+        const KIND_INDEX = { RAIN: 0, GORO: 1, POTSU: 2, SOFT: 3, WORD: 4 };
+
+        const ONOMATOPE = {
+          RAIN: ["ザー", "ザザッ", "サーッ", "シャー", "ピシャ"],
+          GORO: ["ゴロゴロ", "ゴーッ", "ドーン", "ズーン", "ガタン"],
+          POTSU: ["ポツ", "ピチョ", "コト", "カタ", "トン", "ピッ"],
+          SOFT: ["サラサラ", "ヒソヒソ", "フワ", "シーン", "ソヨ"],
+          WORD: ["言の葉", "しぐれ", "こゑ", "無常"],
+        };
+        function pickOnomatope(kindKey, seed) {
+          const list = ONOMATOPE[kindKey] || ONOMATOPE.POTSU;
+          return list[Math.floor(hseed(seed * 29 + 11) * list.length) % list.length];
+        }
+
+        function maxGlyphWorld() {
+          // atlas glyphs are ≈92px — cap on-screen magnification near 2×
+          return Math.min(0.17, (2.05 * GLYPH_PX) / Math.max(canvas.height, 200));
+        }
+
+        // Queue one word: its characters spawn in sequence at the same x
+        // (縦書きの雨) with the kind's stagger. Vertical size ∝ RMS volume.
+        function fireWord(word, kindKey, fx, volN, akaOn, evSeed) {
+          const K = KIND_DEF[kindKey];
+          const h = (n) => hseed(evSeed * 613 + n + 17);
+          let size = 0.052 * (0.55 + 0.9 * state.size) * K.sizeMul
+            * (0.6 + 0.9 * volN);
+          size = Math.max(16 / Math.max(canvas.height, 200),
+            Math.min(size, maxGlyphWorld()));
+          const chars = [...word];
+          const dirSign = h(1) < 0.5 ? -1 : 1;
+          const reps = 1 + ((state.amount > 0.7 && h(2) < state.amount - 0.55) ? 1 : 0);
+          for (let r = 0; r < reps; r++) {
+            const rx = Math.min(0.94, Math.max(0.06,
+              fx + (r ? (h(3) - 0.5) * 0.24 : 0)));
+            for (let i = 0; i < chars.length; i++) {
+              pending.push({
+                t: simTime + i * K.stagger + r * 0.31,
+                ch: chars[i],
+                kindKey,
+                x: rx * aspect + (h(10 + i) - 0.5) * 0.02 * aspect,
+                size,
+                aka: akaOn,
+                seed: evSeed * 131 + r * 37 + i,
+                dirSign: kindKey === "RAIN" ? dirSign : 0,
+              });
+            }
+          }
+        }
+
+        // A single tiny rain mark (ヽ丶ゝ) — used by the sustained-hiss
+        // shower and by the fakesource centre companions (order §9: the
+        // --motion 96px centre sample must always see falling ink).
+        function fireRainDrop(fx, delay, seed) {
+          pending.push({
+            t: simTime + delay,
+            ch: ["ヽ", "丶", "ゝ"][Math.floor(hseed(seed + 3) * 3) % 3],
+            kindKey: "RAIN",
+            x: Math.min(0.96, Math.max(0.04, fx)) * aspect,
+            size: Math.max(0.02, 0.027 * (0.7 + 0.6 * hseed(seed + 2))
+              * (0.7 + 0.6 * state.size)),
+            aka: false,
+            seed: seed * 17 + 5,
+            dirSign: hseed(seed + 4) < 0.5 ? -1 : 1,
+          });
+        }
+
+        function spawnBody(spec) {
+          if (bodies.length >= MAX_BODIES) return;
+          const K = KIND_DEF[spec.kindKey];
+          const h = (n) => hseed(spec.seed * 397 + n);
+          const liveSlots = new Set(bodies.map((bb) => bb.slot));
+          const entry = glyphUv(spec.ch, K.font, liveSlots);
+          if (!entry) return;
+          const [u0, v0] = slotOrigin(entry.slot);
+          const size = spec.size * (0.9 + 0.2 * h(1));
+          bodies.push({
+            kindKey: spec.kindKey, K,
+            cx: spec.x,
+            cy: spec.y !== undefined ? spec.y : 1.04 + 0.05 * h(2),
+            vx: spec.dirSign
+              ? spec.dirSign * K.vxA * (0.7 + 0.6 * h(3))
+              : (h(3) - 0.5) * 2 * K.vxA,
+            vy: K.vy0 * (0.8 + 0.4 * h(4)),
+            ang: (h(5) - 0.5) * 2 * K.tilt - (spec.dirSign || 0) * 0.25,
+            om: (h(6) - 0.5) * 2 * K.spin,
+            size,
+            dhw: size * 0.5, dhh: size * 0.5,   // draw half extents
+            hw: size * 0.36, hh: size * 0.40,   // collision half extents
+            ink: K.ink * (spec.aka ? 0.45 : 1.0),
+            aka: spec.aka ? 0.85 : 0.0,
+            fresh: Math.min(1, Math.max(0.35, size / 0.05)) * 0.92,
+            u0, v0, slot: entry.slot,
+            life: 0, sleep: 0, seed: h(7),
+          });
+        }
+
+        /* ------------------------------------------------------------------
+           Rigid-body physics (invariant 2): gravity + air drag + pairwise
+           air collisions + column-height-field contact + sleep. A slept
+           body is TRANSFERRED to the accumulation layer (stamp) and removed
+           — active bodies stay bounded, the pile lives in the layer.
+        ------------------------------------------------------------------ */
+
+        function stampBody(b) {
+          stampQueue.push({
+            cx: b.cx, cy: b.cy, dhw: b.dhw, dhh: b.dhh, ang: b.ang,
+            u0: b.u0, v0: b.v0, ink: b.ink * 0.95, aka: b.aka, fresh: b.fresh,
+          });
+          const c = Math.abs(Math.cos(b.ang));
+          const s = Math.abs(Math.sin(b.ang));
+          const px = c * b.hw + s * b.hh;
+          const py = s * b.hw + c * b.hh;
+          const cw = aspect / NC;
+          const i0 = Math.max(0, Math.floor((b.cx - px) / cw));
+          const i1 = Math.min(NC - 1, Math.floor((b.cx + px) / cw));
+          for (let i = i0; i <= i1; i++) {
+            const t = Math.min(1,
+              Math.abs((i + 0.5) * cw - b.cx) / Math.max(px, 1e-4));
+            // raise by roughly HALF the glyph's extent: later letters sink
+            // into the earlier ink, so the pile reads as densely OVERLAPPING
+            // type (a mound of letters), not sparse marks floating on an
+            // invisible mountain (visual/collision mass must roughly match)
+            const top = b.cy + py * (0.25 + 0.5 * Math.sqrt(Math.max(0, 1 - t * t)))
+              - 0.5 * b.hh;
+            if (top > hcol[i]) hcol[i] = Math.min(H_MAX, top);
+          }
+        }
+
+        function stepPhysics(dt) {
+          const cw = aspect / NC;
+          for (let bi = bodies.length - 1; bi >= 0; bi--) {
+            const b = bodies[bi];
+            const K = b.K;
+            b.life += dt;
+            if (sweepEnv > 0) {   // the wind: one sideways sweep (invariant 5)
+              b.vx += windDir * 6.5 * sweepEnv * dt;
+              b.vy += (0.9 + 1.3 * Math.sin(b.life * 9 + b.seed * 6.283))
+                * sweepEnv * dt;
+            }
+            b.vy -= K.grav * dt * (sweepEnv > 0 ? 0.25 : 1);
+            if (K.sway) b.vx += Math.sin(b.life * 2.3 + b.seed * 6.283) * K.sway * dt;
+            const dragM = Math.exp(-dt * K.drag);
+            b.vx *= dragM;
+            b.vy *= dragM;
+            b.cx += b.vx * dt;
+            b.cy += b.vy * dt;
+            b.ang += b.om * dt;
+            b.om *= Math.exp(-dt * 0.4);
+            // NaN guard (§8-15): a broken body is removed, never propagated
+            if (!Number.isFinite(b.cx) || !Number.isFinite(b.cy) ||
+                !Number.isFinite(b.vx) || !Number.isFinite(b.vy) ||
+                !Number.isFinite(b.ang) || !Number.isFinite(b.om)) {
+              bodies.splice(bi, 1);
+              continue;
+            }
+            if (b.cx < -0.3 || b.cx > aspect + 0.3 || b.cy > 2.5 ||
+                b.cy < -0.5 || b.life > 40) {
+              bodies.splice(bi, 1);
+              continue;
+            }
+            if (sweepEnv <= 0) {   // side walls (open during the sweep)
+              if (b.cx < b.hw) { b.cx = b.hw; b.vx = Math.abs(b.vx) * 0.3; }
+              else if (b.cx > aspect - b.hw) {
+                b.cx = aspect - b.hw;
+                b.vx = -Math.abs(b.vx) * 0.3;
+              }
+            }
+            // height-field contact: rotated corners vs column heights
+            const c = Math.cos(b.ang);
+            const s = Math.sin(b.ang);
+            let maxPen = 0;
+            let lever = 0;
+            for (let k = 0; k < 4; k++) {
+              const sx = (k & 1) ? b.hw : -b.hw;
+              const sy = (k & 2) ? b.hh : -b.hh;
+              const wx = b.cx + c * sx - s * sy;
+              const wy = b.cy + s * sx + c * sy;
+              const col = Math.max(0, Math.min(NC - 1, Math.floor(wx / cw)));
+              const pen = hcol[col] - wy;
+              if (pen > maxPen) { maxPen = pen; lever = wx - b.cx; }
+            }
+            let contact = false;
+            if (maxPen > 0) {
+              contact = true;
+              b.cy += Math.min(maxPen, 0.05);
+              if (b.vy < 0) {
+                b.vy = -b.vy * K.rest;
+                if (Math.abs(b.vy) < 0.05) b.vy = 0;
+              }
+              b.vx *= Math.max(0, 1 - K.fric * dt * 30);
+              // gravity torque about the supporting corner → bodies topple
+              // toward a stable rest instead of balancing on a corner
+              b.om += lever * 18 * dt;
+              b.om *= Math.exp(-dt * 6);
+            }
+            // sleep (kills永久振動): slow + supported for a while → transfer
+            const sp2 = b.vx * b.vx + b.vy * b.vy;
+            if (contact && sp2 < 0.0012 && Math.abs(b.om) < 0.7 && sweepEnv <= 0) {
+              b.sleep += dt;
+            } else {
+              b.sleep = 0;
+            }
+            if (b.sleep > 0.26) {
+              stampBody(b);
+              bodies.splice(bi, 1);
+            }
+          }
+          // pairwise air collisions (circle approximation, n ≤ 200)
+          for (let i = 0; i < bodies.length; i++) {
+            const a = bodies[i];
+            const ra = a.size * 0.42;
+            for (let j = i + 1; j < bodies.length; j++) {
+              const b2 = bodies[j];
+              const rb = b2.size * 0.42;
+              const rr = ra + rb;
+              const dx = b2.cx - a.cx;
+              if (dx > rr || dx < -rr) continue;
+              const dy = b2.cy - a.cy;
+              if (dy > rr || dy < -rr) continue;
+              const d2 = dx * dx + dy * dy;
+              if (d2 >= rr * rr || d2 < 1e-9) continue;
+              const d = Math.sqrt(d2);
+              const nx = dx / d;
+              const ny = dy / d;
+              const overlap = rr - d;
+              const ma = a.size * a.size;
+              const mb = b2.size * b2.size;
+              const wa = mb / (ma + mb);
+              const wb = ma / (ma + mb);
+              a.cx -= nx * overlap * wa;
+              a.cy -= ny * overlap * wa;
+              b2.cx += nx * overlap * wb;
+              b2.cy += ny * overlap * wb;
+              const rvx = b2.vx - a.vx;
+              const rvy = b2.vy - a.vy;
+              const vn = rvx * nx + rvy * ny;
+              if (vn < 0) {
+                const imp = -1.15 * vn / (1 / ma + 1 / mb);
+                a.vx -= imp * nx / ma;
+                a.vy -= imp * ny / ma;
+                b2.vx += imp * nx / mb;
+                b2.vy += imp * ny / mb;
+                const tv = rvx * -ny + rvy * nx;
+                a.om -= tv * 2.0;
+                b2.om += tv * 2.0;
+              }
+            }
+          }
+          // avalanche relaxation: the pile keeps a natural angle of repose
+          // (slopeMax per column pair ≈ 60°; spikier peaks slump so letters
+          // pile into mounds instead of hollow needles)
+          const slopeMax = 0.014;
+          for (let i = 0; i < NC - 1; i++) {
+            const d = hcol[i] - hcol[i + 1];
+            if (d > slopeMax) {
+              const f = (d - slopeMax) * 0.25;
+              hcol[i] -= f;
+              hcol[i + 1] += f;
+            } else if (-d > slopeMax) {
+              const f = (-d - slopeMax) * 0.25;
+              hcol[i] += f;
+              hcol[i + 1] -= f;
+            }
+          }
+        }
+
+        // Sweep phase (invariant 5): pile height threshold → one wind pass.
+        function stepSweep(dt) {
+          let sum = 0;
+          let mx = 0;
+          for (let i = 0; i < NC; i++) {
+            sum += hcol[i];
+            if (hcol[i] > mx) mx = hcol[i];
+          }
+          meanH = sum / NC;
+          if (!sweeping) {
+            const thr = 0.18 + 0.62 * state.sweep;
+            if (meanH * 0.75 + mx * 0.25 > thr) {
+              sweeping = true;
+              sweepT = 0;
+              windDir = (sweepCount++ % 2 === 0) ? 1 : -1;
+            }
+            sweepEnv = 0;
+            return;
+          }
+          sweepT += dt;
+          const ein = Math.min(1, sweepT / 0.5);
+          const eout = 1 - Math.min(1, Math.max(0, (sweepT - 2.8) / 0.8));
+          sweepEnv = ein * ein * (3 - 2 * ein) * eout;
+          for (let i = 0; i < NC; i++) hcol[i] *= Math.exp(-dt * 1.9 * sweepEnv);
+          if (sweepT > 3.7) {
+            sweeping = false;
+            sweepEnv = 0;
+            hcol.fill(0);
+          }
+        }
+
+        /* ------------------------------------------------------------------
+           Sound → events. Three drivers behind ONE spawn API:
+           mic  — AnalyserNode features (RMS/centroid/ZCR, ema, hysteresis
+                  onset) + Web Speech words (progressive layer, silent
+                  fallback: invariant 4)
+           fake — ?fakesource=1: deterministic scripted event list; WebAudio
+                  and the microphone are NEVER opened
+           demo — mic denied/missing: sparse procedural onomatope shigure
+        ------------------------------------------------------------------ */
+
+        const aud = {
+          mode: FAKESOURCE ? "fake" : "demo",
+          ctx: null, analyser: null, stream: null,
+          timeData: null, freqData: null,
+          rmsF: 0, rmsS: 0, cen: 0, zcr: 0,
+          armed: true, refr: 0, showerAcc: 0,
+        };
+        const meters = { rms: 0, cen: 0, zcr: 0, onset: 0, kind: 4, exc: 0, sus: 0 };
+        let lastWord = "";
+        let fakeK = 0;
+        let demoK = 0;
+        let demoNext = 1.0;
+        let micEvSeed = 0;
+
+        // fakesource: one event every 0.55s forever (--motion guarantee).
+        // fx table spreads across the page; every event ALSO drops two small
+        // centre companions so the screen-centre sample never goes still.
+        function fireFakeEvent(k) {
+          const h = (n) => hseed(k * 977 + n);
+          const kinds = ["RAIN", "POTSU", "GORO", "WORD", "SOFT"];
+          const kindKey = kinds[k % 5];
+          const FXT = [0.50, 0.22, 0.62, 0.78, 0.40, 0.88, 0.30, 0.68];
+          const fx = FXT[k % 8];
+          const volN = 0.35 + 0.55 * h(1);
+          const akaOn = state.aka > 0.01 && h(2) < 0.08 + 0.30 * state.aka;
+          const word = kindKey === "WORD"
+            ? ONOMATOPE.WORD[Math.floor(k / 5) % ONOMATOPE.WORD.length]
+            : pickOnomatope(kindKey, k);
+          if (!sweeping) {
+            fireWord(word, kindKey, fx, volN, akaOn, k);
+            fireRainDrop(0.44 + 0.12 * h(3), 0.0, k * 7 + 1);
+            fireRainDrop(0.44 + 0.12 * h(4), 0.27, k * 7 + 2);
+          }
+          meters.rms = Math.max(meters.rms, volN);
+          meters.cen = h(5);
+          meters.zcr = kindKey === "RAIN" ? 0.7 : 0.25 + 0.3 * h(6);
+          meters.onset = 1;
+          meters.kind = KIND_INDEX[kindKey];
+          meters.exc = akaOn ? 0.9 : volN * 0.5;
+          meters.sus = 0.4 + 0.4 * h(7);
+          lastWord = word;
+        }
+
+        function fireDemoEvent(k) {
+          const h = (n) => hseed(k * 449 + n + 900);
+          const kinds = ["RAIN", "POTSU", "POTSU", "SOFT", "GORO", "RAIN", "SOFT", "POTSU"];
+          const kindKey = kinds[k % 8];
+          const volN = 0.2 + 0.5 * h(1);
+          const akaOn = state.aka > 0.01 && h(2) < 0.05 + 0.12 * state.aka;
+          const word = pickOnomatope(kindKey, k + 500);
+          if (!sweeping) {
+            fireWord(word, kindKey, 0.06 + 0.88 * h(3), volN, akaOn, k * 13 + 7);
+          }
+          meters.rms = Math.max(meters.rms, volN * 0.8);
+          meters.cen = h(4);
+          meters.zcr = kindKey === "RAIN" ? 0.65 : 0.3;
+          meters.onset = 1;
+          meters.kind = KIND_INDEX[kindKey];
+          meters.exc = akaOn ? 0.85 : volN * 0.4;
+          meters.sus = 0.3;
+          lastWord = word;
+          demoNext = simTime + (0.9 + 2.6 * h(5)) / (0.25 + 1.5 * state.amount);
+        }
+
+        let fakeMoteK = 0;
+        let fakeMotesSeeded = false;
+        function driverStep() {
+          if (aud.mode === "fake") {
+            while (0.6 + fakeK * 0.55 <= simTime) {
+              fireFakeEvent(fakeK);
+              fakeK++;
+            }
+            // slow centre motes every 0.22s (+ a pre-seeded column at t=0):
+            // guarantees the screen-centre sample of the --motion check
+            // always sees falling ink (§9)
+            if (!fakeMotesSeeded) {
+              // one continuous column: seed spacing (0.085) = stream spacing
+              // (0.22s × terminal 0.385/s), so the centre band is never empty
+              fakeMotesSeeded = true;
+              for (let i = 0; i < 19; i++) {
+                pending.push({
+                  t: simTime,
+                  ch: ["ヽ", "丶", "ゝ"][i % 3],
+                  kindKey: "MOTE",
+                  x: (0.487 + 0.026 * hseed(i * 91 + 2)) * aspect,
+                  y: 0.18 + 0.049 * i,  // tops out ≈1.06 = the stream's
+                                        // spawn height: no gap ever opens
+                  size: 0.032 + 0.008 * hseed(i * 91 + 5),
+                  aka: false,
+                  seed: i * 47 + 13,
+                  dirSign: 0,
+                });
+              }
+            }
+            while (0.2 + fakeMoteK * 0.12 <= simTime) {
+              const mk = fakeMoteK++;
+              if (sweeping) continue;
+              pending.push({
+                t: simTime,
+                ch: ["ヽ", "丶", "ゝ"][Math.floor(hseed(mk * 61 + 9) * 3) % 3],
+                kindKey: "MOTE",
+                x: (0.487 + 0.026 * hseed(mk * 61 + 4)) * aspect,
+                size: 0.032 + 0.008 * hseed(mk * 61 + 6),
+                aka: false,
+                seed: mk * 23 + 3,
+                dirSign: 0,
+              });
+            }
+          } else if (aud.mode === "demo") {
+            while (simTime >= demoNext) {
+              fireDemoEvent(demoK);
+              demoK++;
+            }
+          }
+        }
+
+        function fixedStep() {
+          simTime += STEP;
+          driverStep();
+          for (let i = pending.length - 1; i >= 0; i--) {
+            if (pending[i].t <= simTime) {
+              spawnBody(pending[i]);
+              pending.splice(i, 1);
+            }
+          }
+          stepPhysics(STEP);
+          stepSweep(STEP);
+        }
+
+        // ---- microphone analysis (per frame; invariant 4) ----
+        function updateMicAudio(dt) {
+          const an = aud.analyser;
+          if (!an) return;
+          an.getFloatTimeDomainData(aud.timeData);
+          const N = aud.timeData.length;
+          let sum = 0;
+          let zc = 0;
+          let prev = aud.timeData[0];
+          for (let i = 1; i < N; i++) {
+            const v = aud.timeData[i];
+            sum += v * v;
+            if ((v >= 0) !== (prev >= 0)) zc++;
+            prev = v;
+          }
+          const rms = Math.sqrt(sum / N);
+          const zcrRaw = zc / N;
+          an.getByteFrequencyData(aud.freqData);
+          let msum = 0;
+          let mw = 0;
+          for (let i = 0; i < aud.freqData.length; i++) {
+            msum += aud.freqData[i];
+            mw += aud.freqData[i] * i;
+          }
+          const cenRaw = msum > 4 ? (mw / msum) / (aud.freqData.length * 0.5) : 0;
+          aud.rmsF += (rms - aud.rmsF) * (1 - Math.exp(-dt / 0.05));
+          aud.rmsS += (rms - aud.rmsS) * (1 - Math.exp(-dt / 1.4));
+          aud.cen += (cenRaw - aud.cen) * (1 - Math.exp(-dt / 0.2));
+          aud.zcr += (Math.min(1, zcrRaw * 2.4) - aud.zcr) * (1 - Math.exp(-dt / 0.2));
+          meters.rms = Math.min(1, aud.rmsF / 0.2);
+          meters.cen = Math.min(1, aud.cen);
+          meters.zcr = aud.zcr;
+          meters.sus = Math.min(1, aud.rmsS / 0.06);
+          // onset: fast RMS crosses slow-ema threshold (hysteresis + refractory)
+          aud.refr = Math.max(0, aud.refr - dt);
+          const hi = aud.rmsS * 1.9 + 0.010;
+          const lo = aud.rmsS * 1.15 + 0.004;
+          if (aud.armed && aud.refr <= 0 && aud.rmsF > hi && aud.rmsF > 0.012) {
+            aud.armed = false;
+            aud.refr = 0.16;
+            micOnset();
+          } else if (!aud.armed && aud.rmsF < lo) {
+            aud.armed = true;
+          }
+          // sustained hiss → the ザー shower (continuous rain marks)
+          if (aud.rmsF > 0.03 && aud.zcr > 0.45 && !sweeping) {
+            aud.showerAcc += dt * (0.8 + 5.0 * state.amount)
+              * Math.min(1, aud.rmsF / 0.1);
+            while (aud.showerAcc > 1) {
+              aud.showerAcc -= 1;
+              micEvSeed++;
+              fireRainDrop(0.06 + 0.88 * hseed(micEvSeed * 53 + 5), 0, micEvSeed * 53);
+            }
+          } else {
+            aud.showerAcc = Math.min(aud.showerAcc, 0.5);
+          }
+        }
+
+        function micOnset() {
+          micEvSeed++;
+          const volN = Math.min(1, aud.rmsF / 0.18);
+          const exc = volN * 0.55 + Math.min(1, aud.cen) * 0.45;
+          meters.onset = 1;
+          meters.exc = exc;
+          if (sweeping) return;
+          const akaOn = state.aka > 0.01 && exc > (1.02 - 0.72 * state.aka);
+          let kindKey;
+          const noisy = aud.zcr > 0.5;
+          const sus = aud.rmsS > 0.03;
+          if (volN > 0.6 && aud.cen < 0.32) kindKey = "GORO";
+          else if (noisy && sus) kindKey = "RAIN";
+          else if (sus && !noisy) kindKey = "SOFT";
+          else kindKey = "POTSU";
+          let word;
+          if (speechQueue.length) {   // recognised words take priority
+            word = speechQueue.shift();
+            kindKey = "WORD";
+          } else {
+            word = pickOnomatope(kindKey, micEvSeed);
+          }
+          meters.kind = KIND_INDEX[kindKey];
+          lastWord = word;
+          fireWord(word, kindKey, 0.08 + 0.84 * hseed(micEvSeed * 71 + 3),
+            volN, akaOn, micEvSeed * 7 + 1);
+        }
+
+        // ---- Web Speech (progressive layer — Chrome系+online only; every
+        // failure path is a SILENT fallback to onomatope, never an error) ----
+        const speechQueue = [];
+        let speechRec = null;
+        let speechRestarts = 0;
+        function startSpeech() {
+          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!SR) return;
+          try {
+            speechRec = new SR();
+            speechRec.lang = "ja-JP";
+            speechRec.continuous = true;
+            speechRec.interimResults = false;
+            speechRec.onresult = (event) => {
+              for (let i = event.resultIndex; i < event.results.length; i++) {
+                const res = event.results[i];
+                if (!res.isFinal || !res[0]) continue;
+                const words = String(res[0].transcript || "").trim().split(/\s+/);
+                for (const w of words) {
+                  const trimmed = [...w].slice(0, 7).join("");
+                  if (trimmed && speechQueue.length < 12) speechQueue.push(trimmed);
+                }
+              }
+            };
+            speechRec.onerror = () => {};
+            speechRec.onend = () => {
+              if (aud.mode === "mic" && speechRestarts < 60) {
+                speechRestarts++;
+                setTimeout(() => {
+                  try { speechRec.start(); } catch (_) { /* silent */ }
+                }, 1200);
+              }
+            };
+            speechRec.start();
+          } catch (_) {
+            speechRec = null;
+          }
+        }
+
+        // ---- microphone acquisition (the 3 fallback paths all keep the
+        // demo shigure alive behind the overlay: order §1/§7) ----
+        async function startMic() {
+          if (FAKESOURCE) return;
+          if (!window.isSecureContext) {
+            setOverlay("error", "マイクを使えません(非セキュア接続)",
+              "この作品のマイク入力は https または localhost でのみ使えます。"
+              + "その間もデモ時雨が降り続けています — このまま眺めることもできます。",
+              { skip: true });
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "マイクに対応していません",
+              "このブラウザではマイク入力を取得できませんでした。"
+              + "デモ時雨をこのまま眺めることができます。",
+              { skip: true });
+            return;
+          }
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!aud.ctx) aud.ctx = new Ctx();
+            await aud.ctx.resume();   // §8-14: resume after the user gesture
+            const src = aud.ctx.createMediaStreamSource(stream);
+            aud.analyser = aud.ctx.createAnalyser();
+            aud.analyser.fftSize = 2048;
+            aud.analyser.smoothingTimeConstant = 0;
+            src.connect(aud.analyser);
+            aud.stream = stream;
+            aud.timeData = new Float32Array(aud.analyser.fftSize);
+            aud.freqData = new Uint8Array(aud.analyser.frequencyBinCount);
+            aud.mode = "mic";
+            speechRestarts = 0;
+            setOverlay("hidden", "", "", null);
+            startSpeech();
+          } catch (err) {
+            const name = err && err.name;
+            const why = name === "NotAllowedError"
+              ? "マイクの使用が許可されませんでした。ブラウザのサイト設定から許可して再試行できます。"
+              : name === "NotFoundError"
+                ? "マイクが見つかりませんでした。接続を確認して再試行できます。"
+                : `マイクを開けませんでした(${name || "unknown"})。`;
+            setOverlay("error", "マイクを使えませんでした",
+              `${why} その間もデモ時雨が降り続けています。`,
+              { mic: true, skip: true, micLabel: "マイクを再試行" });
+          }
+        }
+
+        /* ------------------------------------------------------------------
+           Targets, height texture, resize (state-preserving world remap)
+        ------------------------------------------------------------------ */
+
+        let layerA = null;
+        let layerB = null;
+        let layerPing = false;   // current readable layer = ping ? B : A
+        let paperT = null;       // baked paper (re-baked on resize / slider)
+        let paperBaked = -1;     // paper-slider value the bake was made with
+        let targetsReady = false;
+        let preRoll = FREEZE ? PRE_STEPS : 0;
+
+        function bakePaper() {
+          renderPass(paperT, programs.paper, () => {
+            const u = locations.paper;
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uPaper, state.paper);
+          });
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          paperBaked = state.paper;
+        }
+
+        const hTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, hTex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, NC, 1, 0,
+          gl.RED, gl.UNSIGNED_BYTE, null);
+
+        function uploadH() {
+          for (let i = 0; i < NC; i++) {
+            hBytes[i] = Math.max(0, Math.min(255, Math.round((hcol[i] / 1.2) * 255)));
+          }
+          gl.bindTexture(gl.TEXTURE_2D, hTex);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NC, 1,
+            gl.RED, gl.UNSIGNED_BYTE, hBytes);
+        }
+
+        function currentLayer() {
+          return layerPing ? layerB : layerA;
+        }
+
+        function layerUpdatePass(dt) {
+          const src = currentLayer();
+          const dst = layerPing ? layerA : layerB;
+          renderPass(dst, programs.layer, () => {
+            const u = locations.layer;
+            bindTexture(0, src.tex);
+            bindTexture(1, hTex);
+            gl.uniform1i(u.uPrev, 0);
+            gl.uniform1i(u.uH, 1);
+            gl.uniform2f(u.uRes, dst.width, dst.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uBleed, 0.15 + 1.1 * state.bleed);
+            gl.uniform1f(u.uWeather, 0.1 + 1.4 * state.weather);
+            gl.uniform1f(u.uSweepAmt, sweepEnv);
+            gl.uniform1f(u.uWindDir, windDir);
+            bindTexture(2, paperT.tex);
+            gl.uniform1i(u.uPaperT, 2);
+          });
+          layerPing = !layerPing;
+        }
+
+        function flushStamps() {
+          if (!stampQueue.length) return;
+          drawGlyphInstances(stampQueue, 1, currentLayer(), aspect);
+          stampQueue.length = 0;
+        }
+
+        function compositePass() {
+          refreshAtlasMips();
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, currentLayer().tex);
+            bindTexture(1, hTex);
+            bindTexture(2, atlasTex);
+            bindTexture(3, paperT.tex);
+            gl.uniform1i(u.uLayer, 0);
+            gl.uniform1i(u.uH, 1);
+            gl.uniform1i(u.uAtlas, 2);
+            gl.uniform1i(u.uPaperT, 3);
+            gl.uniform2f(u.uRes, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, simTime);
+            gl.uniform1f(u.uInk, state.ink);
+            gl.uniform1f(u.uWeather, state.weather);
+            gl.uniform1i(u.uDebug, state.debugView);
+            gl.uniform4f(u.uMeterA, meters.rms, meters.cen, meters.zcr, meters.onset);
+            gl.uniform4f(u.uMeterB, meters.kind, meters.exc, meters.sus, sweepEnv);
+          });
+        }
+
+        function drawFallingBodies() {
+          if (state.debugView >= 2 || !bodies.length) return;
+          drawGlyphInstances(bodies, state.debugView === 1 ? 2 : 0, null, aspect);
+        }
+
+        function remapHeights(oldA, newA) {
+          const old = Float32Array.from(hcol);
+          const shift = (newA - oldA) / 2;
+          for (let i = 0; i < NC; i++) {
+            const wx = ((i + 0.5) / NC) * newA - shift;
+            if (wx < 0 || wx > oldA) {
+              hcol[i] = 0;
+              continue;
+            }
+            const fo = (wx / oldA) * NC - 0.5;
+            const i0 = Math.floor(fo);
+            const fr = fo - i0;
+            const a = old[Math.max(0, Math.min(NC - 1, i0))];
+            const b = old[Math.max(0, Math.min(NC - 1, i0 + 1))];
+            hcol[i] = a * (1 - fr) + b * fr;
+          }
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const w = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const h = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width === w && canvas.height === h && targetsReady) return;
+          const oldA = canvas.width / Math.max(canvas.height, 1);
+          const hadState = targetsReady && preRoll === 0;
+          canvas.width = w;
+          canvas.height = h;
+          aspect = w / h;
+          destroyTarget(paperT);
+          paperT = createTarget(w, h);
+          bakePaper();
+          if (hadState) {
+            // §7: FBOs are reallocated at the new size but the developed page
+            // SURVIVES — the layer is resampled in world coordinates, the
+            // height field is re-sampled on the CPU, bodies shift with the
+            // horizontal centre. (Chosen over the blank-page reset option.)
+            const newA = createTarget(w, h);
+            const newB = createTarget(w, h);
+            renderPass(newA, programs.copy, () => {
+              const u = locations.copy;
+              bindTexture(0, currentLayer().tex);
+              gl.uniform1i(u.uSrc, 0);
+              gl.uniform1f(u.uAspect, aspect);
+              gl.uniform1f(u.uOldAspect, oldA);
+            });
+            clearTarget(newB);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            destroyTarget(layerA);
+            destroyTarget(layerB);
+            layerA = newA;
+            layerB = newB;
+            layerPing = false;
+            remapHeights(oldA, aspect);
+            const shift = (aspect - oldA) / 2;
+            for (const b of bodies) b.cx += shift;
+            for (const sp of pending) sp.x += shift;
+          } else {
+            destroyTarget(layerA);
+            destroyTarget(layerB);
+            layerA = createTarget(w, h);
+            layerB = createTarget(w, h);
+            clearTarget(layerA);
+            clearTarget(layerB);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            layerPing = false;
+          }
+          targetsReady = true;
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        /* ------------------------------------------------------------------
+           Frame loop
+        ------------------------------------------------------------------ */
+
+        let acc = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let readyStamped = false;
+        let lastDrawSig = "";
+        const readout = document.getElementById("readout");
+
+        function frame(now) {
+          resize();
+          if (paperBaked !== state.paper) bakePaper();
+          // dt clamp = MAX_SUBSTEPS worth of fixed steps: on slow (software
+          // GL) machines the piece runs slow-motion instead of exploding.
+          const rawDt = Math.min(MAX_SUBSTEPS / 60, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+
+          if (preRoll > 0) {
+            // deterministic fixed-dt development (freeze pre-roll), chunked
+            // with a true GPU sync per chunk (CRAFT §C4: swiftshader queues)
+            const steps = Math.min(PRE_CHUNK, preRoll);
+            for (let i = 0; i < steps; i++) {
+              fixedStep();
+              uploadH();
+              layerUpdatePass(STEP);
+              flushStamps();
+            }
+            preRoll -= steps;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            glSync();
+            if (preRoll > 0) {
+              requestAnimationFrame(frame);
+              return;
+            }
+          } else if (!FREEZE && !state.pauseAnim) {
+            const dt = rawDt;
+            if (dt > 0) {
+              meters.onset *= Math.exp(-dt * 5);
+              if (aud.mode === "mic") updateMicAudio(dt);
+              else meters.rms *= Math.exp(-dt * 2.0);
+              acc += dt;
+              let n = 0;
+              while (acc >= STEP && n < MAX_SUBSTEPS) {
+                fixedStep();
+                acc -= STEP;
+                n++;
+              }
+              if (n === MAX_SUBSTEPS) acc = 0;   // frame drop: don't spiral
+              if (n > 0) {
+                uploadH();
+                layerUpdatePass(STEP * n);
+                flushStamps();
+              }
+            }
+          }
+
+          // static-scene short-circuit (frozen/paused only): identical input
+          // → skip the GPU passes; preserveDrawingBuffer keeps the frame.
+          const drawSig = `${simTime}|${canvas.width}x${canvas.height}|${
+            state.paper}|${state.ink}|${state.weather}|${state.bleed}|${
+            state.aka}|${state.amount}|${state.size}|${state.sweep}|${
+            state.debugView}`;
+          if (readyStamped && (FREEZE || state.pauseAnim) && drawSig === lastDrawSig) {
+            requestAnimationFrame(frame);
+            return;
+          }
+          lastDrawSig = drawSig;
+
+          compositePass();
+          drawFallingBodies();
+
+          // verification hook: first REAL frame, stamped only after the GPU
+          // queue is drained (renderPass(null,…) left the backbuffer bound)
+          if (!readyStamped && preRoll === 0) {
+            glSync();
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            const modeLabel = aud.mode === "mic" ? "mic"
+              : aud.mode === "fake" ? "fake" : "デモ";
+            readout.textContent = `FPS ${fps.toFixed(0)} / 描画 ${canvas.width}×${
+              canvas.height} / 文字 ${bodies.length}・堆積 ${
+              Math.round(meanH * 100)}% / 入力 ${modeLabel}${
+              lastWord ? " 「" + lastWord + "」" : ""}`;
+          }
+          requestAnimationFrame(frame);
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+
+        // ---- overlay wiring (mic invite / error paths) ----
+        micStartBtn.addEventListener("click", () => { startMic(); });
+        micSkipBtn.addEventListener("click", () => setOverlay("hidden", "", "", null));
+        document.getElementById("micBtn").addEventListener("click", () => { startMic(); });
+        if (FAKESOURCE) {
+          document.getElementById("micBtn").style.display = "none";
+        } else {
+          setOverlay("info", "言の葉時雨 — 音が墨になる",
+            "マイクで集めた音が墨の活字になって降り積もります。声が取れれば言葉が、"
+            + "環境音は「ザー」「ゴロゴロ」「ポツ」などのオノマトペが降ります。"
+            + "マイクなしでもデモ時雨を眺められます。",
+            { mic: true, skip: true, micLabel: "マイクを許可して始める" });
+        }
+
+        try {
+          resize();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          const msg = error && error.message ? error.message : "";
+          if (/RENDER TARGET INCOMPLETE/.test(msg)) {
+            setOverlay("error", "RENDER TARGET UNAVAILABLE",
+              "RGBA8 render targets could not be allocated. Try another browser/GPU.",
+              null);
+          } else {
+            setOverlay("error", "WEBGL SETUP ERROR",
+              msg || "Could not initialize the renderer.", null);
+          }
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
