@@ -1,0 +1,77 @@
+{
+  "artifact": {
+    "file": "loop/state/kotonoha-shigure/",
+    "screenshots": [
+      "loop/state/kotonoha-shigure/shots/review/final_warm_noui.png",
+      "loop/state/kotonoha-shigure/shots/review/final_thumb.png",
+      "loop/state/kotonoha-shigure/shots/review/crop_pile.png",
+      "loop/state/kotonoha-shigure/shots/review/final_freeze.png",
+      "loop/state/kotonoha-shigure/shots/review/debug1_physics.png",
+      "loop/state/kotonoha-shigure/shots/review/debug2_layer.png",
+      "loop/state/kotonoha-shigure/shots/review/debug4_specimen.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "生成りの和紙のような温かいベージュの紙面に、墨の筆致の断片と小さな仮名が散らばり、画面下部(特に右下)に黒い文字片が吹き溜まりのように積もっている。書の断片が降って堆積した、余白の広い和の画面に見える。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 5,
+      "evidence": "final_thumb/final_warm_noui: 地は真っ白ではない温かい生成り色で、横方向の繊維流れと点状の漉きムラが全面に確認できる(fbm 手続きテクスチャ)。墨は無彩の黒〜濃灰、彩色は朱一色のみ(final_freeze の右下『常/無/葉/の』、crop_pile 中央左の朱の点画)。debug4_specimen の墨ランプ(淡墨→濃墨のグレーバー)と朱バーで一色規律と階調が担保。純白飛び・純黒つぶれは見当たらない。",
+      "reject_reasons": [
+        "却下候補『カラフル化』: 朱以外の彩色を探したが、debug2 の青紫は B=朱チャンネルの可視化用配色であり、実描画(final/crop)では朱=赤のみ。反証成立。",
+        "却下候補『純白/純黒つぶれ』: 紙地は ~230 の暖色で 255 飛びなし、墨は specimen の濃度域内で階調保持。反証成立。"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 5,
+      "evidence": "debug1_physics: シアンの矩形ボディが回転しながら上部から落下し、画面下に吹き溜まり状の山を形成、各ボディが互いに載り合って静止している。赤い高さ場ラインが堆積輪郭を正確に追従。V1 運動応答 pass(diff 2.02)。crop_pile/final_freeze の堆積帯でも文字が積み重なった安定した山として読める。",
+      "reject_reasons": [
+        "却下候補『整列タイポ』: ボディ姿勢がランダム回転し山なりに堆積しており整列表示ではない。反証成立。",
+        "却下候補『貫通/永久振動』: debug1 で重なりは静止スタックの許容重なり範囲、高さ場が山形に収束しており発散なし。V1 長時間安定 pass。反証成立。"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "debug4_specimen: 上段に落下中相当のシャープなグリフ(葉/の/雨)、下段に着地後の縁がふくらんで紙へ染み込んだにじみ版(輪郭を失い墨痕化)が並ぶ、before/after が明示。debug2_layer(蓄積レイヤ raw)で着地スタンプの転写を確認。crop_pile では鋭い黒グリフの背後に淡い墨のにじみ跡(古層)が薄く残る。",
+      "reject_reasons": [
+        "却下候補『スクリーン上フォント表示のまま』: specimen 下段の染み込み・輪郭喪失で物質化を反証。",
+        "残る弱点(4止まりの理由): 最終描画の堆積帯は鋭い剛体グリフが支配的で、圧密・墨痕への風化が specimen ほど本編で強く出ていない。にじみの異方性も specimen ではやや雲状で繊維方向性がやや弱い。"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "時間/知覚軸。静止画で音応答は直接判定不可だが V1 運動応答 pass が前提。構造証拠: グリフサイズが大小に分布(final_freeze の太い大型カタカナ vs 小さな点画)し RMS→サイズ写像を示唆、朱アクセントの選択的付与がプロソディ→朱を示唆。UI に『文字の大きさ=音量→サイズの利得』『朱のさし=興奮閾値』のパラメータが実在。",
+      "reject_reasons": [
+        "却下候補『音と無関係に一様落下』: サイズ分布と朱の選択的付与が特徴量駆動を構造的に裏付け。静止のみを理由に4未満にはしない(規律準拠)。"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "時間/場軸。V1 長時間安定 pass(mean 188.5→187.9/255、white 0.00%、black 0%、払いサイクルで有界)。構造証拠: debug1 の赤い高さ場ライン(堆積高さ計測)と UI『払いの敷居=風払い発動の堆積高さ閾値 0.60』が閾値到達→風掃き出しの機構を裏付け。蓄積レイヤは有界(CRAFT §A5 の whiteout 回避を満たす)。",
+      "reject_reasons": [
+        "却下候補『飽和停止/蓄積発散』: 高さ場計測と払い閾値の実在、V1 有界 pass で反証。静止のみを理由に4未満にはしない(規律準拠)。"
+      ]
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "マーク/時間軸。final_warm_noui/final_freeze で落下マークは字重・サイズ・姿勢が一様でなく、細く小さな斜めの点画(ザー系)と太く重い大型カタカナ(ゴロゴロ系)が混在。debug1 でボディサイズが多様。同じ落ち方をしていない構造的証拠がある。",
+      "reject_reasons": [
+        "却下候補『一様な文字の雨』: 字重・サイズ・角度の分布差で反証。",
+        "残る弱点(4止まりの理由): 静止画では初速・角速度・摩擦の種別プリセット差を運動として直接確認できず、字形分布からの推定に留まる。"
+      ]
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 5
+  },
+  "verdict": "pass",
+  "summary": "第一印象がテーマ(和紙に墨文字が降り積もる)と一致。debug1 で剛体落下+堆積+高さ場、debug4 でにじみの before/after と墨ランプ・朱一色、final/crop で生成り紙地と朱一色規律を確認。時間軸(inv3-6)は V1 の運動応答/長時間安定 pass を前提に構造証拠で裏付け。全不変量≥4・common 全軸≥4 で pass。inv3 は本編での圧密・風化表現、inv6 は種別ごとの落下運動が静止では弱含みだが、いずれも反証は成立せず4以上。"
+}

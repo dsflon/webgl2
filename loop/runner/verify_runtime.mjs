@@ -184,10 +184,12 @@ export async function verifyRuntime(url, opts = {}) {
       ready = false;
     }
 
-    // no-input profile (2026-07-19 人間承認のメタループ改訂): 無入力作品は
-    // <meta name="art-input" content="none"> を宣言し、camera-denied パスを免除
+    // non-camera profile (2026-07-19 人間承認のメタループ改訂): カメラを使わない
+    // 作品は <meta name="art-input" content="none|mic"> を宣言し、camera-denied
+    // パスを免除。mic のマイク固有検証は追加しない(ユーザー裁定=目視の領分)
     const noInput = await page
-      .evaluate(() => document.querySelector('meta[name="art-input"]')?.content === "none")
+      .evaluate(() => ["none", "mic"].includes(
+        document.querySelector('meta[name="art-input"]')?.content))
       .catch(() => false);
     add("ready", ready, ready ? `__artReady within ${timeout}ms` : `__artReady NOT set within ${timeout}ms — 起動失敗か検証フック未実装`);
 
@@ -293,7 +295,7 @@ export async function verifyRuntime(url, opts = {}) {
 
     // ---- camera-denied pass ----
     if (noInput) {
-      add("cameraDenied", true, "skipped: art-input=none(無入力作品プロファイル)");
+      add("cameraDenied", true, "skipped: art-input=none|mic(非カメラ入力プロファイル)");
     } else {
       const page2 = await browser.newPage({ viewport: { width: 900, height: 700 } });
       await page2.addInitScript(deniedCameraInit);

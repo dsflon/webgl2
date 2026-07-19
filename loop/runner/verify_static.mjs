@@ -47,12 +47,14 @@ export function verifyStatic(source) {
   const warn = (path, rule, message, hint, line) =>
     findings.push({ path, rule, severity: "warning", message, hint, line });
 
-  // --- no-input profile (2026-07-19 人間承認のメタループ改訂) ---
-  // 無入力(完全ジェネラティブ)作品は <meta name="art-input" content="none"> を
+  // --- non-camera input profile (2026-07-19 人間承認のメタループ改訂) ---
+  // カメラを使わない作品は <meta name="art-input" content="none|mic"> を
   // 宣言することで、カメラ関連規約(facingMode / 3エラー経路 / #video / #retryCamera)
   // のみ免除される。使われないカメラエラー文字列の埋め込み(=偽装)を要求しないため。
+  // mic はマイク入力作品(kotonoha-shigure〜)。マイク固有の自動検証は追加しない
+  // (2026-07-19 ユーザー裁定「マイク関連は自動検証しなくて大丈夫」— 目視確認の領分)。
   // それ以外の規約(hooks / DPR / overlay / reduced-motion 等)は全作品共通。
-  const noInput = /<meta\s+name=["']art-input["']\s+content=["']none["']/i.test(source);
+  const noInput = /<meta\s+name=["']art-input["']\s+content=["'](none|mic)["']/i.test(source);
 
   // --- header comment: the 5 mandatory sections (repo constraint block) ---
   const headerMatch = source.match(/<!--([\s\S]*?)-->/);
