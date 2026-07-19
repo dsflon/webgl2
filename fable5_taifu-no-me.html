@@ -634,19 +634,23 @@
           // subsidence: between the rainbands the air sinks and clears — the
           // dissipation RISES where the injection field is weak, so the gaps
           // between spiral arms open down to the sea instead of silting up.
+          // Active from just outside the eyewall so the near field reads as
+          // arms, not a solid overcast disc.
           float subsidence(float r, float rawShape, float R, float rEdge) {
-            float bandZone = smoothstep(1.05 * R, 1.5 * R, r)
-              * (1.0 - smoothstep(rEdge * 0.80, rEdge * 1.02, r));
-            return 0.55 * bandZone * smoothstep(0.45, 0.06, rawShape);
+            float bandZone = smoothstep(0.92 * R, 1.35 * R, r)
+              * (1.0 - smoothstep(rEdge * 0.82, rEdge * 1.02, r));
+            return 1.05 * bandZone * smoothstep(0.60, 0.10, rawShape);
           }
           // dissipation: strongest inside the eye (clears it), gentle in the
           // band region, strong again past the screen edge (containment).
           float dissField(float r, float R, float calmAmt, float rEdge) {
             // base 0.22: clouds live ~4.5s → a few windings, so the bands stay
             // broad spiral arms instead of shearing into vinyl grooves.
+            // Outer term ×1.5 (raised) so the far field breaks into torn,
+            // sparse arms rather than a smooth fading membrane.
             return 0.22
               + eyeCore(r, R) * mix(1.4, 3.6, calmAmt)
-              + smoothstep(rEdge * 0.74, rEdge * 1.04, r) * 1.5;
+              + smoothstep(rEdge * 0.70, rEdge * 1.04, r) * 2.3;
           }
         `;
 
@@ -702,12 +706,12 @@
             vec2 v = unpackVel(texture(uVel, back));
 
             // Rankine target: tangential (counter-clockwise, NH typhoon) with
-            // a 15° inward spiral outside the eyewall → clouds wind INTO the
-            // centre instead of circling forever.
+            // a ~30° inward spiral outside the eyewall → clouds wind INTO the
+            // centre as discrete arms instead of circling as concentric rings.
             vec2 rhat = p / max(r, 1e-5);
             vec2 that = vec2(-rhat.y, rhat.x);
             float vt = rankineVt(r, uR, uVmax);
-            float beta = radians(18.0) * smoothstep(uR * 0.9, uR * 1.6, r);
+            float beta = radians(30.0) * smoothstep(uR * 0.9, uR * 1.7, r);
             vec2 vTarget = (cos(beta) * that - sin(beta) * rhat) * vt;
 
             // relaxation (ema): gentle in the bands so curl/confinement detail
@@ -829,13 +833,13 @@
             // cloud CELLS, not sandpaper. The eyewall ring stays dense
             // (mottle relaxed toward 1 there) so the wall reads as a wall.
             float mot = fbm(p * 3.4 + 0.8 * curlNoise(p * 1.7));
-            float mottle = mix(1.0, 0.18 + 1.55 * mot, 0.30 + 0.68 * uDetailAmt);
-            mottle = mix(mottle, 1.0, 0.6 * injRing(r, uR));
+            float mottle = mix(1.0, 0.05 + 2.0 * mot, 0.30 + 0.68 * uDetailAmt);
+            mottle = mix(mottle, 1.0, 0.30 * injRing(r, uR));
 
             float shape = 1.05 * injRing(r, uR)
-              + 0.34 * injCdo(r, uR)
+              + 0.16 * injCdo(r, uR)
               + 0.70 * injArcs(r, th, uR)
-              + 0.36 * injBand(r, th, uR, uEdge);
+              + 0.52 * injBand(r, th, uR, uEdge);
             float injGate = smoothstep(0.74 * uR, 0.94 * uR, r); // eye = no injection
             float taper = smoothstep(0.82, 0.45, den);           // ~0.8 頭打ち
 
@@ -875,7 +879,7 @@
             float ca = cos(ang);
             float sa = sin(ang);
             vec2 pc = vec2(ca * p.x + sa * p.y, -sa * p.x + ca * p.y);
-            float n = fbm(pc * 3.4 + 0.30 * curlNoise(pc * 1.6));
+            float n = fbm(pc * 4.4 + 0.40 * curlNoise(pc * 2.1));
             fragColor = vec4(vec3(n), 1.0);
           }
         `;
@@ -937,7 +941,9 @@
           float dEffAt(vec2 uv) {
             float den = texture(uDen, uv).r;
             float dtl = texture(uDtl, uv).r;
-            float mottle = mix(1.0, 0.42 + 1.05 * dtl, 0.35 + 0.75 * uDetailAmt);
+            // mottle is the MAIN component of the render gain (CRAFT §A1): high
+            // contrast so the cloud tops read as boiling cells, not a membrane.
+            float mottle = mix(1.0, 0.20 + 1.55 * dtl, 0.42 + 0.85 * uDetailAmt);
             return clamp(den * mottle, 0.0, 1.05);
           }
 
@@ -974,24 +980,38 @@
             }
 
             // ---- shading (shared by final & specimen view) ----
-            vec2 e = vec2(1.6) / uRes;
+            vec2 e = vec2(1.3) / uRes;
             float d0 = dEffAt(vUv);
             float dxp = dEffAt(vUv + vec2(e.x, 0.0));
             float dyp = dEffAt(vUv + vec2(0.0, e.y));
 
-            float kN = 16.0 + 50.0 * uRelief;
-            vec3 N = normalize(vec3(-(dxp - d0) * kN, -(dyp - d0) * kN, 1.0));
+            // normal = smooth field gradient + fine detail finite-diff gradient
+            // (CRAFT §A3): the crevasse shading needs the high-freq mottle in
+            // the normal, not just a smooth low-res gradient.
+            float kN = 20.0 + 64.0 * uRelief;
+            vec2 dp = vec2(2.2) / uRes;
+            float nxp = texture(uDtl, vUv + vec2(dp.x, 0.0)).r
+              - texture(uDtl, vUv - vec2(dp.x, 0.0)).r;
+            float nyp = texture(uDtl, vUv + vec2(0.0, dp.y)).r
+              - texture(uDtl, vUv - vec2(0.0, dp.y)).r;
+            float dGate = smoothstep(0.12, 0.45, d0) * uRelief;
+            vec3 N = normalize(vec3(
+              -(dxp - d0) * kN - nxp * 22.0 * dGate,
+              -(dyp - d0) * kN - nyp * 22.0 * dGate, 1.0));
             vec2 L2 = normalize(vec2(-0.58, 0.66));       // fixed light, upper-left
             vec3 L3 = normalize(vec3(L2 * 0.80, 0.62));
             float ndl = clamp(dot(N, L3), 0.0, 1.0);
-            float lit = 0.56 + 0.46 * ndl;
+            float lit = 0.48 + 0.58 * ndl;
 
-            // 2-tap self-shadow toward the light in the effective field
+            // self-shadow toward the light: 2 field taps + 1 noise tap, deeper
+            // contrast (+~30%) so the cloud stack casts across itself.
             vec2 luv = L2 * vec2(1.0 / uAspect, 1.0);
-            float s1 = dEffAt(vUv + luv * 0.014);
-            float s2 = dEffAt(vUv + luv * 0.034);
-            float occ = clamp(0.9 * max(0.0, s1 - d0) + 0.6 * max(0.0, s2 - d0), 0.0, 1.0);
-            float shade = exp(-occ * (0.8 + 2.0 * uRelief));
+            float s1 = dEffAt(vUv + luv * 0.013);
+            float s2 = dEffAt(vUv + luv * 0.032);
+            float sn = texture(uDtl, vUv + luv * 0.021).r - texture(uDtl, vUv).r;
+            float occ = clamp(0.95 * max(0.0, s1 - d0) + 0.7 * max(0.0, s2 - d0)
+              + 0.5 * max(0.0, sn), 0.0, 1.0);
+            float shade = exp(-occ * (1.1 + 2.7 * uRelief));
 
             float cov = smoothstep(0.12, 0.78, d0);
 
@@ -1025,7 +1045,7 @@
 
             // ---- clouds: oklab grey→bluish white, shaded. The eyewall ring
             // gets a lift so the wall reads as the tallest, densest cloud ----
-            float tHi = smoothstep(0.45, 0.98, d0 + 0.16 * injRing(r, uR) * cov);
+            float tHi = smoothstep(0.45, 0.98, d0 + 0.10 * injRing(r, uR) * cov);
             vec3 cloud = oklabMix(vec3(0.60, 0.645, 0.685),
               vec3(0.845, 0.875, 0.905), tHi);
             cloud *= lit * shade;
@@ -1142,10 +1162,18 @@
         let simW = 2, simH = 2, dtlW = 2, dtlH = 2;
         let preRoll = 0;
         let simTime = 0;
-        const PREROLL_STEPS = 240;   // §4: fixed-step development (dt = 1/60)
+        const PREROLL_STEPS = 150;   // §4: fixed-step development (dt = 1/60).
+        // Empirically the quasi-steady spiral is fully developed (dark eye,
+        // dense eyewall, torn spiral arms) by ~150 continuously-forced steps;
+        // 240 only lengthened software-GL boot with no visible gain.
         const PREROLL_CHUNK = 24;    // steps per frame while pre-rolling
         const SIM_LONG = 416;        // 流体は半解像度以下(規約 §7)
-        const JACOBI_ITERS = 18;
+        const JACOBI_ITERS = 18;     // pressure solve quality for LIVE frames
+        // Pre-roll uses fewer Jacobi iterations: the pressure solve only
+        // enforces incompressibility, which the quasi-steady vortex look is
+        // near-insensitive to. This halves the dominant preroll cost on
+        // software GL. LIVE frames keep the full JACOBI_ITERS (look unchanged).
+        const PREROLL_JACOBI = 10;
 
         function rebuildTargets() {
           if (targets) Object.values(targets).forEach(destroyTarget);
@@ -1294,7 +1322,8 @@
           return 0.5 * Math.hypot(aspect, 1);
         };
 
-        function simStep(dt) {
+        function simStep(dt, jacobiIters) {
+          const jIters = jacobiIters || JACOBI_ITERS;
           const aspect = canvas.width / Math.max(canvas.height, 1);
           const texel = [1 / simW, 1 / simH];
           const R = paramR();
