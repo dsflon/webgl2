@@ -880,6 +880,24 @@
           }
         `;
 
+        // C — remap: resample a world-anchored field from the pre-resize grid
+        // into the freshly allocated one (new uv → world via NEW aspect →
+        // old uv via OLD aspect). Velocity/density are world-space values, so
+        // texels pass through unchanged (the PACKED encoding is affine, hence
+        // linear filtering stays valid).
+        const copyFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform float uAspect;
+          uniform float uOldAspect;
+          void main() {
+            vec2 w = vec2((vUv.x - 0.5) * uAspect, vUv.y - 0.5);
+            fragColor = texture(uSrc, vec2(w.x / uOldAspect + 0.5, w.y + 0.5));
+          }
+        `;
+
         // R — render: density → oklab sea→grey→bluish-white ramp (L≤0.9),
         // gradient pseudo-normal + 2-tap self-shadow toward the fixed light,
         // sea grain glint (static cells, slow phase), edge-darkening vignette.
@@ -1061,6 +1079,7 @@
           project: createProgram(projectFS),
           density: createProgram(densityFS),
           detail: createProgram(detailFS),
+          copy: createProgram(copyFS),
           render: createProgram(renderFS),
         };
 
@@ -1080,6 +1099,7 @@
           detail: getLocations(programs.detail, [
             "uAspect", "uTime", "uR", "uVmax",
           ]),
+          copy: getLocations(programs.copy, ["uSrc", "uAspect", "uOldAspect"]),
           render: getLocations(programs.render, [
             "uDen", "uVel", "uDtl", "uRes", "uAspect", "uEdge", "uR", "uVmax",
             "uCalm", "uRelief", "uDetailAmt", "uSea", "uTime", "uDebug",
@@ -1143,6 +1163,49 @@
           resetSim();
         }
 
+        // Resize path (order: リサイズで壊れない/FBO 再確保)。FBOs are
+        // REALLOCATED at the new grid size, but the DEVELOPED STATE IS KEPT:
+        // the world-anchored fields (velocity, density) are resampled into
+        // the new grid and rendering resumes on the very next frame.
+        // (Restarting the 240-step pre-roll here — the previous behaviour —
+        // left the canvas black and a sim FBO bound for seconds on software
+        // GL, so a readback ~700ms after a resize saw a dead canvas.)
+        function remapTargets(oldAspect, newAspect) {
+          const old = targets;
+          targets = {
+            velA: createTarget(simW, simH, true),
+            velB: createTarget(simW, simH, true),
+            curlT: createTarget(simW, simH, true),
+            divT: createTarget(simW, simH, true),
+            prsA: createTarget(simW, simH, true),
+            prsB: createTarget(simW, simH, true),
+            denA: createTarget(simW, simH, true),
+            denB: createTarget(simW, simH, true),
+            dtlT: createTarget(dtlW, dtlH, false),
+          };
+          const remap = (srcTex, dst) => {
+            renderPass(dst, programs.copy, () => {
+              const u = locations.copy;
+              bindTexture(0, srcTex);
+              gl.uniform1i(u.uSrc, 0);
+              gl.uniform1f(u.uAspect, newAspect);
+              gl.uniform1f(u.uOldAspect, oldAspect);
+            });
+          };
+          remap(old.velA.tex, targets.velA);
+          remap((denPing ? old.denB : old.denA).tex, targets.denA);
+          denPing = false;   // current density now lives in denA
+          prsPing = false;   // pressure warm-start is rebuilt over a few steps
+          clearTarget(targets.velB, ZERO2, ZERO2, 0, 1);
+          clearTarget(targets.curlT, ZERO2, 0, 0, 1);
+          clearTarget(targets.divT, ZERO2, 0, 0, 1);
+          clearTarget(targets.prsA, ZERO2, 0, 0, 1);
+          clearTarget(targets.prsB, ZERO2, 0, 0, 1);
+          clearTarget(targets.denB, 0, 0, 0, 1);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          Object.values(old).forEach(destroyTarget);
+        }
+
         function resetSim() {
           clearTarget(targets.velA, ZERO2, ZERO2, 0, 1);
           clearTarget(targets.velB, ZERO2, ZERO2, 0, 1);
@@ -1163,6 +1226,10 @@
           const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
           const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
           if (canvas.width !== width || canvas.height !== height || !targets) {
+            // keep the developed vortex across resizes once the boot pre-roll
+            // is done; a mid-boot resize just restarts the deterministic roll.
+            const hadState = !!targets && preRoll === 0;
+            const oldAspect = canvas.width / Math.max(canvas.height, 1);
             canvas.width = width;
             canvas.height = height;
             const aspect = width / height;
@@ -1177,7 +1244,9 @@
             }
             dtlW = Math.max(8, Math.min(1024, Math.round(width / 2)));
             dtlH = Math.max(8, Math.min(1024, Math.round(height / 2)));
-            rebuildTargets();   // resize / tab-restore rebuilds FBOs (§7)
+            // resize / tab-restore reallocates FBOs (§7) — state-preserving
+            if (hadState) remapTargets(oldAspect, aspect);
+            else rebuildTargets();
           }
         }
         window.addEventListener("resize", resize, { passive: true });
@@ -1308,6 +1377,10 @@
             for (let i = 0; i < steps; i++) simStep(1 / 60);
             preRoll -= steps;
             if (preRoll > 0) {
+              // never leave a sim FBO (RGBA16F) bound across the early return:
+              // an external readPixels(RGBA/UNSIGNED_BYTE) — SAVE PNG, the
+              // verifier — would hit GL_INVALID_OPERATION on it.
+              gl.bindFramebuffer(gl.FRAMEBUFFER, null);
               requestAnimationFrame(frame);
               return;
             }
