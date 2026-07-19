@@ -6,8 +6,10 @@
   気象衛星の真上からの俯瞰で見る、ひとつの巨大な台風。白い雲の帯(レインバンド)が
   対数螺旋状に中心へ巻き込み、外縁は荒れ狂って速く流れ、中心近くには最も濃い雲の壁
   (アイウォール)が立つ。その内側だけ雲が抜け、暗い海面が円くのぞく完全な静寂=「目」。
-  運動と静止の対比が主題。カメラ・マイク・ポインタは使わず、時間発展だけで駆動する
-  (スクリーンセーバー的佇まい)。<meta name="art-input" content="none"> 宣言済み。
+  運動と静止の対比が主題。カメラ・マイクは使わず、時間発展だけで自律駆動する
+  (スクリーンセーバー的佇まい)。<meta name="art-input" content="none"> 宣言済み
+  (キャプチャ入力=カメラ/マイク無し)。任意の追加操作としてポインタ・ドラッグで
+  速度場に質量保存のインパルスを注入でき(かき混ぜ)、乱れはランキン緩和で自律回復する。
 
   実行方法:
     python3 -m http.server 8888 → http://localhost:8888/fable5_taifu-no-me.html を開く
@@ -89,7 +91,11 @@
         background: linear-gradient(160deg, #050b12, #0a141d 55%, #04090f);
         font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
       }
-      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        background: var(--bg); touch-action: none; cursor: grab;
+      }
+      canvas:active { cursor: grabbing; }
       .top-btn {
         position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
         padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
@@ -284,6 +290,9 @@
             気象衛星の俯瞰で見るひとつの巨大な台風。雲帯が対数螺旋状に中心へ巻き込み、
             アイウォールの内側だけ雲が抜けて暗い海面がのぞきます。外縁の荒れと目の静寂の
             対比を、時間発展だけで描く無入力作品です。
+            <br /><br />
+            <b>画面をドラッグ</b>すると雲をかき混ぜられます — 乱した渦は
+            やがて元の台風へと巻き戻ります。
           </p>
           <div class="select-row">
             <span>プリセット</span>
@@ -693,6 +702,9 @@
           uniform float uR;
           uniform float uCalm;
           uniform float uConf;
+          uniform vec2 uStirPos;   // pointer stir centre (world units)
+          uniform vec2 uStirVec;   // accumulated drag → velocity impulse
+          uniform float uStirRad;  // gaussian influence radius (world)
           ${CHUNK_PACK}
           ${CHUNK_WORLD}
           ${CHUNK_RANKINE}
@@ -736,6 +748,18 @@
 
             // gentle global drag; hard clamp = absolute stability bound
             v *= exp(-uDt * 0.12);
+
+            // pointer STIR (optional interaction): add a gaussian velocity
+            // impulse where the finger/mouse drags. Mass-preserving — it only
+            // pushes the existing velocity field (which advects the clouds), so
+            // the cloud budget and the eye gates are untouched. The Rankine
+            // relaxation above heals the disturbance back toward the vortex
+            // target over ~1s, so a swirl you stir in spirals back into the
+            // storm instead of persisting. Zero vector outside interaction.
+            vec2 dS = p - uStirPos;
+            float gS = exp(-dot(dS, dS) / max(uStirRad * uStirRad, 1e-6));
+            v += uStirVec * gS;
+
             v = clamp(v, vec2(-3.0), vec2(3.0));
             fragColor = packVel(v);
           }
@@ -1181,7 +1205,7 @@
           curl: getLocations(programs.curl, ["uVel", "uTexel"]),
           force: getLocations(programs.force, [
             "uVel", "uCurl", "uTexel", "uAspect", "uDt", "uVmax", "uR",
-            "uCalm", "uConf",
+            "uCalm", "uConf", "uStirPos", "uStirVec", "uStirRad",
           ]),
           div: getLocations(programs.div, ["uVel", "uTexel"]),
           jacobi: getLocations(programs.jacobi, ["uPrs", "uDiv", "uTexel"]),
@@ -1353,6 +1377,46 @@
         }
         window.addEventListener("resize", resize, { passive: true });
 
+        /* ------------------------------------------------------------------
+           Pointer STIR — the only interactive input. Drag on the canvas to
+           push the velocity field; the storm advects the clouds you disturb
+           and then relaxes back to the vortex. Accumulates drag deltas in
+           WORLD units between sim steps; simStep consumes and zeroes them so a
+           still finger adds nothing. Optional: the piece is fully generative
+           without it (art-input stays "none" — no camera/mic capture).
+        ------------------------------------------------------------------ */
+        const stir = { x: 0, y: 0, dx: 0, dy: 0, active: false };
+        let stirPrev = null;
+        const STIR_GAIN = 8.0;    // drag(world/step) → velocity impulse
+        const STIR_RADIUS = 0.11; // gaussian influence (~eye-sized), world units
+        function pointerToWorld(event) {
+          const rect = canvas.getBoundingClientRect();
+          const uvx = (event.clientX - rect.left) / Math.max(rect.width, 1);
+          const uvy = 1 - (event.clientY - rect.top) / Math.max(rect.height, 1);
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          return { x: (uvx - 0.5) * aspect, y: uvy - 0.5 };
+        }
+        canvas.addEventListener("pointerdown", (event) => {
+          stir.active = true;
+          const w = pointerToWorld(event);
+          stir.x = w.x;
+          stir.y = w.y;
+          stirPrev = w;
+          try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
+        });
+        canvas.addEventListener("pointermove", (event) => {
+          if (!stir.active || !stirPrev) return;
+          const w = pointerToWorld(event);
+          stir.dx += w.x - stirPrev.x;
+          stir.dy += w.y - stirPrev.y;
+          stir.x = w.x;
+          stir.y = w.y;
+          stirPrev = w;
+        });
+        function endStir() { stir.active = false; stirPrev = null; }
+        canvas.addEventListener("pointerup", endStir);
+        canvas.addEventListener("pointercancel", endStir);
+
         function bindTexture(unit, texture) {
           gl.activeTexture(gl.TEXTURE0 + unit);
           gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -1424,7 +1488,18 @@
             gl.uniform1f(u.uR, R);
             gl.uniform1f(u.uCalm, state.calm);
             gl.uniform1f(u.uConf, 8.0);
+            // pointer stir: only during LIVE frames (never during the
+            // deterministic pre-roll), consumed each step so a still finger
+            // adds nothing and a flick decays via the Rankine relaxation.
+            const live = preRoll === 0;
+            gl.uniform2f(u.uStirPos, stir.x, stir.y);
+            gl.uniform2f(u.uStirVec,
+              live ? stir.dx * STIR_GAIN : 0.0,
+              live ? stir.dy * STIR_GAIN : 0.0);
+            gl.uniform1f(u.uStirRad, STIR_RADIUS);
           });
+          stir.dx = 0;
+          stir.dy = 0;
           // S3 divergence
           renderPass(targets.divT, programs.div, () => {
             const u = locations.div;
