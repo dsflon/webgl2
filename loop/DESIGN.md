@@ -165,6 +165,10 @@ V1/V2 の結果サマリ・needs_review 事項(§8 Inbox)。
   **強制終了→再実行で、状態ファイルだけを頼りに続きから回る**ことを受入条件とする。
 - **Discovery**: `loop/themes.md` のテーマキュー(人間が1行1テーマで追記)を走査し、
   state が無い/未完了のテーマを優先度順に選ぶ。
+  - **上流(スカウト)**: `/art-scout` がトレンド・季節・イベントからテーマを発見し、
+    `loop/TECHNIQUES.md`(手法カタログ)で最適な表現手法(入力×エンジン)を
+    マッチングして提案する。**Webカメラ/MediaPipe は前提ではない** — テーマの本質
+    から手法を選ぶ。キュー追記は人間承認後(Phase 1)。
 - **Trigger**: 当面は人間の一度きりの指示(スキル `/art-loop <テーマ>` または
   `/art-loop next`)。cron 化は指標安定後(§9)。
 
@@ -227,6 +231,7 @@ loop/
   DESIGN.md                   # 本書
   IMPLEMENTATION_PLAN.md      # 実装計画
   CRAFT.md                    # レンダリング工芸知識ベース(失敗モードと処方。メタループの第3の還元先)
+  TECHNIQUES.md               # 表現手法カタログ(入力×エンジンの選択知識。/art-scout の判断材料)
   themes.md                   # テーマキュー(Discovery の対象)
   runner/
     verify_static.mjs         # V1 静的 lint(規約ID・禁止/要求パターン)
@@ -243,6 +248,7 @@ loop/
     checker_prompt.md         # V2 美的レビュアーの固定指示(拒否志向)
   state/                      # <slug>/state.json + log.jsonl + review.json + shots/
 .claude/skills/art-loop/      # Trigger: オーケストレーション手順(スキル)
+.claude/skills/art-scout/     # Discovery 上流: テーマ発見+手法選択(スキル)
 ```
 
 ## 12. 指南書チェックリストとの対応表
