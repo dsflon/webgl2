@@ -1,23 +1,23 @@
 {
   "slug": "kotonoha-shigure",
   "theme": "言の葉時雨 — 声は言葉に、環境音はオノマトペになり、墨の活字として降り積もる(美術: 墨と和紙)",
-  "status": "needs_review",
+  "status": "runtime_ok",
   "attempts": {
     "brief": 1,
     "order": 1,
     "implement": 1,
-    "runtime": 0,
+    "runtime": 1,
     "aesthetic": 0
   },
   "last_error": null,
-  "requires_human": true,
-  "blocked_reason": "サーキットブレーカー②: 1実行60分タイムアウト(実測92分。Maker実装が78分)。エラーではない — S2完了・static合格(errors:0)。Makerの自主検証ではruntime全11+motion+longrun合格報告あり。人間の継続承認後、S3(公式runtime検証)から再開",
+  "requires_human": false,
+  "blocked_reason": null,
   "resume_stage": "runtime",
   "cost": {
-    "loops": 3,
-    "approx_tokens": 590000,
-    "wall_minutes": 112
+    "loops": 4,
+    "approx_tokens": 650000,
+    "wall_minutes": 120
   },
   "pr_url": null,
-  "updated_at": "2026-07-19T23:09:30.467Z"
+  "updated_at": "2026-07-19T23:16:48.600Z"
 }
