@@ -1264,6 +1264,16 @@
           gl.drawArrays(gl.TRIANGLES, 0, 3);
         }
 
+        // True GPU sync point (call with the DEFAULT framebuffer bound).
+        // gl.finish() is NOT reliably blocking through Chromium's command
+        // buffer on software GL (observed returning in ~3ms while ~44s of
+        // queued SwiftShader work kept executing), so a 1×1 readPixels —
+        // an unavoidable round trip — is used instead.
+        const syncPx = new Uint8Array(4);
+        function glSync() {
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+        }
+
         /* ------------------------------------------------------------------
            Simulation step + render loop
         ------------------------------------------------------------------ */
@@ -1274,6 +1284,7 @@
         let fpsLast = performance.now();
         let fpsFrames = 0;
         let readyStamped = false;
+        let lastDrawSig = "";
         const readout = document.getElementById("readout");
 
         const paramR = () => 0.10 + 0.20 * state.eyeSize;
@@ -1376,11 +1387,18 @@
             const steps = Math.min(PREROLL_CHUNK, preRoll);
             for (let i = 0; i < steps; i++) simStep(1 / 60);
             preRoll -= steps;
+            // never leave a sim FBO (RGBA16F) bound across the early return:
+            // an external readPixels(RGBA/UNSIGNED_BYTE) — SAVE PNG, the
+            // verifier — would hit GL_INVALID_OPERATION on it.
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            // Drain the GL queue after every chunk. On software GL
+            // (SwiftShader) the chunked pre-roll otherwise queues tens of
+            // seconds of sim work: the compositor cannot present the canvas
+            // until it resolves, rAF stalls, and frame-driven CSS
+            // transitions (panel open/close) never start until the backlog
+            // drains. On hardware GPUs this sync is effectively free.
+            glSync();
             if (preRoll > 0) {
-              // never leave a sim FBO (RGBA16F) bound across the early return:
-              // an external readPixels(RGBA/UNSIGNED_BYTE) — SAVE PNG, the
-              // verifier — would hit GL_INVALID_OPERATION on it.
-              gl.bindFramebuffer(gl.FRAMEBUFFER, null);
               requestAnimationFrame(frame);
               return;
             }
@@ -1389,6 +1407,23 @@
             const dt = rawDt * paceMul;
             if (dt > 0) simStep(dt);
           }
+
+          // Static-scene short-circuit: when frozen/paused and nothing that
+          // feeds the composite changed since the last draw, skip the GPU
+          // passes. preserveDrawingBuffer keeps the presented frame valid
+          // (readPixels / SAVE PNG / flicker check all see the same pixels).
+          // Under software GL a full-res composite costs 300–500ms; redrawing
+          // an identical frame every rAF starved the compositor and made the
+          // panel open/close transitions crawl. Any slider / preset / debug
+          // view / resize / sim advance changes the signature and redraws.
+          const drawSig = `${simTime}|${canvas.width}x${canvas.height}|${
+            state.vortex}|${state.eyeSize}|${state.calm}|${state.clouds}|${
+            state.detail}|${state.relief}|${state.sea}|${state.debugView}`;
+          if (readyStamped && drawSig === lastDrawSig) {
+            requestAnimationFrame(frame);
+            return;
+          }
+          lastDrawSig = drawSig;
 
           const aspect = canvas.width / Math.max(canvas.height, 1);
           const denCur = denPing ? targets.denB : targets.denA;
@@ -1428,6 +1463,13 @@
 
           // verification hook: first REAL frame = developed field rendered
           if (!readyStamped && preRoll === 0) {
+            // Make the stamp truthful: without a sync the composite above is
+            // only *queued* at this point, and "ready" would fire while the
+            // GPU still churns — stalled presentation, no rAF, and
+            // frame-driven CSS transitions (panel open/close) that never
+            // start. renderPass(null, …) left the default framebuffer
+            // bound, so glSync() reads from the freshly drawn backbuffer.
+            glSync();
             readyStamped = true;
             window.__artReady = true;
           }
