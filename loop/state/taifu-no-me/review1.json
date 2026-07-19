@@ -1,0 +1,81 @@
+{
+  "artifact": {
+    "file": "loop/state/taifu-no-me",
+    "screenshots": [
+      "loop/state/taifu-no-me/shots/final_warm12s.png",
+      "loop/state/taifu-no-me/shots/final_freeze.png",
+      "loop/state/taifu-no-me/shots/final_thumb.png",
+      "loop/state/taifu-no-me/shots/crop_eyewall.png",
+      "loop/state/taifu-no-me/shots/crop_outer.png",
+      "loop/state/taifu-no-me/shots/debug_1.png",
+      "loop/state/taifu-no-me/shots/debug_2.png",
+      "loop/state/taifu-no-me/shots/debug_3.png",
+      "loop/state/taifu-no-me/shots/debug_4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "中央に境界のくっきりした暗い円、その周囲を放射状の繊維をもつ灰白色の環がとりまき、外側は暗く落ちる。台風の俯瞰というより『瞳孔と虹彩をもつ眼球』に見える。螺旋の巻き込み方向はうっすら読めるが、第一印象は目玉(排水口/レンズの穴)であってスパイラルの渦ではない。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 3,
+      "evidence": "debug_1(速度場)は色相ホイールが中心まわりで連続回転しており大域回転が組織化されている(無方向乱流ではない)。debug_3(注入ゲート)は明確な対数螺旋の腕状にオレンジ注入が並び、debug_2(密度raw)にも螺旋状の暗い切れ目が見える。しかし final_thumb/final_warm12s/final_freeze の合成では過度のぼかしで螺旋帯が同心リングに均され、右上に弧が1本見える以外は『巻き込む螺旋』が一目で読めず眼球の同心構造に退行。crop_outer は外縁が滑らかにフェードするだけで『ちぎれて疎になる帯』が消えている。",
+      "reject_reasons": [
+        "最終合成でスパイラルが同心リングに均され渦として一目で読めない",
+        "crop_outer で外縁の帯が滑らかフェードのみ、対数螺旋の腕が判別不能"
+      ],
+      "fix_instructions": [
+        "(a)因果診断: 速度場(debug_1)と注入ゲート(debug_3)は正しく対数螺旋の渦を実装しているが、合成段のぼかし半径過大により螺旋帯が連続同心リングに均され、瞳孔+虹彩=眼球ゲシュタルト(CRAFT D3 ゲシュタルト不一致)に退行。crop_outer が示すとおり外縁が滑らかフェードするだけで螺旋の腕が消える。スパイラル角不足も症状源。",
+        "(b)処方: 合成後のガウスぼかし半径を現状比0.4〜0.5倍に縮小し密度場の螺旋コントラストを保つ。注入のスパイラル角(接線に対する内向き角)を+10〜15度増やし巻き込みを強める。外縁の散逸を中心距離依存で強め(正規化半径0.7以上で係数1.3〜1.6倍)、curl noise の密度変調ゲインを1.3〜1.5倍にして帯をちぎり疎にし、同心リングでなく不連続な螺旋腕として読ませる。"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "final_warm12s/final_freeze で中心の暗い円形静穏域が明瞭に維持され、内側は深い海色(navy)がのぞき雲で埋まっていない。debug_3 では目が青ディスクとして注入禁止・散逸最強にゲートされ、その外周にオレンジの眼壁注入リングが対数螺旋の起点として存在。debug_2 でも目に接して密度の明るいリング(眼壁)が確認できる。目の維持と海色は不変量の核として成立。",
+      "reject_reasons": [
+        "crop_eyewall で目の境界が sdf 由来の完全な真円のクリーンカットで、合成では『最も濃い雲の壁』が周囲雲と際立たず A2 ステッカー輪郭寄り"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "V1運動応答チェック pass(unfrozen mean|Δ|=1.013/255>0.5)。構造的証拠として debug_1(速度場)は目の内側が黒=速度ほぼゼロ(静止する目)、目のすぐ外側にかけて輝度=速度が増大しリング状に最大、外縁で減衰しており、ランキン渦の接線速度プロファイル(内側急減→眼壁で最大→外へ減衰)が場として実装されている。時間性を静止画で確認できないことのみを理由に減点はしない。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 4,
+      "score": 3,
+      "evidence": "debug_4(雲の陰影標本)には自己遮蔽の凹凸と放射状の mottle が存在し、crop_eyewall にも雲のうねりが見える。しかし crop_outer は平坦で滑らかな膜に近く CRAFT §A1 石膏の塊寄り。debug_2 の眼壁付近は密度が白飽和寄り(勾配ゼロ→法線・自己遮蔽が死ぬ領域)。合成のぼかしが微細 mottle をさらに潰し、沸き立つ積乱雲の塊感が弱い。",
+      "reject_reasons": [
+        "crop_outer が平坦な滑らか膜=A1 石膏寄り、沸き立つ塊感が乏しい",
+        "debug_2 眼壁付近が白飽和寄りで勾配ディテールが失われる"
+      ],
+      "fix_instructions": [
+        "(a)因果診断: debug_4 に自己遮蔽と mottle はあるが、crop_outer が示すとおり外縁の雲が平坦な滑らか膜(CRAFT §A1 石膏の塊)に近く、debug_2 の眼壁付近は密度が白飽和寄りで勾配がゼロに近づき法線・自己遮蔽が死ぬ。合成のぼかしが微細 mottle を潰し塊感を消している。",
+        "(b)処方: 注入テーパを見直し密度を0.6〜0.85帯にクランプ(現状の眼壁付近0.9超を抑制)。mottle を密度ゲインの主成分にしゲインを1.4〜1.6倍。法線を『なめらか勾配+ディテールノイズの有限差分勾配』の合成にし(CRAFT §A3)、光方向2タップ+ノイズ1タップの自己遮蔽を強めて陰影コントラストを+20〜30%。合成ぼかしを下げ mottle を保持する。"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "final_warm12s/final_freeze で雲は青みがかった白〜灰の低彩度階調、目の内側と背景は深い海色、画面周縁は明瞭な edge darkening ビネットで衛星視野感が出ており、白は飽和飛びせず上限が抑えられている。色設計と減光は本作で最も破綻がない。",
+      "reject_reasons": [
+        "外縁がちぎれて『雲の切れ間から海がのぞく』表現が弱く、暗い螺旋の切れ目1本以外は滑らかフェードで海の露出が少ない"
+      ]
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "V1長時間安定チェック pass(mean 78.5→83.3/255、white 0.00%、whiteout/発散なし)。構造的証拠として debug_3 は散逸ゲート(目の内側で最強)と注入の螺旋テーパを実装し、debug_2 の密度は白飽和で埋め尽くされておらず有界。暴走(蓄積 whiteout)や雲消失の構造的兆候は見られない。",
+      "reject_reasons": []
+    }
+  ],
+  "common": {
+    "style_holds": 2,
+    "subject_readable": 3,
+    "artifact_free": 3
+  },
+  "verdict": "fail",
+  "summary": "第一印象が『眼球(瞳孔+放射状虹彩)』であり、テーマの気象衛星台風俯瞰と別物のゲシュタルト失敗(手順0)のため style_holds=2。場・ゲート(debug_1/2/3)では対数螺旋の渦・眼壁リング・目のゲート・ランキン速度プロファイル・有界な定常が正しく実装されており、目の維持(inv2=4)・時間対比(inv3=4)・色設計(inv5=4)・長時間安定(inv6=4)は成立。しかし合成段の過度のぼかしが螺旋を同心リングに均し(inv1=3)、外縁を平坦な石膏膜にして塊感を潰す(inv4=3)。この『ぼかしによる誤魔化し』と sdf 由来の真円クリーンカットのため artifact_free=3、渦としての判読性 subject_readable=3。処方の核はぼかし半径縮小・スパイラル角増・外縁散逸強化・密度クランプ0.6〜0.85+mottleゲイン増による、眼球ではなく巻き込む螺旋渦への回帰。verdict=fail。"
+}

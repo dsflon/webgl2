@@ -1,0 +1,42 @@
+{
+  "slug": "taifu-no-me",
+  "theme": "台風の目 — 外縁は荒れ狂い、目の内側は完全な静寂となる巨大な渦(無入力×Stable Fluids)",
+  "status": "submitted",
+  "attempts": {
+    "brief": 1,
+    "order": 1,
+    "implement": 1,
+    "runtime": 1,
+    "aesthetic": 3
+  },
+  "last_error": [
+    {
+      "id": "aesthetic:circuit-breaker",
+      "stage": "S4",
+      "pass": false,
+      "decision": "escalate_human",
+      "detail": "S4 美的修正の試行上限(DESIGN §9: 3周)に到達。3周目の最新ビルドを独立 Checker 3体(E/F/G)がレビューし、E=pass / F=fail(inv4=3) / G=fail(inv4=3, style_holds=3)。完了条件『全不変量≥4 ×2連続』(DESIGN 表 S4 / §8)を満たさない(pass は1件のみ、F・Gが挟んで不成立)。超過は失敗でなく needs_review への正常な出口(§9)。",
+      "trend": {
+        "style_holds": "review1=2 → A=3/B=2 → C=2/D=2 → E=4/F=4/G=3。過去に何度も fail した §A6 眼球ゲシュタルト(style_holds=2 常連)は3周目で3〜4へ改善=実質解消。中心を海色化・境界を移流で崩し・等方mottle化した緩和が効いた。",
+        "inv4_material": "review1=3 → A=4/B=4 → C=3/D=2 → E=4/F=3/G=3。雲の質感(軟らかいヘイズ↔沸き立つ塊)が2〜4で振動し収束せず。最新ビルドで Checker 判断が3/4の境界で割れる。",
+        "verdict": "全fail(眼球) → 3周目で 1 pass(E)/2 fail(F,G) の僅差割れ。残る不合格因は inv4 の質感のみ(＋Gの style_holds 残余)で、明白な破綻でなく境界上の主観差。"
+      },
+      "hypothesis": "収束しなかった理由: 致命傷だった §A6 眼球化は解決したが、inv4(積乱雲の沸き立つ立体感 vs 軟らかいヘイズ)が最終合成のボケ半径と法線計算に律速され、3周かけても3/4境界で安定しない。round2(C/D)では inv4=2/artifact=2 へ regression した実績があり、無誘導の追加周回は逆行リスクを伴う。",
+      "human_options": [
+        "accept_as_is: E の pass は防御可能。§A6 という本作固有の致命傷は解消済み。inv4 の3/4差は境界上の主観差として受容し submit する。",
+        "continue_aesthetic(1周・inv4限定): F と G が一致する唯一の fix を最小変更で。=最終段のガウスぼかし半径を縮小し高周波mottleを保持、法線を『なめらか勾配+ディテールノイズの有限差分勾配』の合成に(CRAFT §A3)、mottleゲインを密度0.6〜0.85帯の主成分に上げて沸き立つ塊の自己遮蔽を出す。色(inv5)・目/螺旋(inv1,2)・時間軸(inv3,6)は一切触らない。"
+      ],
+      "recommendation": "escalate_human。3周の上限に達し、残差は inv4 の境界上1点差で Checker が割れる主観域。惰性の4周目は逆行リスクありコスト対効果が低い。人間が accept か inv4限定の1周かを判断するのが妥当。"
+    }
+  ],
+  "requires_human": false,
+  "blocked_reason": null,
+  "resume_stage": "aesthetic",
+  "cost": {
+    "loops": 11,
+    "approx_tokens": 2393000,
+    "wall_minutes": 359
+  },
+  "pr_url": null,
+  "updated_at": "2026-07-19T10:25:42.411Z"
+}

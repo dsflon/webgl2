@@ -1,0 +1,67 @@
+{
+  "artifact": {
+    "file": "loop/state/taifu-no-me",
+    "screenshots": [
+      "loop/state/taifu-no-me/shots/final_warm12s.png",
+      "loop/state/taifu-no-me/shots/final_freeze.png",
+      "loop/state/taifu-no-me/shots/final_thumb.png",
+      "loop/state/taifu-no-me/shots/crop_eyewall.png",
+      "loop/state/taifu-no-me/shots/crop_outer.png",
+      "loop/state/taifu-no-me/shots/debug_1.png",
+      "loop/state/taifu-no-me/shots/debug_2.png",
+      "loop/state/taifu-no-me/shots/debug_3.png",
+      "loop/state/taifu-no-me/shots/debug_4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "暗い navy 地に、中央の真円の黒い穴を、白い繊維状(毛/糸)の帯がリング状に取り巻いている。台風の目の俯瞰にも見えるが、それ以上に『虹彩と瞳孔=眼球』に見える。繊維の質感が積乱雲の塊よりも毛や刷毛に近い。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "debug_1(速度場)は中心まわりに色相環が回る接線流を明示し、大域の回転が存在する。debug_2(密度raw)は帯が中心へ巻く螺旋を示し、final_warm12s の右上では雲帯が弧を描いて内側へ巻き込む腕が読める。無方向の乱流ではなく渦として組織化されている。",
+      "reject_reasons": [
+        "対数螺旋の『複数腕が深く中心まで巻く』印象は弱く、全体は螺旋というより同心リング+短い腕1本に見える(final_warm12s / debug_2)"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "全ショットで中央に雲のない円形の目が維持され、crop_eyewall では目の内側に深い海色(navy)がのぞき、周囲の雲が最も明るい。debug_3(sdfゲート)は目の内側=青ディスク、その外周に最濃注入の環(橙)を置き、アイウォール構造をゲートで実装していることを確認。目は埋まっていない。",
+      "reject_reasons": [
+        "目の境界が幾何学的な真円のハードカットで、シミュレーションが盛り上げた『雲の壁』ではなく円形の切り抜き(sdf ゲート)に見える(crop_eyewall の縁が機械的すぎる)"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "V1 motion(mean|Δ|=0.723)・longrun pass を前提。構造的裏づけとして debug_1 の速度場は中心の目が黒(≒静止)、その外周の環で回転が最大、遠方コーナーで減衰しており、ランキン渦の接線速度プロファイル(増→アイウォールで最大→内側で急減)が場として与えられていることが読める。静止画から時間性が見えないことのみを理由に減点しない。"
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "crop_eyewall / crop_outer / debug_4(陰影標本)を等倍で確認。内部に濃淡のまだらと光方向の自己遮蔽で生じた稜と谷があり、CRAFT §A1 の石膏(内部無地・縁だけベベル)にはなっていない。白は青灰に抑えられ飽和していない。",
+      "reject_reasons": [
+        "質感が積乱雲の『沸き立つ塊(billow)』より繊維状の毛/刷毛ストロークに寄り、雲頂というより虹彩の繊維に見える。この質感が第一印象の眼球化を助長している",
+        "debug_2 の raw 密度は低周波でぼやけており、繊維ディテールは主にライティング/法線パス(debug_4)由来。密度自体の塊構造は薄い"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 5,
+      "evidence": "final_thumb / final_warm12s / crop_outer で、雲は青みがかった白〜灰の低彩度階調、雲の切れ間と目の内側は深い海色、周縁は明瞭なビネットで減光。白飛びはなく上限が抑えられ、気象衛星俯瞰の色設計として破綻なし。拒否理由を探したが色に関しては見つからなかった。"
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "V1 longrun pass(mean 72.6→70.3、white 0.00%)で発散も消失もなし。構造的に debug_3 は中心距離依存の散逸ゲート(目の内側で最強)を示し、既高密度でのテーパ+clamp と整合。CRAFT §A5 の whiteout は静的にもショット上で確認されない。"
+    }
+  ],
+  "common": {
+    "style_holds": 3,
+    "subject_readable": 4,
+    "artifact_free": 4
+  },
+  "verdict": "fail",
+  "summary": "不変量は 1..6 = 4/4/4/4/5/4 でいずれも下限を満たす。だが共通軸 style_holds=3 が閾値未満のため verdict は fail。理由: 手順0 の第一印象が『眼球(虹彩+瞳孔)』であり、テーマ台風の目とは収斂するものの、(a)雲の質感が積乱雲の沸き立つ塊でなく繊維状の毛/刷毛(invariant 4 の reject_reasons)、(b)目の境界が sdf の真円ハードカットで機械的(invariant 2)——の2点が『気象衛星の雲写真』ゲシュタルトを弱め、literal な眼球へ傾けている。処方: (1)密度注入の mottle をより低相関・大粒の塊状にし(curl noise のスケールを上げ密度ゲインの主成分にする)、繊維の異方性を下げて billow 塊感を出す=CRAFT §A1/§A3 方向。(2)アイウォール境界を sdf ハードカットではなく、注入テーパ+侵食で雲側から作らせ縁をちぎる(CRAFT §A2)ことで真円感を崩す。色(inv5)は完成度が高く維持でよい。"
+}

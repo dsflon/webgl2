@@ -1,0 +1,73 @@
+{
+  "artifact": {
+    "file": "fable5_taifu-no-me.html",
+    "commit": "2331b48a1536afb07d84fca6ea449f20cab64362",
+    "screenshots": [
+      "loop/state/taifu-no-me/shots/final_warm12s.png",
+      "loop/state/taifu-no-me/shots/final_freeze.png",
+      "loop/state/taifu-no-me/shots/final_thumb.png",
+      "loop/state/taifu-no-me/shots/crop_eyewall.png",
+      "loop/state/taifu-no-me/shots/crop_outer.png",
+      "loop/state/taifu-no-me/shots/debug_1.png",
+      "loop/state/taifu-no-me/shots/debug_2.png",
+      "loop/state/taifu-no-me/shots/debug_3.png",
+      "loop/state/taifu-no-me/shots/debug_4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "暗い青黒の地に、真円の黒い穴を取り囲んで白い繊維状(毛/まつ毛のような房)がゆるい螺旋・環をなす。第一に『眼球(黒い瞳孔+毛の生えた虹彩)』または『毛皮の輪』に見える。台風の俯瞰にも取れるが、房が沸き立つ雲塊ではなく櫛けずった繊維で、中心が真っ黒の完全円なので瞳孔の読みが勝つ。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "final_warm12s / final_freeze で中心の穴を巻く一本の帯+右上へ伸びる後曳きの腕があり、debug_2(密度raw)では中心へ巻き込む螺旋腕が明瞭、debug_1(速度)は中心を軸に色相が周回する回転場。無方向の乱流・煙ではなく大域回転が読める。反証: 『組織化された渦か』→ 密度場に螺旋腕・後曳き腕が実在し反証成立。",
+      "reject_reasons": [
+        "対数螺旋というより単一の環+一本の後曳き腕寄りで、複数レインバンドの巻き込みは弱い(final右上の腕のみが明瞭)"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "final / crop_eyewall で中心に雲のない真円の目が保たれ、内側は深い海色(暗青)がのぞく。目の直近リングが最も明るく濃い雲=アイウォールになっている。debug_3(sdfゲート)で目=青ディスク(注入禁止・散逸最強)、その外周にオレンジの最濃注入環が置かれ機構が確認できる。反証: 『目が雲で埋まる/アイウォールが最濃でない』→ crop_eyewall・debug_3 で反証成立。",
+      "reject_reasons": [
+        "目の境界が幾何学的な完全円で、流体が削り出したアイウォールというより sdf ゲートの円がそのまま出ている(artifact_free で減点)"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "静止画から時間挙動は直接判定しないが、V1 motion=pass(mean|Δ|=0.723/255)・longrun=pass。構造的証拠として debug_1(速度場)は中心が黒=目でほぼ零速度、外側で色相が周回=接線回転で、ランキン渦の『内側静止・外側回転』に整合。final の房が接線方向へ流れる筋になっている。反証となる構造的証拠(全面一様回転)は無し。",
+      "reject_reasons": [
+        "debug_1 は径方向に滑らかで、アイウォールで最大→内側急減のランキン・ピークが静止画からは判別しづらい"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "crop_eyewall / crop_outer / debug_4 で内部に濃淡のまだらと光方向の自己遮蔽(尾根が影を落とす立体)があり、CRAFT §A1 の石膏(平坦無地+縁ベベル)には陥っていない。debug_4 は密度勾配由来の陰影が実在することを示す。反証: 『平坦な白膜(石膏)か/後処理近似か』→ 実勾配陰影と内部濃淡があり反証成立。",
+      "reject_reasons": [
+        "質感が『沸き立つ雲塊(mottle)』ではなく櫛けずった繊維/毛の筋で、参照(積乱雲の雲頂=盛り上がる塊の集まり)からずれる。この繊維感が眼球/毛皮のゲシュタルトを助長(style_holds へ波及)"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "final / final_thumb で雲は青みがかった白〜灰の低彩度階調、雲の切れ間と目の内側は深い海色、四隅は edge darkening のビネットで落ち衛星視野感が出る。白は概ね 0.9 手前で純白飛びしていない。反証: 『派手色/純白飛び』→ 低彩度・ビネット・白抑制が確認でき反証成立。",
+      "reject_reasons": [
+        "final_freeze の目の左下など数か所で局所的に白が強く出ており、白上限の余裕はやや薄い"
+      ]
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "V1 longrun=pass(全画面 mean 72.6→70.3、white 0.00%)で発散も消失もなし。debug_2 の密度場は目の内側が黒(散逸最強)・帯が有界で、clamp+距離依存散逸が効いていることと整合。CRAFT §A5 の whiteout(白飽和)/雲消失の兆候なし。反証となる蓄積・消失の証拠は無し。"
+    }
+  ],
+  "common": {
+    "style_holds": 2,
+    "subject_readable": 4,
+    "artifact_free": 3
+  },
+  "verdict": "fail",
+  "summary": "不変量は全て 4(存在・機構は debug_1〜3 で裏取り、石膏化も whiteout も回避、色設計も成立)。だが共通軸で不合格。第一印象(手順0)が『眼球/毛皮の輪』となり、原因は (a) 中心が真っ黒の完全円=瞳孔読み、(b) 質感が沸き立つ雲塊でなく櫛けずった繊維=まつ毛/毛皮読み で style_holds=2(手順0の別物=眼球規定)。等倍(crop_eyewall)で目の境界が幾何学的完全円=sdfゲートの円がそのまま可視化されており(A2 類似の幾何エッジ露出)、外縁(crop_outer)にはディテールを隠す軟らかなぼかしも見え artifact_free=3。渦と目自体は明瞭に読めるため subject_readable=4。処方の方向: 質感を接線繊維から curl-noise 由来の等方 mottle(塊)主体へ寄せゲインの繊維異方性を下げる/目の内側の海色を漆黒でなく深青へ持ち上げ瞳孔読みを断つ/アイウォール境界を移流・侵食でわずかに崩し sdf 円の生エッジを消す。共通軸<4 のため verdict=fail。"
+}
