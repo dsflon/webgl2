@@ -1,0 +1,84 @@
+{
+  "artifact": {
+    "file": "loop/state/taifu-no-me/",
+    "screenshots": [
+      "loop/state/taifu-no-me/shots/final_thumb.png",
+      "loop/state/taifu-no-me/shots/final_warm12s.png",
+      "loop/state/taifu-no-me/shots/final_freeze.png",
+      "loop/state/taifu-no-me/shots/crop_eyewall.png",
+      "loop/state/taifu-no-me/shots/crop_outer.png",
+      "loop/state/taifu-no-me/shots/debug_1.png",
+      "loop/state/taifu-no-me/shots/debug_2.png",
+      "loop/state/taifu-no-me/shots/debug_3.png",
+      "loop/state/taifu-no-me/shots/debug_4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "暗い円い瞳孔を、放射状にほつれた繊維質の白灰の組織が囲む——強く『眼球(瞳孔+虹彩)』に見える。全体の輪郭もアーモンド型の目のようで、台風の俯瞰というより人間の目/毛皮の輪の印象が勝つ。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 3,
+      "evidence": "debug_2(密度raw)とdebug_3(注入ゲート)で明瞭な対数螺旋の腕はfinal右上に1本抜けるのみ。残りは中心を囲む均一な環(annulus)として組織され、final_warm12s/final_freezeでも大域は『穴を囲むリング』に読める。debug_1の速度場は回転を持つが、雲帯の螺旋巻き込みは弱い。",
+      "reject_reasons": [
+        "螺旋が1本の腕に留まり、大域は環に読める(渦の巻き込みが弱い)",
+        "debug_3の注入ゲートが同心リング寄りで対数螺旋のピッチが立っていない"
+      ],
+      "fix_instructions": [
+        "因果診断: CRAFT §A6(2)+inv1。debug_3の注入ゲートが同心リング状で対数螺旋の腕が1本しか出ず、debug_2の密度も中心付近が均一な環になっている→渦でなく環(=虹彩)に読める。",
+        "処方: 接線外力の半径方向(内向き)成分を増やしてスパイラル角/対数螺旋のピッチを上げる。注入弧を3〜4本の非対称配置に増やし、curl noiseの変調強度を上げて帯をちぎる。移流ステップ数か流速を上げて腕を中心へ引き伸ばす方向。"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "final_freeze/crop_eyewallで中心の円形静穏領域は常時維持され、内側は深い海色(純黒でない紺)、その周囲が最も濃い雲(アイウォール)。debug_3で目の内側が青=散逸最強・注入禁止、環に橙=最濃注入とゲート機構が正しく効いている。反証できず=不変量としては成立。",
+      "reject_reasons": [
+        "『壁(アイウォール)』は盛り上がる雲壁というより密度をゲートで抜いた穴の縁に近い(ただし最濃領域は環にある)"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "静止画から時間挙動は判定しない規約に従う。debug_1の速度場は中心=黒(静止、設計どおり)、その外に回転場、輝度(速度)は中間の環でピークし外周へ減衰=ランキン渦プロファイルと整合。V1計測(中心差分0.0/左49.3/上27.3、longrun pass)が運動対比を担保。反証できず。",
+      "reject_reasons": [
+        "外周での速度減衰プロファイルは静止画から完全確認できず(V1で担保のため保留せず4)"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 2,
+      "evidence": "debug_4(陰影標本)の質感が接線方向の繊維状ストリーク(=虹彩の筋/刷毛)で、積乱雲の等方mottle(沸き立つ塊)でない。debug_2(密度raw)は主要塊が平滑かつ高輝度に飽和気味で、濃淡が密度構造でなく法線ストリーク由来。final_freezeにはアイウォール付近でほぼ純白のハイライト。等倍crop_eyewallでも塊のbillow感が乏しく刷毛目に見える。",
+      "reject_reasons": [
+        "質感が接線異方性の繊維で、等方mottleの積乱雲塊でない(§A6の眼球化の主因)",
+        "debug_2の密度が平滑・高輝度飽和寄りで、濃淡が陰影法線のストリークに依存",
+        "final_freezeにほぼ純白のハイライトがあり白上限0.9の抑制が甘い"
+      ],
+      "fix_instructions": [
+        "因果診断: CRAFT §A1+§A6(3)。debug_4の陰影が接線繊維ストリーク、debug_2の密度は大部分が平滑・高輝度飽和→まだらが積乱雲の等方塊でなく法線ストリーク由来で、虹彩/毛皮の輪に読める。",
+        "処方: 密度注入をテーパして0.6〜0.85帯に収め、mottleを等方curl/value noiseでゲインの主成分に乗せて接線異方性を下げる。法線のディテール成分を接線ストリークでなく等方ノイズの有限差分勾配へ。白の上限を0.9未満にクランプし、自己遮蔽の谷(クレバスAO)を深めて塊(billow)の立体を出す方向。"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "final_warm12s/final_freezeで雲は青みがかった白〜灰の階調、雲の切れ間と目の内側は深い海色、画面周縁はビネットで減光し衛星写真の視野感が出ている。彩度も低く抑制されている。反証できず=色設計は成立。",
+      "reject_reasons": [
+        "final_freezeにほぼ純白へ寄るハイライトが散見され、白上限0.9の抑制に僅かな緩みがある(inv4と同根)"
+      ]
+    },
+    {
+      "invariant_id": 6,
+      "score": 5,
+      "evidence": "V1 longrun=pass(mean 72→70で発散も消失もなし、white 0.00%、whiteoutなし)。debug_2の密度も飽和爆発ではなく有界。中心距離依存の散逸(debug_3の青中心)とclampで定常が保たれ、放置展示に耐える。反証材料なし。",
+      "reject_reasons": []
+    }
+  ],
+  "common": {
+    "style_holds": 2,
+    "subject_readable": 3,
+    "artifact_free": 2
+  },
+  "verdict": "fail",
+  "summary": "手順0の第一印象が『眼球(瞳孔+虹彩)』——本作が過去にfailしたCRAFT §A6眼球ゲシュタルトが再発している。中心を純黒でなく深い海色にした点(A6-1)は改善だが、(2)環が繊維状放射(debug_4の接線ストリーク=虹彩筋)、(3)目の境界が幾何学的真円エッジ(crop_eyewall/debug_4でsdf生円がほぼ露出)の2条件が残り、眼球読みが渦読みに勝つ。inv4(質感)=2:等方mottleでなく接線繊維、debug_2の密度は平滑・高輝度飽和寄りで濃淡が法線ストリーク依存。inv1(螺旋)=3:対数螺旋の腕が1本のみで大域は環に読める。inv2/3/5=4、inv6=5(longrun pass)。common: style_holds=2(眼球ゲシュタルト)、subject_readable=3(目は明瞭だが渦の巻き込みが弱い)、artifact_free=2(等倍で目の境界が幾何学的真円、debug_4に一部グリッド状の破綻)。処方の要点=(A6-3)中心境界を移流/侵食で崩しsdf生円を隠す、(A6-2/inv4)接線異方性を下げ等方mottle主体に、(inv1)スパイラル角と注入弧数を増やして環→螺旋へ。"
+}

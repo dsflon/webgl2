@@ -1,0 +1,70 @@
+{
+  "artifact": {
+    "file": "loop/state/taifu-no-me",
+    "screenshots": [
+      "loop/state/taifu-no-me/shots/final_warm12s.png",
+      "loop/state/taifu-no-me/shots/final_freeze.png",
+      "loop/state/taifu-no-me/shots/final_thumb.png",
+      "loop/state/taifu-no-me/shots/crop_eyewall.png",
+      "loop/state/taifu-no-me/shots/crop_outer.png",
+      "loop/state/taifu-no-me/shots/debug_1.png",
+      "loop/state/taifu-no-me/shots/debug_2.png",
+      "loop/state/taifu-no-me/shots/debug_3.png",
+      "loop/state/taifu-no-me/shots/debug_4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "final_thumb は、暗い navy 地に浮かぶアーモンド型の白い雲塊の中央に真円の暗い穴があり、繊維状(毛・糸・刷毛)の房がその穴を放射・環状に取り巻いて見えた。第一印象は『眼球(瞳孔+虹彩)』ないし『排水口/穴を囲む毛皮の輪』。全画面に広がる白い螺旋腕という気象衛星の台風俯瞰のゲシュタルトには即座には読めない。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "debug_1(速度場)は中心まわりに色相が連続回転する接線流を明示し、無方向の乱流でなく大域の回転構造が存在する。debug_2(密度raw)と final_freeze 右上の剥離する弧は螺旋腕の巻き込みを示す。反証(ただの煙・乱流)は成立しない。ただし主部は明瞭な複数の対数螺旋腕でなく肉厚のリング+1本の腕に留まり、螺旋の判読は強くない。",
+      "reject_reasons": ["帯が複数の対数螺旋弧でなく塊状のリングに近く、螺旋の巻き込みが弱い"]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "final_freeze / crop_eyewall で中央に雲のない円形静穏域が常に維持され、内側は深い海色(純黒でない)がのぞく。debug_3(ゲート)は中心=青い散逸域、アイウォール半径=橙の最濃注入環を示し設計どおり。反証(目が埋まる)は不成立。ただし境界の最濃壁は一様でなく、右上でリングが薄く開き(final_freeze 右上の暗い切れ間)、最も濃い雲は左下に偏る。また穴が幾何学的にほぼ完全な真円で崩しが弱い。",
+      "reject_reasons": ["アイウォール(最濃壁)が右上で開き一様でない", "穴の輪郭が幾何学的真円に近く移流侵食による崩しが弱い(§A6-3)"]
+    },
+    {
+      "invariant_id": 3,
+      "score": 5,
+      "evidence": "debug_1 は中心が黒(速度≒0=目の静止)、外側へ接線流が回るランキン型の速度構造を示す。V1計測(中心2秒差分0.0=設計どおり静止、左レインバンド49.3/上27.3=周辺の時間応答が健全、longrun pass)が『荒れる外縁×静止する目』の運動対比を実測で担保。反証材料なし。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 4,
+      "score": 3,
+      "evidence": "crop_eyewall / crop_outer / debug_4(陰影)を等倍で見ると自己遮蔽の陰影と濃淡はあり石膏の無地飽和(§A1)ではない。しかしテクスチャが接線方向に引き伸ばされた繊維・刷毛・毛状の異方構造であり、積乱雲の『沸き立つ等方 mottle の塊』になっていない。左下の一部ハイライトは白へ寄り飽和寸前。まだら=繊維化しており材質の種類が誤り。",
+      "reject_reasons": [
+        "雲テクスチャが等方 mottle でなく接線異方の繊維(毛・刷毛)状 — 積乱雲の塊感でなく§A6の虹彩の筋を再生産",
+        "final_freeze 中心下部に移流由来の織り目(plaid/weave)状アーティファクト"
+      ],
+      "fix_instructions": [
+        "因果診断: CRAFT §A6(3)+§A4。debug_4 と crop_eyewall で密度ゲインに乗る mottle が速度場に沿って接線方向へスメアされ、繊維(毛・刷毛)状の異方テクスチャになっている。これが積乱雲の等方な塊(沸き立ち)を潰し、§A6 の『虹彩の筋・まつ毛』読みを駆動。加えて移流ステップが密度を糸状に引き伸ばし final_freeze 中央下部に織り目(weave)アーティファクトを生む。",
+        "処方: mottle は接線相関を断った等方の値ノイズ/FBM(球状ローブ)主体に切り替え、curl noise の空間周波数を上げて帯を塊状にちぎる(周波数↑・振幅は密度0.6〜0.85帯を維持)。密度移流の実効スメアを下げる(移流 dt↓ もしくは mottle をフレーム間で再サンプルして糸状の蓄積を断つ)。自己遮蔽は §A3 に従い『なめらか勾配+ディテールノイズの有限差分勾配』の2タップ合成で塊の陰影を出す。白の上限は 0.9 に維持しハイライトの飽和を抑える。"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "final_warm12s / final_freeze で雲は青みがかった白〜灰の低彩度階調、目の内側と切れ間は深い海色、四隅は減光ビネットで衛星視野感が出ている。派手色や全面純白飛びはなく反証は概ね不成立。ただし左下のハイライトが白寄りで局所的に青みが抜け、白上限0.9の狙いよりやや明るい箇所がある。",
+      "reject_reasons": ["左下ハイライトが白へ寄り局所的に青み(海→灰→白の階調)が抜ける"]
+    },
+    {
+      "invariant_id": 6,
+      "score": 5,
+      "evidence": "V1 longrun が pass(全画面平均72→70で時間不変、white 0.00%、whiteout なし)。debug_3 が中心最強の距離依存散逸+注入テーパのゲートを示し、有界定常状態の機構が実装されている。発散・消失いずれの反証も計測で否定。",
+      "reject_reasons": []
+    }
+  ],
+  "common": {
+    "style_holds": 2,
+    "subject_readable": 3,
+    "artifact_free": 3
+  },
+  "verdict": "fail",
+  "summary": "手順0の第一印象(brief前)がテーマと別物=『眼球(瞳孔+虹彩)/穴を囲む毛皮の輪』で、§A6 眼球化の再発。この作品が過去に fail した観点そのもの。§A6 の3条件のうち2つが依然成立: (2)環が接線異方の繊維・刷毛状(=虹彩の筋)、(3)中心境界がほぼ完全な幾何学真円。緩和策(中心を純黒でなく海色に持ち上げ)は効いているが、繊維テクスチャ+真円穴+アーモンド型の雲塊輪郭が眼球ゲシュタルトを渦読みに勝たせている。よって style_holds=2(手順0規定どおり2以下)。不変量単体は id3(運動対比/実測)・id6(定常/longrun)が強く、id2(目の維持)・id1(回転)・id5(色)は4だが、id4=3(積乱雲の等方 mottle でなく繊維化)が §A6 の直接の駆動因。処方の核: (a)テクスチャを等方 mottle の塊へ(接線相関を切る/curl 周波数↑/移流スメア↓)、(b)中心境界を sdf 生円でなく移流侵食で崩し真円性を壊す、(c)雲塊の外縁を全画面へ広がる非対称螺旋腕にしてアーモンド輪郭を解体。全 score≥4 かつ common 全軸≥4 を満たさず verdict=fail。"
+}

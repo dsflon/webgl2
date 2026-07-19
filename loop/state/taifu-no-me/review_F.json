@@ -1,0 +1,79 @@
+{
+  "artifact": {
+    "file": "loop/state/taifu-no-me/index.html",
+    "commit": "68fdfdb",
+    "screenshots": [
+      "loop/state/taifu-no-me/shots/final_warm12s.png",
+      "loop/state/taifu-no-me/shots/final_thumb.png",
+      "loop/state/taifu-no-me/shots/final_freeze.png",
+      "loop/state/taifu-no-me/shots/crop_eyewall.png",
+      "loop/state/taifu-no-me/shots/crop_outer.png",
+      "loop/state/taifu-no-me/shots/debug_1.png",
+      "loop/state/taifu-no-me/shots/debug_2.png",
+      "loop/state/taifu-no-me/shots/debug_3.png",
+      "loop/state/taifu-no-me/shots/debug_4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "青みがかった灰白色の柔らかい帯が渦を巻き、中心に不整形(左側にえぐれ)の濃紺の穴があいている。渦・嵐の目/水の渦のように読める。中心が純黒の真円でなく濃紺の歪んだ穴で、放射繊維も同心の虹彩筋もないため『眼球』にはほとんど見えず、気象衛星から見た台風の目という主題と整合する。ただし全体がやや軟らかくボケており衛星写真の解像感は弱い。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "debug_1(速度場)は中心まわりで色相が一周する回転流を示し、無方向乱流ではなく大域回転が確立。debug_2(密度raw)とdebug_3(注入ゲート)に中心へ巻き込む複数の弧(切れ間つき)が見え、final_warm12s/final_thumb でも帯が渦を巻いて一目で渦と読める。反証(ただの煙・乱流)は成立せず。弱点として右側の帯がやや同心リング寄りで対数螺旋の非対称性は中程度。",
+      "reject_reasons": [
+        "右側の帯が対数螺旋というより同心リングに近く見える箇所がある(A6②の同心リング=虹彩筋リスクの残り火)",
+        "全体のボケが強く螺旋の腕の輪郭がシャープでない"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "final_warm12s/final_freeze/crop_eyewall で中心に雲のない静穏領域が一貫して維持され、雲で埋まっていない。目の内側は純黒でなく深い濃紺(海面色)。debug_3 で中心の散逸ゲート(青円)の外周に最も濃い注入(明るいオレンジ環=アイウォール)が置かれている。反証(目が埋まる/海色が出ない)は成立せず。",
+      "reject_reasons": [
+        "final の可視アイウォール(目の直近の明るい環)は周囲帯より劇的には濃くなく、『最も濃い雲の壁』のコントラストが中程度"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "debug_1 の輝度(速度の大きさ)は目の境界付近の環で最大、中心は黒(≒静止)、外側へ緩やかに減衰しており、ランキン渦プロファイル(半径で増→アイウォールで最大→内側で急減)が場として確認できる。V1計測(中心2秒差分=0.0=設計どおりの静止、左レインバンド12.8/上10.2の時間応答)とも整合。静止画から時間挙動は直接判定せず場と計測で担保。反証は成立せず。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 4,
+      "score": 3,
+      "evidence": "crop_outer/crop_eyewall(等倍)と debug_4(陰影標本)に濃淡まだら(mottle)は確かに存在し、A1の完全な平坦白膜=石膏には陥っていない。しかし光方向の自己遮蔽で『盛り上がって見える』立体感が弱い: まだらが2Dのシミに留まり、一様な光方向の陰影で沸き立つ塊(積乱雲の雲頂)として起きていない。debug_2 では帯の一部が明るく飽和寄りで、平坦化で勾配が死ぬA1リスクも残る。物質感の後半要件(自己遮蔽の隆起)を反証できず。",
+      "reject_reasons": [
+        "自己遮蔽の方向性が読み取れず、まだらが隆起した塊でなく軟らかいヘイズに見える(CRAFT §A3: 法線をなめらかな低解像度場からだけ計算した粘土化の症状)",
+        "debug_2 で腕が明るく飽和寄りの箇所があり、飽和で勾配が消えるA1リスク",
+        "全体のボケが高周波mottleを潰し、雲頂の質感(沸き立つ塊)が出ていない"
+      ],
+      "fix_instructions": [
+        "因果診断: CRAFT §A3(照明が微細ディテールを見ないと粘土)+§A1(飽和で勾配死)。証拠=debug_4/crop_eyewall/crop_outer で mottle はあるが自己遮蔽の隆起が弱く、debug_2 で腕が飽和寄り。法線がなめらかな密度勾配のみから計算され高周波ディテールを見ていない疑い。",
+        "処方(数値方向): 法線=なめらかな密度勾配 + ディテールノイズの有限差分勾配の合成に変更。光方向へ場を2タップ+ノイズ1タップで自己遮蔽を行進し、塊の谷間にクレバスAOを足す。",
+        "処方(数値方向): mottle ゲインを密度ゲインの主成分に引き上げ(curl noise 由来 mottle 振幅を約1.3〜1.6倍)、同時に注入上限を下げて密度を0.6〜0.85帯に保ち飽和(→勾配ゼロ)を回避。",
+        "処方(数値方向): 密度/陰影段のボケ半径を下げ mottle の空間周波数を上げ、等倍で雲頂が沸き立つ塊として読めるようにする(ヘイズ化の解消)。lookの色設計は変えない範囲で。"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "final_warm12s で雲は低彩度の青みがかった白〜灰、雲の切れ間と目の内側は深い濃紺(海色)、画面四隅は減光して衛星視野のビネットが効く。最明部も純白飛びせず灰白に抑えられ白上限が守られている。debug_4 下部の色ランプ(濃紺→灰→白)が oklab 補間設計を裏づける。反証(派手色/純白飛び)は成立せず。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "静止画からは直接判定不可だが、V1 longrun が pass(平均輝度103.5→102.7でほぼ不変、white 0.00%、whiteout なし)。debug_3 に中心(青)の散逸ゲートと距離依存の注入テーパが確認でき、CRAFT §A5 の有界定常状態の処方(clamp/距離依存散逸/白上限手前)が実装されている。発散・消失の反証は成立せず。",
+      "reject_reasons": []
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 4
+  },
+  "verdict": "fail",
+  "summary": "台風の目のゲシュタルトは成立し、過去2度 fail した眼球化(§A6)は根絶されている: ①中心は純黒の真円でなく濃紺の歪んだ穴、②テクスチャは等方mottleで接線繊維/放射なし、③可視の目境界は移流で崩れ debug_3 の生sdf真円は最終描画に露出していない。渦(id1)・目とアイウォール(id2)・ランキン速度場(id3, debug_1)・色設計(id5)・定常性(id6, longrun pass)はいずれも反証できず≥4、common3軸も≥4。ただし物質感(id4)は mottle はあるが光方向自己遮蔽の隆起が弱く軟らかいヘイズに留まり、debug_2 に飽和寄りの腕もあるため3止まり。全不変量≥4を満たさないため verdict=fail。id4 の法線合成・自己遮蔽・mottleゲイン/ボケの是正で pass 圏に入る見込み。"
+}

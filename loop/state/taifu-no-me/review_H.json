@@ -1,0 +1,78 @@
+{
+  "artifact": {
+    "file": "loop/state/taifu-no-me/index.html",
+    "commit": "68fdfdb",
+    "screenshots": [
+      "loop/state/taifu-no-me/shots/final_thumb.png",
+      "loop/state/taifu-no-me/shots/final_warm12s.png",
+      "loop/state/taifu-no-me/shots/final_freeze.png",
+      "loop/state/taifu-no-me/shots/crop_eyewall.png",
+      "loop/state/taifu-no-me/shots/crop_outer.png",
+      "loop/state/taifu-no-me/shots/debug_1.png",
+      "loop/state/taifu-no-me/shots/debug_2.png",
+      "loop/state/taifu-no-me/shots/debug_3.png",
+      "loop/state/taifu-no-me/shots/debug_4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "深い紺色の楕円の中心を、灰色の雲がほぼ同心の輪で囲む構図に見える。台風の螺旋というより『眼(暗い瞳孔+虹彩の輪)』または暗いドーナツ/環状星雲の印象が先に立つ。回転する渦だと確信するには、拡大や debug を見て初めて螺旋が読める段階で、一目のゲシュタルトはテーマ(気象衛星の台風)と一致しきらない。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 3,
+      "evidence": "debug_2(密度raw)は対数螺旋の腕と切れ間が明確、debug_1(速度場)は hue が中心まわりを一巡し接線回転を示し中心は黒(静止)=渦の場は確かに組織化されている。しかし final_thumb の一目の印象は螺旋よりほぼ同心の輪で、'大域の回転が一目で読める'の条件が弱い。螺旋ピッチが浅く、閉じたリングのゲシュタルトに負けている(§A6/§D3)。",
+      "reject_reasons": [
+        "final_thumb/final_warm12s では腕が緩く巻き、螺旋より同心リングとして読める",
+        "debug で螺旋が確認できても最終 RGB の一目判読(invariant の核)には届いていない"
+      ],
+      "fix_instructions": [
+        "症状: final_thumb で螺旋でなく同心リング/眼に読める(§A6 眼球化, §D3 ゲシュタルト)。原因: 速度場の接線外力のスパイラル角(内向き成分)が浅く帯が閉じた環に見える。Stable Fluids の接線外力に内向き成分を足して対数螺旋のピッチを上げ、腕が中心へ巻き込む向きを一目で読ませる。",
+        "curl noise で密度注入を変調し帯を非対称にちぎり、閉じた同心リングでなく切れ間のある 2〜3 本の螺旋腕にする(§A6 処方2)。移流で腕を引き伸ばし、縮小表示でも回転方向が読めるようにする。"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 5,
+      "evidence": "全ショットで中心に雲のない円形の静穏域が維持され、雲で埋まっていない。crop_eyewall で目のすぐ外に最も濃い雲の壁(アイウォール)が確認でき、debug_3 では中心に散逸ゲート(青)、その環に最も濃い注入(橙)が置かれ原理どおり。目の内側は深い紺(海色)で純黒でなく、境界も移流で不規則に崩れている。拒否理由が見つからない。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "debug_1(速度場)で接線速度の大きさが中心=黒(ゼロ)→アイウォール環で最大→外側で減衰する空間分布を示し、ランキン渦のプロファイルに一致。時間軸は指示どおり V1 計測(中心2秒差分=0.0/レインバンド12.8・10.2/longrun pass)で担保済み。空間・時間の両証拠から対比は成立しており拒否できない。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 4,
+      "score": 3,
+      "evidence": "crop_outer/crop_eyewall の等倍では雲がやわらかいヘイズ状にぼやけ、沸き立つ細胞状の峰谷・光方向の自己遮蔽が乏しい。debug_4 には細かい mottle があり石膏化(§A1 の一色飽和)は回避されているが、盛り上がって見える立体的な自己遮蔽が弱く、のっぺりした軟らかいヘイズ寄り(inv4 の反対の極)。freeze では多少 mottle が出るが 1:1 クロップの質感は依然ソフト。",
+      "reject_reasons": [
+        "crop_outer が全体にぼやけ、雲頂の峰谷と自己遮蔽の影が読めない",
+        "mottle はあるが密度ゲインの主成分になっておらず立体の起伏に結びついていない"
+      ],
+      "fix_instructions": [
+        "症状: 等倍で雲がぼやけ立体感不足(§A3 の粘土化)。原因: 法線をなめらかな低解像度場だけから計算している。密度勾配の擬似法線に、ディテールノイズの有限差分勾配を合成し、光方向へ場を2タップ+ノイズ1タップ行進する自己遮蔽を強めて雲頂を起こす。",
+        "curl noise 由来の mottle を密度ゲインの主成分にして振幅を上げ、塊の谷間にクレバス AO、受光縁に控えめなシルバーライニングを入れて積乱雲の沸き立つ峰谷を出す。全体の過度なぼかしを抑え密度場の解像度感を上げる(§A1/§A3 処方)。"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "final_warm12s/final_thumb で雲は青みがかった白〜灰の低彩度階調、目の内側と雲の切れ間は深い紺(海色)、四隅は減光(edge darkening のビネット)で衛星視野感を作る。白は飛ばず抑えられ、派手な色や純白飛びはない。参照の俯瞰色設計におおむね一致し、決定的な拒否理由が見つからない。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "指示の longrun 実測(mean 100→103 で発散なし、white 0.00%)で定常状態が担保。debug_3 で中心最強の距離依存散逸ゲート(青)と既高密度でのテーパ注入(橙の環)が確認でき、蓄積 whiteout(§A5)や雲消失を抑える構造になっている。静止画+数値の両面で拒否できない。",
+      "reject_reasons": []
+    }
+  ],
+  "common": {
+    "style_holds": 2,
+    "subject_readable": 3,
+    "artifact_free": 4
+  },
+  "verdict": "fail",
+  "summary": "場の骨格は堅い: 目(inv2=5)、ランキン速度分布(inv3=4)、俯瞰色設計(inv5=4)、定常状態(inv6=4)は拒否理由が見つからず高得点。だが二つの核が未達。(1) inv4=3: 等倍クロップで雲がやわらかいヘイズにぼやけ、光方向の自己遮蔽=立体の起伏が弱い(mottle はあり石膏化は回避)。(2) inv1=3 と style_holds=2: 螺旋は debug では明確だが最終 RGB の縮小表示では同心リング/眼のゲシュタルトが先に立ち、一目で台風の渦と読めない(§A6 眼球化の再発懸念)。螺旋ピッチを上げて帯をちぎり、雲の自己遮蔽を強めることが次の修正の主眼。verdict=fail。"
+}
