@@ -836,16 +836,31 @@
             float mottle = mix(1.0, 0.05 + 2.0 * mot, 0.30 + 0.68 * uDetailAmt);
             mottle = mix(mottle, 1.0, 0.30 * injRing(r, uR));
 
-            float shape = 1.05 * injRing(r, uR)
+            // CRAFT §A2: the eye edge must NOT read as a geometric circle.
+            // The sdf stays the gate, but the *radius fed to the eye gates* is
+            // warped by curl noise (a broad lobe + a finer tear) so the cleared
+            // eye and the eyewall ring have a ragged, advection-torn boundary —
+            // the visible rim is a density iso-surface, not a compass circle.
+            // Only the eye-region gates are warped; the outer containment and
+            // the arcs/band keep true r/th (they read fine off-centre).
+            vec2 eyeWarp = 0.34 * uR * curlNoise(p * 2.6 + 5.0)
+              + 0.16 * uR * curlNoise(p * 7.4 + 17.0);
+            float rEye = length(p + eyeWarp);
+
+            float shape = 1.05 * injRing(rEye, uR)
               + 0.16 * injCdo(r, uR)
               + 0.70 * injArcs(r, th, uR)
               + 0.52 * injBand(r, th, uR, uEdge);
-            float injGate = smoothstep(0.74 * uR, 0.94 * uR, r); // eye = no injection
+            float injGate = smoothstep(0.74 * uR, 0.94 * uR, rEye); // eye = no injection
             float taper = smoothstep(0.82, 0.45, den);           // ~0.8 頭打ち
 
             den += uDt * uCloudGain * shape * mottle * injGate * taper;
-            den *= exp(-uDt * (dissField(r, uR, uCalm, uEdge)
-              + subsidence(r, shape, uR, uEdge)));
+            // dissipation: eye-clearing term uses the warped radius (torn eye),
+            // base + outer containment use true r (radial off-screen sink).
+            float diss = 0.22
+              + eyeCore(rEye, uR) * mix(1.4, 3.6, uCalm)
+              + smoothstep(uEdge * 0.70, uEdge * 1.04, r) * 2.3;
+            den *= exp(-uDt * (diss + subsidence(r, shape, uR, uEdge)));
             den = clamp(den, 0.0, 1.0);
             fragColor = vec4(den, 0.0, 0.0, 1.0);
           }
@@ -942,8 +957,10 @@
             float den = texture(uDen, uv).r;
             float dtl = texture(uDtl, uv).r;
             // mottle is the MAIN component of the render gain (CRAFT §A1): high
-            // contrast so the cloud tops read as boiling cells, not a membrane.
-            float mottle = mix(1.0, 0.20 + 1.55 * dtl, 0.42 + 0.85 * uDetailAmt);
+            // contrast ISOTROPIC cells so the cloud tops read as boiling cumulus
+            // clumps (not a membrane, and not tangential hair). Slightly higher
+            // contrast breaks the advected filaments into cellular tops.
+            float mottle = mix(1.0, 0.10 + 1.80 * dtl, 0.46 + 0.90 * uDetailAmt);
             return clamp(den * mottle, 0.0, 1.05);
           }
 
@@ -988,7 +1005,12 @@
             // normal = smooth field gradient + fine detail finite-diff gradient
             // (CRAFT §A3): the crevasse shading needs the high-freq mottle in
             // the normal, not just a smooth low-res gradient.
-            float kN = 20.0 + 64.0 * uRelief;
+            // CRAFT §A1/A3: the normal is smooth-gradient + ISOTROPIC detail.
+            // The smooth density gradient carries the advected streaks (it is
+            // anisotropic — thin tangential filaments), so its gain is kept low;
+            // the boiling-cumulus relief comes mainly from the isotropic detail
+            // noise finite-diff, which reads as CLUMPS, not hair/iris fibres.
+            float kN = 11.0 + 26.0 * uRelief;
             vec2 dp = vec2(2.2) / uRes;
             float nxp = texture(uDtl, vUv + vec2(dp.x, 0.0)).r
               - texture(uDtl, vUv - vec2(dp.x, 0.0)).r;
@@ -996,8 +1018,8 @@
               - texture(uDtl, vUv - vec2(0.0, dp.y)).r;
             float dGate = smoothstep(0.12, 0.45, d0) * uRelief;
             vec3 N = normalize(vec3(
-              -(dxp - d0) * kN - nxp * 22.0 * dGate,
-              -(dyp - d0) * kN - nyp * 22.0 * dGate, 1.0));
+              -(dxp - d0) * kN - nxp * 42.0 * dGate,
+              -(dyp - d0) * kN - nyp * 42.0 * dGate, 1.0));
             vec2 L2 = normalize(vec2(-0.58, 0.66));       // fixed light, upper-left
             vec3 L3 = normalize(vec3(L2 * 0.80, 0.62));
             float ndl = clamp(dot(N, L3), 0.0, 1.0);
@@ -1042,6 +1064,15 @@
             float glint = sin(uTime * 1.25 + grain * 6.2831853); // slow phase
             vec3 sea = seaDeep * (1.0 + 0.16 * glint * (0.4 + 0.6 * ripple));
             sea *= mix(1.0, 0.72, smoothstep(0.2, 1.0, r / uEdge));
+            // eye interior: lift the sea to a clearly-blue ocean tone so the
+            // calm centre reads as OPEN WATER, not a black pupil (breaks the
+            // eyeball gestalt). Still deep + never a whiteout — the alive
+            // "dark sea shows through" invariant is kept (centre L well above
+            // the 8/255 floor but far below the cloud whites).
+            float eyeIn = eyeCore(r, uR);
+            vec3 seaEye = mix(vec3(0.090, 0.180, 0.265),
+              vec3(0.060, 0.130, 0.205), uSea);
+            sea = mix(sea, max(sea, seaEye), eyeIn);
 
             // ---- clouds: oklab grey→bluish white, shaded. The eyewall ring
             // gets a lift so the wall reads as the tallest, densest cloud ----
