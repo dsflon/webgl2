@@ -1,7 +1,7 @@
 {
   "slug": "kotonoha-shigure",
   "theme": "言の葉時雨 — 声は言葉に、環境音はオノマトペになり、墨の活字として降り積もる(美術: 墨と和紙)",
-  "status": "runtime_ok",
+  "status": "submitted",
   "attempts": {
     "brief": 1,
     "order": 1,
@@ -15,9 +15,9 @@
   "resume_stage": "runtime",
   "cost": {
     "loops": 4,
-    "approx_tokens": 650000,
-    "wall_minutes": 120
+    "approx_tokens": 800000,
+    "wall_minutes": 135
   },
   "pr_url": null,
-  "updated_at": "2026-07-19T23:16:48.600Z"
+  "updated_at": "2026-07-19T23:26:29.317Z"
 }

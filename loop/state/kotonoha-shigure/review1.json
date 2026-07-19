@@ -1,0 +1,79 @@
+{
+  "artifact": {
+    "file": "loop/state/kotonoha-shigure/index.html",
+    "screenshots": [
+      "loop/state/kotonoha-shigure/shots/review/final_warm_noui.png",
+      "loop/state/kotonoha-shigure/shots/review/final_thumb.png",
+      "loop/state/kotonoha-shigure/shots/review/crop_pile.png",
+      "loop/state/kotonoha-shigure/shots/review/final_freeze.png",
+      "loop/state/kotonoha-shigure/shots/review/debug1_physics.png",
+      "loop/state/kotonoha-shigure/shots/review/debug2_layer.png",
+      "loop/state/kotonoha-shigure/shots/review/debug4_specimen.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "生成り色の和紙の上に、黒い筆致の文字断片（サ・ラなどのカナに見える）がまばらに散り、下辺に向かって黒い筆画が密に堆積している。数点の朱の点も見える。全体は「和紙に墨の文字が散って下に積もる」情景に読める。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "final_warm_noui/final_thumb で地は生成り色の和紙、繊維の縦流れと漉きムラ（明暗の斑）が全面に手続き的に変化しており真っ白ではない。図は黒の無彩階調。彩色は朱一色に限られ（thumb 中央の朱グリフ、freeze の『常』『葉』『に』の朱）、他の有彩色は無い。debug4_specimen 上部の墨ランプが淡墨→濃墨の階調を持ち、純白飛び・純黒つぶれは確認できない。朱の標本ブロックも specimen 左下にある。",
+      "reject_reasons": [
+        "紙が平坦な貼り込みテクスチャで手続き生成でない可能性→ debug1/debug2 でも斑が場所ごとに変化しており fbm 由来と整合、反証",
+        "墨が単一の純黒で階調を持たない可能性→ specimen の墨ランプと堆積の濃淡で反証",
+        "朱以外の色が混じる多色化→ 全ショットで有彩は朱のみ、反証"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "debug1_physics でシアンのボディ矩形が上部から落下し、下辺で回転姿勢のまま載り合って山（マウンド）を形成、赤い高さ場ラインが堆積の稜線を滑らかにトレースしている。ボディ数は有界（画面内で数十個規模）。床を貫いた矩形は無い。V1 運動応答 pass・長時間安定 pass（払いサイクルで有界）と併せ永久振動なしと判断。時間軸行のため静止での挙動不確定は減点根拠にしない。",
+      "reject_reasons": [
+        "矩形が重なって見えるのは貫通では→ 不規則グリフの安静接触では OBB の重なりは正常、高さ場が連続で床貫通も無く反証",
+        "整列表示で物理でない→ 山なりの不規則堆積と回転姿勢で反証"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "debug4_specimen が決定的: 中段にシャープな活字グリフ（葉・の・雨）、下段に同グリフの着地後にじみ版があり、縁が紙へ不均一に膨らみ繊維方向へ異方性に広がり内部に濃淡ムラを持つ。これは一様ガウスぼかしの偽装では出ない繊維追従のにじみ。debug2_layer(R=墨/G=年齢/B=朱) に蓄積が転写され年齢チャンネルの混色も見える。埋没深さによる圧密・風化の低コントラスト化は specimen では弱く読み取れるに留まるため 5 は付けない。",
+      "reject_reasons": [
+        "にじみが後処理ガウスぼかしの偽装→ specimen 下段の不均一・異方性エッジで反証",
+        "着地でにじまずフォント表示のまま→ シャープ版とにじみ版の並置で反証"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "時間/知覚軸行。V1 運動応答 pass（diff=2.02、再実行 0.97〜1.14 で安定）で音駆動の発生が確認済み。構造的証拠として freeze/debug1 に文字サイズの明瞭な差（大きな太字カ・ス・ツ 対 小さな点画）があり RMS→サイズの写像と整合、朱アクセントが一部グリフのみに付与されプロソディ→朱付与と整合。無音時挙動は静止では不可判定だが時間軸のため減点しない。構造的減点理由は無い。",
+      "reject_reasons": [
+        "サイズが一様で音量→サイズ写像が無い→ 大小の差が顕著で反証",
+        "朱が無差別に付く→ 一部イベントのみで反証"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "時間/場軸行。debug1_physics の赤い高さ場ラインが堆積高さを計測しており、閾値到達で風払いをトリガする機構の構造的裏付けになる。V1 長時間安定 pass（mean 188.5→187.9/255、white 0.00%、black 0%）で払いサイクルにより輝度・物量が発散せず有界と確認。静止では払い動作そのものは見えないが時間軸のため減点しない。",
+      "reject_reasons": [
+        "堆積が発散して飽和・停止する→ 長時間 mean ほぼ不変・白飛び0%で反証",
+        "高さ場が無く閾値制御が無い→ debug1 の高さ場ラインで反証"
+      ]
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "マーク/時間軸行。構造的証拠として freeze/debug1 にグリフの字重・サイズ・質量感の差が明確（太く重い大グリフ カ・ス・ツ 対 細く小さい線画・単発の点）。字重プリセットの差分がインスタンス描画に反映されており『すべてが同じ落ち方をしない』の構造条件を満たす。個別の初速・角速度差は静止では確認できないが時間軸のため減点根拠にしない。",
+      "reject_reasons": [
+        "全グリフが同一字重・同一サイズの一様な雨→ 太細・大小の差が明確で反証"
+      ]
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 4
+  },
+  "verdict": "pass",
+  "summary": "第一印象が『和紙に墨の文字が散って下に積もる』でテーマ(言の葉時雨)と一致し様式は成立。debug4_specimen が墨ランプ・シャープ活字・にじみ前後・朱標本を決定的に示し、inv1(紙墨朱一色規律)と inv3(着地にじみ、繊維追従で偽装でない)を裏付ける。debug1 の高さ場+ボディ矩形で inv2(有界な剛体堆積)と inv5(高さ閾値制御)、V1 の運動応答 pass と長時間有界で時間軸(inv4/5)を担保。字重・サイズの差で inv6 の差別化を構造的に確認。等倍 crop_pile に後処理ぼかし・輪郭線の誤魔化しは無い。全不変量≥4・common 全軸≥4 のため pass。5 に届かないのは風化の圧密低コントラスト化が静止で弱くしか読めない等、決定的証拠の余地を残すため。"
+}
