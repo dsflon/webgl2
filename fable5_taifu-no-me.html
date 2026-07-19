@@ -1,0 +1,1396 @@
+<!doctype html>
+<!--
+  fable5_taifu-no-me.html — WebGL2「台風の目(Eye of the Typhoon)」— 無入力ジェネラティブ
+
+  概要:
+  気象衛星の真上からの俯瞰で見る、ひとつの巨大な台風。白い雲の帯(レインバンド)が
+  対数螺旋状に中心へ巻き込み、外縁は荒れ狂って速く流れ、中心近くには最も濃い雲の壁
+  (アイウォール)が立つ。その内側だけ雲が抜け、暗い海面が円くのぞく完全な静寂=「目」。
+  運動と静止の対比が主題。カメラ・マイク・ポインタは使わず、時間発展だけで駆動する
+  (スクリーンセーバー的佇まい)。<meta name="art-input" content="none"> 宣言済み。
+
+  実行方法:
+    python3 -m http.server 8888 → http://localhost:8888/fable5_taifu-no-me.html を開く
+    (無入力作品。カメラ許可は不要。file:// でも動くが規約どおり localhost 推奨)
+    ?freeze=1     … 固定 dt=1/60 の事前ロール 240 ステップで渦を発達させた後に時間停止
+                    (決定的静止フレーム。シードは全て固定値/セル座標)
+    ?fakesource=1 … 無入力作品のため受理して無視(検証ハーネスの URL 形式互換のため)
+    デバッグ表示: 0=最終 1=速度場(方向=色相/速さ=明度) 2=密度場 raw
+                  3=注入・散逸ゲート(sdf の環と目) 4=雲の陰影標本+oklab グラデ見本
+
+  様式解析の要約(視覚的不変量。優先度 2 > 1 > 3 > 4 > 6 > 5):
+    2. 目の維持(場/知覚) — 中心距離場(sdf)で注入と速度をゲート。目の内側は散逸最強+
+       注入禁止、アイウォール半径 R の環に最濃注入。目は雲で埋まらず暗い海面がのぞく。
+    1. 大域の回転組織(場) — Stable Fluids の速度場に、中心まわりのランキン渦ターゲット場
+       への緩和(ema。スパイラル角 15°つき)を常時与える。帯は複数の固定シード弧として
+       注入し、移流が対数螺旋に引き伸ばす。curl noise は注入の mottle 変調に使う。
+    3. 運動の対比(時間) — ランキン渦プロファイル v_t(r)=vmax·(r/R) (r<R) /
+       vmax·(R/r)^0.65 (r≥R)、目の内側(r<0.6R)はターゲット0+強い緩和で静止。
+       渦の細部維持に vorticity confinement。
+    4. 雲の物質感(物質) — 注入テーパで密度 0.6〜0.85 帯を保ち(CRAFT §A1 石膏化の防止)、
+       curl noise 由来の mottle を密度ゲインに。密度勾配の擬似法線+光方向2タップ自己遮蔽。
+    6. 長時間定常(時間/場) — ping-pong 各ステップで clamp、注入は既高密度でテーパ、
+       散逸は中心距離依存(目の内側で最強・外縁で再強)。whiteout も雲消失もしない。
+    5. 俯瞰の色設計(色) — 密度→oklab で海色→灰→青白(L≤0.9)補間。周縁は edge darkening
+       のビネット。地は黒でなく海(銀河化の防止)。海面に静的グレインのきらめき(freeze 停止)。
+
+  パイプライン図(毎フレーム 1 ステップ。★= EXT_color_buffer_float 時 RGBA16F /
+  未対応時 RGBA8 オフセット符号化フォールバック。シミュ格子は長辺 ≤416 の半解像度以下、
+  単位は「画面高さ=1」のワールド系・正方テクセル):
+    [S1 curl   ] velA          → curlT ★   ω̃ = (vR−vL−uT+uB)/2
+    [S2 force  ] velA,curlT    → velB ★   semi-Lagrangian 移流 → ランキン緩和(ema・
+                                          スパイラル角・目の内側は静止ターゲット) →
+                                          vorticity confinement → ドラッグ
+    [S3 div    ] velB          → divT ★   D̃ = (uR−uL+vT−vB)/2
+    [S4 jacobi ] prsA/B ×22    → prs  ★   P̃ ← (ΣP̃ − D̃)/4(前フレームでウォームスタート)
+    [S5 project] velB,prs      → velA ★   vel −= (P̃R−P̃L, P̃T−P̃B)/2
+    [S6 density] denA,velA     → denB ★   移流 → sdf ゲート注入(アイウォール環+固定シード
+                                          弧+弱い対数螺旋帯、curl noise mottle 変調、
+                                          den>0.85 テーパ) → 距離依存散逸 → clamp
+    [S7 detail ] (手続き)      → dtlT     差動回転(ランキン ω(r))で流れと共回転する
+                                          fbm+curl noise ディテール(半解像度・RGBA8)
+    [R  render ] denB,velA,dtlT→ canvas   密度→oklab(海→灰→青白)、勾配擬似法線+
+                 (DPR≤2)                  2タップ自己遮蔽、海面グレイン、ビネット、uDebug
+
+  スライダーの説明(全て単一 state に集約):
+    vortex  渦の強さ     ランキン渦 v_max(外縁の荒れの激しさ)
+    eyeSize 目の大きさ   アイウォール半径 R(sdf ゲートの中心円)
+    calm    目の静けさ   目の内側の速度減衰と散逸の強さ(静止の純度)
+    clouds  雲量         弧状ソースの注入量(テーパ上限 0.85 は不変)
+    detail  雲の細部     curl noise の mottle 変調の深さ
+    relief  立体感       擬似法線+自己遮蔽の強さ(石膏化の防止と表裏)
+    sea     海の深さ     海色の明度・彩度(目の内側と切れ間の色)
+    pace    時の流れ     シミュレーション時間倍率(freeze とは独立)
+
+  依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00)。
+-->
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="art-input" content="none" />
+    <title>FABLE5 · 台風の目 — Eye of the Typhoon (WebGL2 generative)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #04090f;
+        --ink: #d9e6ef;
+        --muted: rgba(217, 230, 239, 0.66);
+        --panel: rgba(6, 13, 20, 0.86);
+        --line: rgba(217, 230, 239, 0.18);
+        --accent: #7fb4d8;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #050b12, #0a141d 55%, #04090f);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(217, 230, 239, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(217, 230, 239, 0.14); }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(217, 230, 239, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 92px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(217, 230, 239, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(3, 7, 11, 0.8);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0; font-size: 11px; line-height: 1.6; }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 generative typhoon eye"></canvas>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+
+    <section id="panel" class="panel" aria-label="Typhoon eye controls"></section>
+
+    <div id="overlay" class="hidden" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle"></h2>
+        <p id="overlayText"></p>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?freeze=1 — deterministic still frame: every seed is already fixed
+        // (cell coordinates / literal constants; time is never a seed), so we
+        // pre-roll the simulation 240 steps at a fixed dt=1/60 to a developed
+        // vortex, then hold dt = 0. The same frame renders every time.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakesource=1 — this is a no-input (fully generative) piece; the
+        // verification harness passes the same URL shape to every artwork, so
+        // the parameter is ACCEPTED AND IGNORED (never an error). There is no
+        // synthetic camera here because there is no camera at all.
+        QUERY.get("fakesource");
+
+        const DEBUG_MODES = [
+          "最終",
+          "速度場",
+          "密度場 raw",
+          "注入・散逸ゲート",
+          "陰影標本",
+        ];
+
+        const DEFAULTS = {
+          vortex: 0.55,
+          eyeSize: 0.45,
+          calm: 0.7,
+          clouds: 0.55,
+          detail: 0.5,
+          relief: 0.55,
+          sea: 0.5,
+          pace: 0.5,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["vortex", "渦の強さ", "ランキン渦 v_max(外縁の荒れの激しさ)", 0, 1, 0.01],
+          ["eyeSize", "目の大きさ", "アイウォール半径 R(sdf ゲートの中心円)", 0, 1, 0.01],
+          ["calm", "目の静けさ", "目の内側の速度減衰と散逸(静止の純度)", 0, 1, 0.01],
+          ["clouds", "雲量", "弧状ソースの注入量(テーパ上限は不変)", 0, 1, 0.01],
+          ["detail", "雲の細部", "curl noise の mottle 変調の深さ", 0, 1, 0.01],
+          ["relief", "立体感", "擬似法線+自己遮蔽の強さ", 0, 1, 0.01],
+          ["sea", "海の深さ", "海色の明度・彩度(目の内側と切れ間)", 0, 1, 0.01],
+          ["pace", "時の流れ", "シミュレーション時間倍率(freeze とは独立)", 0, 1, 0.01],
+        ];
+
+        // 「写実 ↔ 様式の強さ」のプリセット(§6)。標本 = uDebug 4(陰影+oklab 見本)。
+        const PRESETS = {
+          HIMAWARI: { vortex: 0.55, eyeSize: 0.45, calm: 0.7, clouds: 0.55,
+            detail: 0.5, relief: 0.55, sea: 0.5, pace: 0.5 },
+          CAT5: { vortex: 0.82, eyeSize: 0.34, calm: 0.8, clouds: 0.7,
+            detail: 0.6, relief: 0.62, sea: 0.56, pace: 0.62 },
+          ANNULAR: { vortex: 0.6, eyeSize: 0.78, calm: 0.85, clouds: 0.6,
+            detail: 0.44, relief: 0.5, sea: 0.5, pace: 0.45 },
+        };
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>FABLE5 · 台風の目</h1>
+          <p>
+            気象衛星の俯瞰で見るひとつの巨大な台風。雲帯が対数螺旋状に中心へ巻き込み、
+            アイウォールの内側だけ雲が抜けて暗い海面がのぞきます。外縁の荒れと目の静寂の
+            対比を、時間発展だけで描く無入力作品です。
+          </p>
+          <div class="select-row">
+            <span>プリセット</span>
+            <select id="presetSel" aria-label="プリセット">
+              <option value="">— 選択 —</option>
+              ${Object.keys(PRESETS)
+                .map((k) => `<option value="${k}">${k}</option>`)
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>時を止める</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+            <button id="hideUi" type="button">HIDE UI</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 描画 -- / シミュ --</div>
+            <span class="badge" id="glBadge">WebGL2 · Stable Fluids · oklab · 無入力</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("presetSel").addEventListener("change", (event) => {
+          const preset = PRESETS[event.currentTarget.value];
+          if (preset) Object.keys(preset).forEach((k) => setSlider(k, preset[k]));
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          document.getElementById("presetSel").value = "";
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        document.getElementById("hideUi").addEventListener("click", () =>
+          setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-taifu-no-me-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup — the only real error paths of a no-input piece:
+           WebGL2 unavailable / render target creation failure (float ext).
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the velocity / pressure fields precise.
+        // Without EXT_color_buffer_float every signed field falls back to an
+        // offset-encoded RGBA8 (same shaders via the PACK chunk, coarser).
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+        const PACKED = !floatExt;
+        if (PACKED) {
+          document.getElementById("glBadge").textContent =
+            "WebGL2 · RGBA8 fallback(float 拡張なし)";
+        }
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hash + value noise + fbm + curl noise.
+        // Seeds are POSITION-ONLY (repo rule §8-9): time never enters a hash,
+        // so ?freeze=1 renders a deterministic, flicker-free still.
+        const CHUNK_NOISE = `
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = p - i;
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm(vec2 p) {
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 5; i++) {
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc;
+          }
+          float fbm3(vec2 p) {
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 3; i++) {
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc;
+          }
+          // curl noise: divergence-free swirl derived from an fbm potential.
+          // Used to WARP the mottle field (density-injection modulation).
+          vec2 curlNoise(vec2 p) {
+            float e = 0.09;
+            float n1 = fbm3(p + vec2(0.0, e));
+            float n2 = fbm3(p - vec2(0.0, e));
+            float n3 = fbm3(p + vec2(e, 0.0));
+            float n4 = fbm3(p - vec2(e, 0.0));
+            return vec2(n1 - n2, n4 - n3) / (2.0 * e);
+          }
+        `;
+
+        // Shared: correct oklab transform (sRGB→linear→LMS→oklab and back,
+        // repo rule §8-14). The sea→grey→white cloud ramp interpolates here.
+        const CHUNK_OKLAB = `
+          vec3 srgb2lin(vec3 c) {
+            return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),
+              step(0.04045, c));
+          }
+          vec3 lin2srgb(vec3 c) {
+            c = clamp(c, 0.0, 1.0);
+            return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+              step(0.0031308, c));
+          }
+          vec3 lin2oklab(vec3 c) {
+            float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+            float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+            float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+            float l_ = pow(max(l, 0.0), 1.0 / 3.0);
+            float m_ = pow(max(m, 0.0), 1.0 / 3.0);
+            float s_ = pow(max(s, 0.0), 1.0 / 3.0);
+            return vec3(
+              0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+              1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+              0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_);
+          }
+          vec3 oklab2srgb(vec3 lab) {
+            float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+            float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+            float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+            float l = l_ * l_ * l_;
+            float m = m_ * m_ * m_;
+            float s = s_ * s_ * s_;
+            vec3 lin = vec3(
+              4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+            return lin2srgb(lin);
+          }
+          vec3 oklabMix(vec3 a, vec3 b, float t) {
+            return oklab2srgb(mix(lin2oklab(srgb2lin(a)), lin2oklab(srgb2lin(b)), t));
+          }
+        `;
+
+        // Shared: storage encoding for the signed fields. With float targets
+        // this is an identity; the RGBA8 fallback offset-encodes into [0,1].
+        // All scaled quantities (velocity, P̃, D̃, ω̃) are O(velocity) ≤ 4, so
+        // one range constant covers every sim texture.
+        const CHUNK_PACK = PACKED
+          ? `
+          const float PKR = 4.0;
+          vec4 packVel(vec2 v) {
+            return vec4(clamp(v, -PKR, PKR) / (2.0 * PKR) + 0.5, 0.0, 1.0);
+          }
+          vec2 unpackVel(vec4 t) { return (t.xy - 0.5) * (2.0 * PKR); }
+          vec4 packSc(float s) {
+            return vec4(clamp(s, -PKR, PKR) / (2.0 * PKR) + 0.5, 0.0, 0.0, 1.0);
+          }
+          float unpackSc(vec4 t) { return (t.x - 0.5) * (2.0 * PKR); }
+        `
+          : `
+          vec4 packVel(vec2 v) { return vec4(v, 0.0, 1.0); }
+          vec2 unpackVel(vec4 t) { return t.xy; }
+          vec4 packSc(float s) { return vec4(s, 0.0, 0.0, 1.0); }
+          float unpackSc(vec4 t) { return t.x; }
+        `;
+
+        // Shared: world mapping — screen-height units, origin at the storm
+        // centre C (= screen centre). Square texels: h = 1/simH everywhere.
+        const CHUNK_WORLD = `
+          vec2 worldOf(vec2 uv) {
+            return vec2((uv.x - 0.5) * uAspect, uv.y - 0.5);
+          }
+        `;
+
+        // Shared: the Rankine vortex tangential profile (invariants 1/3):
+        // v_t = vmax·(r/R) inside the eyewall, vmax·(R/r)^0.65 outside, and a
+        // smoothstep collapse to ~0 inside r<0.6R — the calm of the eye.
+        const CHUNK_RANKINE = `
+          float rankineVt(float r, float R, float vmax) {
+            float Rc = max(R, 1e-4);
+            float inner = r / Rc;
+            float outerv = pow(Rc / max(r, 1e-5), 0.65);
+            float vt = vmax * mix(inner, outerv, step(Rc, r));
+            return vt * smoothstep(0.30 * Rc, 0.78 * Rc, r);
+          }
+        `;
+
+        // Shared: sdf gates for injection & dissipation (invariants 2/6).
+        // Everything is a function of distance-to-centre r (+ angle for the
+        // fixed-seed arc sources). Used by the density pass AND uDebug 3.
+        const CHUNK_GATE = `
+          float eyeCore(float r, float R) {
+            return 1.0 - smoothstep(0.50 * R, 0.88 * R, r);
+          }
+          float injRing(float r, float R) {
+            float w = 0.22 * R + 0.02;
+            float d = (r - R) / w;
+            return exp(-d * d);
+          }
+          // central dense overcast: the broad cloud shield hugging the eyewall
+          // (this is what makes a typhoon read as a typhoon, not a spiral of
+          // thin trails). Broad radial gaussian from R out to ~2R.
+          float injCdo(float r, float R) {
+            float d = (r - 1.18 * R) / (0.52 * R);
+            return exp(-d * d);
+          }
+          // 6 arc sources at FIXED hash seeds (never time): angular gaussian ×
+          // radial gaussian arcs between 1.2R and 2.8R. Advection stretches
+          // what they emit into the log-spiral rainbands.
+          float injArcs(float r, float th, float R) {
+            float s = 0.0;
+            for (int i = 0; i < 6; i++) {
+              float fi = float(i);
+              float a0 = 6.2831853 * hash12(vec2(fi + 0.5, 7.31));
+              float rr = R * (1.35 + 1.9 * hash12(vec2(fi + 0.5, 3.17)));
+              float ha = 0.35 + 0.65 * hash12(vec2(fi + 0.5, 5.71));
+              float dth = atan(sin(th - a0), cos(th - a0));
+              float ga = exp(-(dth * dth) / (ha * ha * 0.5));
+              float wr2 = 0.14 * R + 0.024;
+              float dr = (r - rr) / wr2;
+              s += ga * exp(-dr * dr);
+            }
+            return s;
+          }
+          // log-spiral band bias — keeps the global spiral readable while
+          // the arcs provide the broken, cellular rainband texture.
+          float injBand(float r, float th, float R, float rEdge) {
+            float sp = th - 2.4 * log(max(r, 1e-4) / max(R, 1e-4));
+            float band = 0.5 + 0.5 * cos(2.0 * sp);
+            return band * band * band
+              * smoothstep(R * 0.95, R * 1.55, r)
+              * (1.0 - smoothstep(rEdge * 0.60, rEdge * 0.98, r));
+          }
+          // subsidence: between the rainbands the air sinks and clears — the
+          // dissipation RISES where the injection field is weak, so the gaps
+          // between spiral arms open down to the sea instead of silting up.
+          float subsidence(float r, float rawShape, float R, float rEdge) {
+            float bandZone = smoothstep(1.05 * R, 1.5 * R, r)
+              * (1.0 - smoothstep(rEdge * 0.80, rEdge * 1.02, r));
+            return 0.55 * bandZone * smoothstep(0.45, 0.06, rawShape);
+          }
+          // dissipation: strongest inside the eye (clears it), gentle in the
+          // band region, strong again past the screen edge (containment).
+          float dissField(float r, float R, float calmAmt, float rEdge) {
+            // base 0.22: clouds live ~4.5s → a few windings, so the bands stay
+            // broad spiral arms instead of shearing into vinyl grooves.
+            return 0.22
+              + eyeCore(r, R) * mix(1.4, 3.6, calmAmt)
+              + smoothstep(rEdge * 0.74, rEdge * 1.04, r) * 1.5;
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Simulation shaders (Stable Fluids, screen-height units, h = 1/simH)
+        ------------------------------------------------------------------ */
+
+        // S1 — curl (scaled: ω̃ = ω·h), input to vorticity confinement.
+        const curlFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_PACK}
+          void main() {
+            float vr = unpackVel(texture(uVel, vUv + vec2(uTexel.x, 0.0))).y;
+            float vl = unpackVel(texture(uVel, vUv - vec2(uTexel.x, 0.0))).y;
+            float ut = unpackVel(texture(uVel, vUv + vec2(0.0, uTexel.y))).x;
+            float ub = unpackVel(texture(uVel, vUv - vec2(0.0, uTexel.y))).x;
+            fragColor = packSc(0.5 * ((vr - vl) - (ut - ub)));
+          }
+        `;
+
+        // S2 — semi-Lagrangian advection + Rankine relaxation (the organized
+        // vortex, invariants 1/3) + vorticity confinement + drag. The
+        // relaxation IS the ema of the motion field (invariant 6): the
+        // velocity exponentially tracks a bounded target, so it can never
+        // blow up, and the eye interior tracks a ZERO target hard (calm).
+        const forceFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uCurl;
+          uniform vec2 uTexel;
+          uniform float uAspect;
+          uniform float uDt;
+          uniform float uVmax;
+          uniform float uR;
+          uniform float uCalm;
+          uniform float uConf;
+          ${CHUNK_PACK}
+          ${CHUNK_WORLD}
+          ${CHUNK_RANKINE}
+          void main() {
+            vec2 p = worldOf(vUv);
+            float r = length(p);
+
+            // advect velocity by itself (semi-Lagrangian, unconditionally stable)
+            vec2 v0 = unpackVel(texture(uVel, vUv));
+            vec2 back = vUv - uDt * v0 * vec2(1.0 / uAspect, 1.0);
+            vec2 v = unpackVel(texture(uVel, back));
+
+            // Rankine target: tangential (counter-clockwise, NH typhoon) with
+            // a 15° inward spiral outside the eyewall → clouds wind INTO the
+            // centre instead of circling forever.
+            vec2 rhat = p / max(r, 1e-5);
+            vec2 that = vec2(-rhat.y, rhat.x);
+            float vt = rankineVt(r, uR, uVmax);
+            float beta = radians(18.0) * smoothstep(uR * 0.9, uR * 1.6, r);
+            vec2 vTarget = (cos(beta) * that - sin(beta) * rhat) * vt;
+
+            // relaxation (ema): gentle in the bands so curl/confinement detail
+            // survives, HARD toward zero inside the eye (calm slider).
+            float eyeZone = 1.0 - smoothstep(0.35 * uR, 0.75 * uR, r);
+            float kRelax = mix(0.9, mix(2.5, 9.0, uCalm), eyeZone);
+            v = mix(v, vTarget, 1.0 - exp(-uDt * kRelax));
+
+            // vorticity confinement (invariant 3: keeps the shear detail the
+            // coarse grid would otherwise smear away)
+            float wl = unpackSc(texture(uCurl, vUv - vec2(uTexel.x, 0.0)));
+            float wr = unpackSc(texture(uCurl, vUv + vec2(uTexel.x, 0.0)));
+            float wb = unpackSc(texture(uCurl, vUv - vec2(0.0, uTexel.y)));
+            float wt = unpackSc(texture(uCurl, vUv + vec2(0.0, uTexel.y)));
+            float wc = unpackSc(texture(uCurl, vUv));
+            vec2 g = vec2(abs(wr) - abs(wl), abs(wt) - abs(wb));
+            vec2 nDir = g / max(length(g), 1e-5);   // guarded normalize (§8-6)
+            // radial gate: OFF near the eyewall (curl peaks there and the
+            // amplified grid noise stippled the eye rim), full in the bands
+            float confGate = smoothstep(uR * 1.05, uR * 1.5, r);
+            v += uDt * uConf * confGate * wc * vec2(nDir.y, -nDir.x);
+
+            // gentle global drag; hard clamp = absolute stability bound
+            v *= exp(-uDt * 0.12);
+            v = clamp(v, vec2(-3.0), vec2(3.0));
+            fragColor = packVel(v);
+          }
+        `;
+
+        // S3 — scaled divergence D̃ = div·h².../h — consistent with P̃ below.
+        const divFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_PACK}
+          void main() {
+            float ur = unpackVel(texture(uVel, vUv + vec2(uTexel.x, 0.0))).x;
+            float ul = unpackVel(texture(uVel, vUv - vec2(uTexel.x, 0.0))).x;
+            float vt = unpackVel(texture(uVel, vUv + vec2(0.0, uTexel.y))).y;
+            float vb = unpackVel(texture(uVel, vUv - vec2(0.0, uTexel.y))).y;
+            fragColor = packSc(0.5 * ((ur - ul) + (vt - vb)));
+          }
+        `;
+
+        // S4 — Jacobi iteration on the scaled pressure P̃ = p·h (fixed count,
+        // warm-started from last frame's pressure). All quantities stay
+        // O(velocity), which keeps the RGBA8 fallback numerically sane.
+        const jacobiFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrs;
+          uniform sampler2D uDiv;
+          uniform vec2 uTexel;
+          ${CHUNK_PACK}
+          void main() {
+            float pl = unpackSc(texture(uPrs, vUv - vec2(uTexel.x, 0.0)));
+            float pr = unpackSc(texture(uPrs, vUv + vec2(uTexel.x, 0.0)));
+            float pb = unpackSc(texture(uPrs, vUv - vec2(0.0, uTexel.y)));
+            float pt = unpackSc(texture(uPrs, vUv + vec2(0.0, uTexel.y)));
+            float dv = unpackSc(texture(uDiv, vUv));
+            fragColor = packSc(0.25 * (pl + pr + pb + pt - dv));
+          }
+        `;
+
+        // S5 — projection: subtract the scaled pressure gradient.
+        const projectFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uPrs;
+          uniform vec2 uTexel;
+          ${CHUNK_PACK}
+          void main() {
+            float pl = unpackSc(texture(uPrs, vUv - vec2(uTexel.x, 0.0)));
+            float pr = unpackSc(texture(uPrs, vUv + vec2(uTexel.x, 0.0)));
+            float pb = unpackSc(texture(uPrs, vUv - vec2(0.0, uTexel.y)));
+            float pt = unpackSc(texture(uPrs, vUv + vec2(0.0, uTexel.y)));
+            vec2 v = unpackVel(texture(uVel, vUv));
+            v -= 0.5 * vec2(pr - pl, pt - pb);
+            fragColor = packVel(v);
+          }
+        `;
+
+        // S6 — cloud density: advect → sdf-gated injection (eyewall ring +
+        // fixed-seed arcs + weak spiral band, curl-noise mottle modulation,
+        // taper above ~0.85: CRAFT §A1) → distance-dependent dissipation
+        // (eye strongest, edge strong: CRAFT §A5) → clamp. Invariants 2/4/6.
+        const densityFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDen;
+          uniform sampler2D uVel;
+          uniform float uAspect;
+          uniform float uDt;
+          uniform float uR;
+          uniform float uCalm;
+          uniform float uCloudGain;
+          uniform float uDetailAmt;
+          uniform float uEdge;
+          ${CHUNK_NOISE}
+          ${CHUNK_PACK}
+          ${CHUNK_WORLD}
+          ${CHUNK_GATE}
+          void main() {
+            vec2 v = unpackVel(texture(uVel, vUv));
+            vec2 back = vUv - uDt * v * vec2(1.0 / uAspect, 1.0);
+            float den = texture(uDen, back).r;
+
+            vec2 p = worldOf(vUv);
+            float r = length(p);
+            float th = atan(p.y, p.x);
+
+            // mottle: curl-noise-warped fbm, position-seeded only. Coarse —
+            // cloud CELLS, not sandpaper. The eyewall ring stays dense
+            // (mottle relaxed toward 1 there) so the wall reads as a wall.
+            float mot = fbm(p * 3.4 + 0.8 * curlNoise(p * 1.7));
+            float mottle = mix(1.0, 0.18 + 1.55 * mot, 0.30 + 0.68 * uDetailAmt);
+            mottle = mix(mottle, 1.0, 0.6 * injRing(r, uR));
+
+            float shape = 1.05 * injRing(r, uR)
+              + 0.34 * injCdo(r, uR)
+              + 0.70 * injArcs(r, th, uR)
+              + 0.36 * injBand(r, th, uR, uEdge);
+            float injGate = smoothstep(0.74 * uR, 0.94 * uR, r); // eye = no injection
+            float taper = smoothstep(0.82, 0.45, den);           // ~0.8 頭打ち
+
+            den += uDt * uCloudGain * shape * mottle * injGate * taper;
+            den *= exp(-uDt * (dissField(r, uR, uCalm, uEdge)
+              + subsidence(r, shape, uR, uEdge)));
+            den = clamp(den, 0.0, 1.0);
+            fragColor = vec4(den, 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // S7 — detail field: fbm + curl-noise warp sampled in a frame that
+        // CO-ROTATES with the Rankine flow (differential rotation ω(r)), so
+        // the render-time mottle shears with the clouds instead of sliding
+        // under them like a fixed water-caustic (CRAFT §A4 mitigation).
+        // Time is a PHASE here, never a seed → static under ?freeze=1.
+        const detailFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uR;
+          uniform float uVmax;
+          ${CHUNK_NOISE}
+          ${CHUNK_WORLD}
+          ${CHUNK_RANKINE}
+          void main() {
+            vec2 p = worldOf(vUv);
+            // SOLID-BODY co-rotation at the mean storm rate. Differential
+            // rotation here would shear the noise itself into concentric
+            // grooves over time (observed failure) — the density field
+            // carries the shear structure; the mottle only needs to ride
+            // the mean rotation so it never slides like a fixed caustic.
+            float om = 0.42 * uVmax / max(uR, 1e-4);
+            float ang = mod(uTime * om, 6.2831853);
+            float ca = cos(ang);
+            float sa = sin(ang);
+            vec2 pc = vec2(ca * p.x + sa * p.y, -sa * p.x + ca * p.y);
+            float n = fbm(pc * 3.4 + 0.30 * curlNoise(pc * 1.6));
+            fragColor = vec4(vec3(n), 1.0);
+          }
+        `;
+
+        // R — render: density → oklab sea→grey→bluish-white ramp (L≤0.9),
+        // gradient pseudo-normal + 2-tap self-shadow toward the fixed light,
+        // sea grain glint (static cells, slow phase), edge-darkening vignette.
+        // Invariants 4/5 + uDebug views.
+        const renderFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDen;
+          uniform sampler2D uVel;
+          uniform sampler2D uDtl;
+          uniform vec2 uRes;
+          uniform float uAspect;
+          uniform float uEdge;
+          uniform float uR;
+          uniform float uVmax;
+          uniform float uCalm;
+          uniform float uRelief;
+          uniform float uDetailAmt;
+          uniform float uSea;
+          uniform float uTime;
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          ${CHUNK_PACK}
+          ${CHUNK_WORLD}
+          ${CHUNK_RANKINE}
+          ${CHUNK_GATE}
+
+          vec3 hsv2rgb(vec3 c) {
+            vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+            vec3 pp = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+            return c.z * mix(K.xxx, clamp(pp - K.xxx, 0.0, 1.0), c.y);
+          }
+
+          // effective cloud density = advected field × render mottle
+          float dEffAt(vec2 uv) {
+            float den = texture(uDen, uv).r;
+            float dtl = texture(uDtl, uv).r;
+            float mottle = mix(1.0, 0.42 + 1.05 * dtl, 0.35 + 0.75 * uDetailAmt);
+            return clamp(den * mottle, 0.0, 1.05);
+          }
+
+          void main() {
+            vec2 p = worldOf(vUv);
+            float r = length(p);
+
+            // ---- debug views ----
+            if (uDebug == 1) {
+              vec2 v = unpackVel(texture(uVel, vUv));
+              float spd = length(v);
+              float hue = atan(v.y, v.x) / 6.2831853 + 0.5;
+              fragColor = vec4(hsv2rgb(vec3(hue, 0.8, clamp(spd / 0.9, 0.0, 1.0))), 1.0);
+              return;
+            }
+            if (uDebug == 2) {
+              float den2 = texture(uDen, vUv).r;
+              fragColor = vec4(vec3(den2), 1.0);
+              return;
+            }
+            if (uDebug == 3) {
+              float th = atan(p.y, p.x);
+              float shape = 1.30 * injRing(r, uR)
+                + 0.85 * injArcs(r, th, uR)
+                + 0.30 * injBand(r, th, uR, uEdge);
+              float gate = smoothstep(0.74 * uR, 0.94 * uR, r);
+              float diss = dissField(r, uR, uCalm, uEdge);
+              vec3 c3 = vec3(0.02, 0.03, 0.05);
+              c3 += vec3(1.0, 0.55, 0.15) * clamp(shape * gate, 0.0, 1.4) * 0.75;
+              c3 += vec3(0.10, 0.25, 0.90) * eyeCore(r, uR);
+              c3 += vec3(0.55, 0.05, 0.05) * clamp((diss - 0.10) / 3.6, 0.0, 1.0) * 0.55;
+              fragColor = vec4(min(c3, vec3(1.0)), 1.0);
+              return;
+            }
+
+            // ---- shading (shared by final & specimen view) ----
+            vec2 e = vec2(1.6) / uRes;
+            float d0 = dEffAt(vUv);
+            float dxp = dEffAt(vUv + vec2(e.x, 0.0));
+            float dyp = dEffAt(vUv + vec2(0.0, e.y));
+
+            float kN = 16.0 + 50.0 * uRelief;
+            vec3 N = normalize(vec3(-(dxp - d0) * kN, -(dyp - d0) * kN, 1.0));
+            vec2 L2 = normalize(vec2(-0.58, 0.66));       // fixed light, upper-left
+            vec3 L3 = normalize(vec3(L2 * 0.80, 0.62));
+            float ndl = clamp(dot(N, L3), 0.0, 1.0);
+            float lit = 0.56 + 0.46 * ndl;
+
+            // 2-tap self-shadow toward the light in the effective field
+            vec2 luv = L2 * vec2(1.0 / uAspect, 1.0);
+            float s1 = dEffAt(vUv + luv * 0.014);
+            float s2 = dEffAt(vUv + luv * 0.034);
+            float occ = clamp(0.9 * max(0.0, s1 - d0) + 0.6 * max(0.0, s2 - d0), 0.0, 1.0);
+            float shade = exp(-occ * (0.8 + 2.0 * uRelief));
+
+            float cov = smoothstep(0.12, 0.78, d0);
+
+            if (uDebug == 4) {
+              // specimen: neutral cloud shading (top) + approved oklab ramp bar
+              if (vUv.y < 0.14) {
+                float t = vUv.x;
+                vec3 rampSea = mix(vec3(0.075, 0.145, 0.215),
+                  vec3(0.020, 0.055, 0.095), uSea);
+                vec3 ramp = oklabMix(rampSea, vec3(0.60, 0.645, 0.685),
+                  smoothstep(0.0, 0.55, t));
+                ramp = oklabMix(ramp, vec3(0.845, 0.875, 0.905),
+                  smoothstep(0.5, 1.0, t));
+                fragColor = vec4(ramp, 1.0);
+                return;
+              }
+              vec3 clay = vec3(0.52) * lit * shade;
+              fragColor = vec4(mix(vec3(0.16, 0.17, 0.19), clay, cov), 1.0);
+              return;
+            }
+
+            // ---- sea (the ground is OCEAN, never black — no galaxy) ----
+            vec3 seaDeep = mix(vec3(0.095, 0.175, 0.250),
+              vec3(0.030, 0.075, 0.125), uSea);
+            vec2 cell = floor(p * 340.0);
+            float grain = hash12(cell);                    // static seed
+            float ripple = vnoise(p * 180.0 + vec2(grain));
+            float glint = sin(uTime * 1.25 + grain * 6.2831853); // slow phase
+            vec3 sea = seaDeep * (1.0 + 0.16 * glint * (0.4 + 0.6 * ripple));
+            sea *= mix(1.0, 0.72, smoothstep(0.2, 1.0, r / uEdge));
+
+            // ---- clouds: oklab grey→bluish white, shaded. The eyewall ring
+            // gets a lift so the wall reads as the tallest, densest cloud ----
+            float tHi = smoothstep(0.45, 0.98, d0 + 0.16 * injRing(r, uR) * cov);
+            vec3 cloud = oklabMix(vec3(0.60, 0.645, 0.685),
+              vec3(0.845, 0.875, 0.905), tHi);
+            cloud *= lit * shade;
+            cloud += vec3(0.050, 0.055, 0.060) * pow(ndl, 6.0) * uRelief;
+
+            vec3 col = oklabMix(sea, cloud, cov);
+
+            // edge darkening vignette (satellite field of view)
+            col *= mix(1.0, 0.58, smoothstep(0.62, 1.06, r / uEdge));
+            col = min(col, vec3(0.92));                    // 白上限(飛び防止)
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program + target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, fullscreenVS));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          curl: createProgram(curlFS),
+          force: createProgram(forceFS),
+          div: createProgram(divFS),
+          jacobi: createProgram(jacobiFS),
+          project: createProgram(projectFS),
+          density: createProgram(densityFS),
+          detail: createProgram(detailFS),
+          render: createProgram(renderFS),
+        };
+
+        const locations = {
+          curl: getLocations(programs.curl, ["uVel", "uTexel"]),
+          force: getLocations(programs.force, [
+            "uVel", "uCurl", "uTexel", "uAspect", "uDt", "uVmax", "uR",
+            "uCalm", "uConf",
+          ]),
+          div: getLocations(programs.div, ["uVel", "uTexel"]),
+          jacobi: getLocations(programs.jacobi, ["uPrs", "uDiv", "uTexel"]),
+          project: getLocations(programs.project, ["uVel", "uPrs", "uTexel"]),
+          density: getLocations(programs.density, [
+            "uDen", "uVel", "uAspect", "uDt", "uR", "uCalm", "uCloudGain",
+            "uDetailAmt", "uEdge",
+          ]),
+          detail: getLocations(programs.detail, [
+            "uAspect", "uTime", "uR", "uVmax",
+          ]),
+          render: getLocations(programs.render, [
+            "uDen", "uVel", "uDtl", "uRes", "uAspect", "uEdge", "uR", "uVmax",
+            "uCalm", "uRelief", "uDetailAmt", "uSea", "uTime", "uDebug",
+          ]),
+        };
+
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, gl.RGBA, type, null);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (!ok) throw new Error("RENDER TARGET INCOMPLETE");
+          return { tex, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        // packed mode encodes 0 as 0.5 — clears must match the encoding
+        const ZERO2 = PACKED ? 0.5 : 0.0;
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        let targets = null;
+        let simW = 2, simH = 2, dtlW = 2, dtlH = 2;
+        let preRoll = 0;
+        let simTime = 0;
+        const PREROLL_STEPS = 240;   // §4: fixed-step development (dt = 1/60)
+        const PREROLL_CHUNK = 24;    // steps per frame while pre-rolling
+        const SIM_LONG = 416;        // 流体は半解像度以下(規約 §7)
+        const JACOBI_ITERS = 18;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          targets = {
+            velA: createTarget(simW, simH, true),
+            velB: createTarget(simW, simH, true),
+            curlT: createTarget(simW, simH, true),
+            divT: createTarget(simW, simH, true),
+            prsA: createTarget(simW, simH, true),
+            prsB: createTarget(simW, simH, true),
+            denA: createTarget(simW, simH, true),
+            denB: createTarget(simW, simH, true),
+            dtlT: createTarget(dtlW, dtlH, false),
+          };
+          resetSim();
+        }
+
+        function resetSim() {
+          clearTarget(targets.velA, ZERO2, ZERO2, 0, 1);
+          clearTarget(targets.velB, ZERO2, ZERO2, 0, 1);
+          clearTarget(targets.curlT, ZERO2, 0, 0, 1);
+          clearTarget(targets.divT, ZERO2, 0, 0, 1);
+          clearTarget(targets.prsA, ZERO2, 0, 0, 1);
+          clearTarget(targets.prsB, ZERO2, 0, 0, 1);
+          clearTarget(targets.denA, 0, 0, 0, 1);
+          clearTarget(targets.denB, 0, 0, 0, 1);
+          simTime = 0;
+          preRoll = PREROLL_STEPS;   // deterministic development (freeze & boot)
+          denPing = false;
+          prsPing = false;
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const aspect = width / height;
+            const simLong = Math.min(
+              SIM_LONG, Math.max(64, Math.floor(Math.max(width, height) / 2)));
+            if (width >= height) {
+              simW = simLong;
+              simH = Math.max(8, Math.round(simLong / aspect));
+            } else {
+              simH = simLong;
+              simW = Math.max(8, Math.round(simLong * aspect));
+            }
+            dtlW = Math.max(8, Math.min(1024, Math.round(width / 2)));
+            dtlH = Math.max(8, Math.min(1024, Math.round(height / 2)));
+            rebuildTargets();   // resize / tab-restore rebuilds FBOs (§7)
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        /* ------------------------------------------------------------------
+           Simulation step + render loop
+        ------------------------------------------------------------------ */
+
+        let denPing = false;
+        let prsPing = false;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let readyStamped = false;
+        const readout = document.getElementById("readout");
+
+        const paramR = () => 0.10 + 0.20 * state.eyeSize;
+        const paramVmax = () => 0.10 + 0.50 * state.vortex;
+        const edgeRadius = () => {
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          return 0.5 * Math.hypot(aspect, 1);
+        };
+
+        function simStep(dt) {
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const texel = [1 / simW, 1 / simH];
+          const R = paramR();
+          const vmax = paramVmax();
+
+          // S1 curl
+          renderPass(targets.curlT, programs.curl, () => {
+            const u = locations.curl;
+            bindTexture(0, targets.velA.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+          });
+          // S2 advect + forces → velB
+          renderPass(targets.velB, programs.force, () => {
+            const u = locations.force;
+            bindTexture(0, targets.velA.tex);
+            bindTexture(1, targets.curlT.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uCurl, 1);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uVmax, vmax);
+            gl.uniform1f(u.uR, R);
+            gl.uniform1f(u.uCalm, state.calm);
+            gl.uniform1f(u.uConf, 8.0);
+          });
+          // S3 divergence
+          renderPass(targets.divT, programs.div, () => {
+            const u = locations.div;
+            bindTexture(0, targets.velB.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+          });
+          // S4 Jacobi ×N (warm start: previous frame's pressure remains)
+          for (let i = 0; i < JACOBI_ITERS; i++) {
+            const src = prsPing ? targets.prsB : targets.prsA;
+            const dst = prsPing ? targets.prsA : targets.prsB;
+            renderPass(dst, programs.jacobi, () => {
+              const u = locations.jacobi;
+              bindTexture(0, src.tex);
+              bindTexture(1, targets.divT.tex);
+              gl.uniform1i(u.uPrs, 0);
+              gl.uniform1i(u.uDiv, 1);
+              gl.uniform2f(u.uTexel, texel[0], texel[1]);
+            });
+            prsPing = !prsPing;
+          }
+          const prsCur = prsPing ? targets.prsB : targets.prsA;
+          // S5 project → velA
+          renderPass(targets.velA, programs.project, () => {
+            const u = locations.project;
+            bindTexture(0, targets.velB.tex);
+            bindTexture(1, prsCur.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uPrs, 1);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+          });
+          // S6 density (ping-pong, clamped every step)
+          const denSrc = denPing ? targets.denB : targets.denA;
+          const denDst = denPing ? targets.denA : targets.denB;
+          renderPass(denDst, programs.density, () => {
+            const u = locations.density;
+            bindTexture(0, denSrc.tex);
+            bindTexture(1, targets.velA.tex);
+            gl.uniform1i(u.uDen, 0);
+            gl.uniform1i(u.uVel, 1);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uR, R);
+            gl.uniform1f(u.uCalm, state.calm);
+            gl.uniform1f(u.uCloudGain, 0.5 + 2.0 * state.clouds);
+            gl.uniform1f(u.uDetailAmt, state.detail);
+            gl.uniform1f(u.uEdge, edgeRadius());
+          });
+          denPing = !denPing;
+          simTime += dt;
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+
+          if (preRoll > 0) {
+            // fixed-step development chunk (deterministic; §4 freeze pre-roll).
+            // The full-res composite is skipped until the roll completes —
+            // software-GL verification environments pay dearly for it.
+            const steps = Math.min(PREROLL_CHUNK, preRoll);
+            for (let i = 0; i < steps; i++) simStep(1 / 60);
+            preRoll -= steps;
+            if (preRoll > 0) {
+              requestAnimationFrame(frame);
+              return;
+            }
+          } else if (!FREEZE && !state.pauseAnim) {
+            const paceMul = 0.25 + 1.5 * state.pace;
+            const dt = rawDt * paceMul;
+            if (dt > 0) simStep(dt);
+          }
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const denCur = denPing ? targets.denB : targets.denA;
+          const R = paramR();
+          const vmax = paramVmax();
+
+          // S7 detail field (co-rotating mottle)
+          renderPass(targets.dtlT, programs.detail, () => {
+            const u = locations.detail;
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, simTime);
+            gl.uniform1f(u.uR, R);
+            gl.uniform1f(u.uVmax, vmax);
+          });
+
+          // R final composite → canvas
+          renderPass(null, programs.render, () => {
+            const u = locations.render;
+            bindTexture(0, denCur.tex);
+            bindTexture(1, targets.velA.tex);
+            bindTexture(2, targets.dtlT.tex);
+            gl.uniform1i(u.uDen, 0);
+            gl.uniform1i(u.uVel, 1);
+            gl.uniform1i(u.uDtl, 2);
+            gl.uniform2f(u.uRes, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uEdge, edgeRadius());
+            gl.uniform1f(u.uR, R);
+            gl.uniform1f(u.uVmax, vmax);
+            gl.uniform1f(u.uCalm, state.calm);
+            gl.uniform1f(u.uRelief, state.relief);
+            gl.uniform1f(u.uDetailAmt, state.detail);
+            gl.uniform1f(u.uSea, state.sea);
+            gl.uniform1f(u.uTime, simTime);
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+
+          // verification hook: first REAL frame = developed field rendered
+          if (!readyStamped && preRoll === 0) {
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 描画 ${canvas.width}×${
+              canvas.height} / シミュ ${simW}×${simH}`;
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+
+        try {
+          resize();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          const msg = error && error.message ? error.message : "";
+          if (/RENDER TARGET INCOMPLETE/.test(msg)) {
+            setOverlay("error", "FLOAT RENDER TARGET UNAVAILABLE",
+              "EXT_color_buffer_float is unsupported and the RGBA8 fallback could not be allocated. Try another browser/GPU.");
+          } else {
+            setOverlay("error", "WEBGL SETUP ERROR",
+              msg || "Could not initialize the renderer.");
+          }
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
