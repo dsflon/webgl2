@@ -13,7 +13,7 @@
   ため)。音量解析+環境音オノマトペは認識非対応ブラウザ(iOS Chrome 等)のみで動く。
   文字は剛体として落下・衝突・回転しながら物理演算で積もり、着地の
   瞬間に墨が和紙ににじむ(潤)。時間が経つと定着し(渇)、古い層ほど圧密されて濃く沈み、
-  字形を失って墨痕に風化する。堆積が画面を満たすと風がひと払いして白紙に戻り、また
+  字形を失って墨痕に風化する。堆積が画面を満たすと墨が水に溶けてにじみ消え、白紙に戻り、また
   最初から始まる。本質:「言葉=墨=時間とともに沈殿する無常」。
   <meta name="art-input" content="mic"> 宣言(カメラ不使用のマイク入力プロファイル)。
   マイクが拒否/不在/非セキュアでも作品は死なない: 専用メッセージ+再試行ボタンを
@@ -45,8 +45,9 @@
     3. にじみ→定着→風化(物質/時間) — 着地でレイヤへスタンプ(G=freshness)。
        毎ステップ、繊維方向の異方性拡散を若い墨ほど強くかけ「潤→渇」を作る。
        埋没深さ(高さ場との差)でコントラスト低下+濃度沈降(上限 0.85)=風化。
-    5. 風のひと払い(時間/場) — 高さ場の閾値到達で全ボディへ横風インパルス、
-       レイヤは横スミア+フェードで数秒かけ白紙化、高さ場ゼロ。輝度・物量は常に clamp。
+    5. 墨が水に溶ける(時間/場) — 高さ場の閾値到達で全ボディをレイヤへ回収し、
+       レイヤは等方ブルーム(にじみ膨張)+希釈フェードで数秒かけ白紙化、高さ場ゼロ。
+       横風ではなく全方向へ溶け拡散する。輝度・物量は常に clamp。
     6. オノマトペの運動翻訳(マーク/時間) — ザー=細く軽く速い斜め/ゴロゴロ=太く重く
        転がる/ポツ=小さく単発/サラサラ=軽く漂う。種別ごとに初速・角速度・質量・
        摩擦・字重(書体クラス)のプリセット。種別は音特徴量(持続・強度・ノイズ性)から。
@@ -88,7 +89,7 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <meta name="art-input" content="mic" />
-    <title>FABLE5 · 言の葉時雨 — Words-Rain of Ink (WebGL2 mic)</title>
+    <title>言の葉時雨 — Words-Rain of Ink (WebGL2 mic)</title>
     <style>
       :root {
         color-scheme: dark;
@@ -271,7 +272,7 @@
         ];
 
         const DEFAULTS = {
-          amount: 0.5,
+          amount: 1.0,
           size: 0.5,
           bleed: 0.55,
           weather: 0.5,
@@ -295,7 +296,7 @@
           ["paper", "紙の風合い", "繊維・漉きムラの振幅(0=無地に近い)", 0, 1, 0.01],
           ["ink", "墨の濃さ", "墨ランプの濃度域(淡墨↔濃墨)", 0, 1, 0.01],
           ["aka", "朱のさし", "朱が付与される興奮閾値(0=朱なし)", 0, 1, 0.01],
-          ["sweep", "払いの敷居", "風払いが発動する堆積高さの閾値", 0, 1, 0.01],
+          ["sweep", "溶けだす敷居", "墨が水に溶けだす堆積高さの閾値", 0, 1, 0.01],
         ];
 
         // 「写実 ↔ 様式の強さ」のプリセット(§6)。標本 = uDebug 4。
@@ -310,11 +311,11 @@
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
           <div class="panel-body">
-          <h1>FABLE5 · 言の葉時雨</h1>
+          <h1>言の葉時雨</h1>
           <p>
             マイクで集めた音が墨の活字になって降り、剛体として積もります。
             着地の瞬間に墨が和紙ににじみ、古い層ほど圧密されて墨痕に風化し、
-            堆積が画面を満たすと風がひと払いして白紙に戻ります。
+            堆積が画面を満たすと墨が水に溶けてにじみ消え、白紙に戻ります。
             声が取れれば言葉が、環境音はオノマトペが降ります。
             <b>音を出すと降り、黙ると止みます。</b>
           </p>
@@ -585,9 +586,9 @@
           uniform sampler2D uPaperT;   // .a = baked fibre waviness
           void main() {
             vec2 px = 1.0 / uRes;
-            // sweep smear: ink drifts downwind → sample upwind
-            vec2 wind = vec2(uWindDir * 0.62, 0.05) * uSweepAmt;
-            vec2 suv = vUv - vec2(wind.x / uAspect, wind.y) * uDt;
+            // (the old directional wind smear is gone — reset now DISSOLVES,
+            // see the isotropic bloom block below)
+            vec2 suv = vUv;
             vec2 p = vec2(vUv.x * uAspect, vUv.y);
             vec4 c = texture(uPrev, suv);
             // paper fibre direction: mostly horizontal with slow waviness
@@ -623,8 +624,27 @@
               * max(0.85 - c.r, 0.0);
             // fixation: the wet 潤 state dries into 渇
             c.g *= exp(-uDt * 0.85);
-            // the wind sweep bleaches the page back to blank
-            c *= exp(-uDt * 1.65 * uSweepAmt);
+            // ---- dissolve (墨が水に溶けてにじみ消える) ----
+            // when a reset begins, ink blooms ISOTROPICALLY into "water" — the
+            // edges swell and soften with a widening radius — while the whole
+            // mark dilutes toward blank paper. No sideways wind; the mark loses
+            // itself in all directions like a drop of ink in still water.
+            if (uSweepAmt > 0.0) {
+              float rad = 1.0 + 3.2 * uSweepAmt;
+              vec4 b0 = texture(uPrev, vUv + vec2( px.x, 0.0) * rad);
+              vec4 b1 = texture(uPrev, vUv + vec2(-px.x, 0.0) * rad);
+              vec4 b2 = texture(uPrev, vUv + vec2(0.0,  px.y) * rad);
+              vec4 b3 = texture(uPrev, vUv + vec2(0.0, -px.y) * rad);
+              vec4 b4 = texture(uPrev, vUv + vec2( px.x,  px.y) * rad * 0.7);
+              vec4 b5 = texture(uPrev, vUv + vec2(-px.x,  px.y) * rad * 0.7);
+              vec4 b6 = texture(uPrev, vUv + vec2( px.x, -px.y) * rad * 0.7);
+              vec4 b7 = texture(uPrev, vUv + vec2(-px.x, -px.y) * rad * 0.7);
+              vec4 bloom = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + b7) * 0.125;
+              float mD = 1.0 - exp(-uDt * 6.5 * uSweepAmt);
+              c.r = mix(c.r, bloom.r * 1.04, mD);   // edges swell outward
+              c.b = mix(c.b, bloom.b * 1.04, mD);
+              c *= exp(-uDt * 1.30 * uSweepAmt);     // dilute to blank paper
+            }
             fragColor = clamp(c, vec4(0.0), vec4(1.0));
           }
         `;
@@ -1599,12 +1619,10 @@
             const b = bodies[bi];
             const K = b.K;
             b.life += dt;
-            if (sweepEnv > 0) {   // the wind: one sideways sweep (invariant 5)
-              b.vx += windDir * 6.5 * sweepEnv * dt;
-              b.vy += (0.9 + 1.3 * Math.sin(b.life * 9 + b.seed * 6.283))
-                * sweepEnv * dt;
-            }
-            b.vy -= K.grav * dt * (sweepEnv > 0 ? 0.25 : 1);
+            // dissolve does NOT blow bodies sideways: at dissolve start every
+            // active body is retired into the ink layer (see stepSweep), so
+            // normally none remain here during a reset. Gravity stays normal.
+            b.vy -= K.grav * dt;
             if (K.sway) b.vx += Math.sin(b.life * 2.3 + b.seed * 6.283) * K.sway * dt;
             const dragM = Math.exp(-dt * K.drag);
             b.vx *= dragM;
@@ -1737,6 +1755,12 @@
         }
 
         // Sweep phase (invariant 5): pile height threshold → one wind pass.
+        // Reset phase (invariant 5): once the pile fills the page, the ink
+        // DISSOLVES INTO WATER — it blooms outward and dilutes back to blank
+        // paper (the shader does the bloom; this drives the envelope). At the
+        // start every active glyph body is retired into the ink layer so the
+        // whole image dissolves together, with no rigid glyphs left on top.
+        // Slower/gentler than the old wind gust — diffusion takes its time.
         function stepSweep(dt) {
           let sum = 0;
           let mx = 0;
@@ -1750,17 +1774,23 @@
             if (meanH * 0.75 + mx * 0.25 > thr) {
               sweeping = true;
               sweepT = 0;
-              windDir = (sweepCount++ % 2 === 0) ? 1 : -1;
+              sweepCount++;
+              // retire every active body into the layer → all ink dissolves
+              // together (airborne glyphs join the bloom too)
+              for (const b of bodies) stampBody(b);
+              bodies.length = 0;
             }
             sweepEnv = 0;
             return;
           }
           sweepT += dt;
-          const ein = Math.min(1, sweepT / 0.5);
-          const eout = 1 - Math.min(1, Math.max(0, (sweepT - 2.8) / 0.8));
+          // gentle rise, long hold, soft finish — a dilution, not a gust
+          const ein = Math.min(1, sweepT / 0.9);
+          const eout = 1 - Math.min(1, Math.max(0, (sweepT - 4.6) / 1.4));
           sweepEnv = ein * ein * (3 - 2 * ein) * eout;
-          for (let i = 0; i < NC; i++) hcol[i] *= Math.exp(-dt * 1.9 * sweepEnv);
-          if (sweepT > 3.7) {
+          // the pile height melts down as the ink diffuses (isotropic)
+          for (let i = 0; i < NC; i++) hcol[i] *= Math.exp(-dt * 1.15 * sweepEnv);
+          if (sweepT > 6.0) {
             sweeping = false;
             sweepEnv = 0;
             hcol.fill(0);
