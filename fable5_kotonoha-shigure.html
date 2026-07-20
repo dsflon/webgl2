@@ -1334,7 +1334,7 @@
           SOFT:  { font: 2, sizeMul: 0.82, vy0: -0.05, vxA: 0.08, tilt: 0.25,
             spin: 0.8, grav: 0.85, drag: 0.85, rest: 0.08, fric: 0.55,
             ink: 0.72, stagger: 0.14, sway: 0.5 },
-          WORD:  { font: 0, sizeMul: 1.55, vy0: -0.08, vxA: 0.03, tilt: 0.12,
+          WORD:  { font: 0, sizeMul: 1.25, vy0: -0.08, vxA: 0.03, tilt: 0.12,
             spin: 0.6, grav: 1.55, drag: 0.28, rest: 0.10, fric: 0.55,
             ink: 0.95, stagger: 0.09 },
           // slow drifting mote (fakesource centre stream / 塵): terminal
@@ -1979,10 +1979,9 @@
         function emitSpeechWord(word, idx) {
           if (!word) return;
           micEvSeed++;
-          // recognised words arrive AFTER the spoken peak (rmsF has decayed),
-          // so floor the volume high enough that a normal-voice word is a
-          // clearly-readable size, not a faint small clump (実機フィードバック)
-          const volN = Math.max(0.72, Math.min(1, aud.rmsF / 0.12));
+          // moderate size floor — 1.55/0.72 was oversized on mobile (実機
+          // フィードバック), 1.0/0.5 was undersized; 1.25/0.65 lands between
+          const volN = Math.max(0.65, Math.min(1, aud.rmsF / 0.12));
           const exc = volN * 0.5 + Math.min(1, aud.cen) * 0.5;
           const akaOn = state.aka > 0.01 && exc > (1.05 - 0.72 * state.aka);
           const fx = 0.12 + 0.76 * hseed(micEvSeed * 71 + idx * 17 + 3);
@@ -2004,6 +2003,7 @@
         // getUserMedia({audio}) for the mic and failed with `audio-capture`.
         let speechActive = false;
         let speechFatals = 0;   // consecutive fatal SR errors with zero results
+        let interimDrizzleAt = -1;   // throttle for the listening drizzle
         function startSpeech() {
           const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
           if (!SR) { speechDiag.state = "未対応(このブラウザ)"; speechAvail = false; return; }
@@ -2031,6 +2031,18 @@
                 } else {
                   speechDiag.heard++;
                   speechDiag.state = "認識中…";
+                  // INSTANT feedback while the recogniser is still working:
+                  // the backend only finalises a phrase ~1s after you stop
+                  // speaking (unavoidable latency), so drizzle a few small ink
+                  // marks the moment interim results arrive — the piece
+                  // audibly "hears" you now, the word clump lands moments
+                  // later. Throttled; skipped during the sweep.
+                  if (simTime > interimDrizzleAt + 0.22 && !sweeping) {
+                    interimDrizzleAt = simTime;
+                    micEvSeed++;
+                    fireRainDrop(0.20 + 0.60 * hseed(micEvSeed * 37 + 8), 0,
+                      micEvSeed * 37);
+                  }
                 }
               }
             };
