@@ -1623,6 +1623,7 @@
         // hundreds of bodies cheap on mobile.
         const GRID_CELL = 0.15;
         const gridMap = new Map();
+        const contacts = [];   // flat [lowerIdx, upperIdx, …] vertical contacts
         const gKey = (gx, gy) => gx * 8192 + gy;
         function stepPhysics(dt) {
           const cw = aspect / NC;
@@ -1682,8 +1683,11 @@
               if (maxPen > 0 || b.cy < 0.06) { bodies.splice(bi, 1); }
               continue;
             }
+            // at/near the frozen base = REAL support (the root of the support
+            // chain propagated below). small tolerance so a body resting on the
+            // floor/base counts even when not actively penetrating.
+            if (maxPen > -0.004) b.sup = true;
             if (maxPen > 0) {
-              b.sup = true;   // resting on the frozen base
               b.cy += Math.min(maxPen, 0.05);
               if (b.vy < 0) {
                 b.vy = -b.vy * K.rest;
@@ -1695,6 +1699,7 @@
             }
           }
           // ---- 2. body–body collisions via a spatial grid (O(n), not O(n²)) ----
+          contacts.length = 0;   // vertical [lowerIdx, upperIdx] pairs for support
           gridMap.clear();
           for (let i = 0; i < bodies.length; i++) {
             const b = bodies[i];
@@ -1736,12 +1741,14 @@
                   a.cy -= ny * overlap * wa;
                   b2.cx += nx * overlap * wb;
                   b2.cy += ny * overlap * wb;
-                  // NOTE: body–body contact does NOT grant "support" for the
-                  // settle damping. Two glyphs touching in mid-air would each
-                  // think the other holds it up → both get damped → the whole
-                  // cluster FLOATS (observed on mobile). Only the frozen base
-                  // (real ink underneath, maxPen>0 above) grants support, so a
-                  // cluster with nothing solid below always keeps falling.
+                  // record a VERTICAL resting contact (lower holds up upper) so
+                  // support can propagate UP from the frozen base afterwards.
+                  // Only base-rooted chains grant damping support → a mid-air
+                  // cluster (no base below) never damps and always falls, while
+                  // a pile resting on the base settles quietly (no perpetual
+                  // motion). dy = b2.cy - a.cy.
+                  if (dy < -0.2 * rr) { contacts.push(j, i); }       // b2 below a
+                  else if (dy > 0.2 * rr) { contacts.push(i, j); }   // a below b2
                   const rvx = b2.vx - a.vx;
                   const rvy = b2.vy - a.vy;
                   const vn = rvx * nx + rvy * ny;
@@ -1758,6 +1765,21 @@
                 }
               }
             }
+          }
+          // ---- 2.5 support propagation: mark a body supported only if it rests
+          // (transitively) on the frozen base. Sweep the vertical contacts a few
+          // times so support climbs up the pile from the base; a mid-air cluster
+          // has no base-rooted member, so none of it is ever marked supported →
+          // it keeps falling (no float), while a base-rooted pile settles (no
+          // perpetual motion). ~5 passes covers the live surface depth. ----
+          for (let pass = 0; pass < 5; pass++) {
+            let changed = false;
+            for (let ci = 0; ci < contacts.length; ci += 2) {
+              const lo = bodies[contacts[ci]];
+              const hi = bodies[contacts[ci + 1]];
+              if (lo && hi && lo.sup && !hi.sup) { hi.sup = true; changed = true; }
+            }
+            if (!changed) break;
           }
           // ---- 3. settle damping + landed word-clump shatter ----
           for (let bi = bodies.length - 1; bi >= 0; bi--) {
