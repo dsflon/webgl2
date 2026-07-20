@@ -2066,13 +2066,35 @@
             r.continuous = false;          // short utterances, re-created each time
             r.interimResults = true;       // interim = proof audio is reaching SR
             r.maxAlternatives = 3;
-            // per-session salvage state: many sessions on mobile produce
+            // per-session salvage/eager state: many sessions on mobile produce
             // interim text but die (abort / network hiccup / timeout) before a
-            // FINAL ever arrives — previously that speech was silently thrown
-            // away ("たまに出るがなかなか出ない" の正体). Keep the latest
-            // interim text; if the session ends with no final, emit it.
+            // FINAL ever arrives. Three emission paths, deduped by
+            // `interimEmitted` (what this session already rained):
+            //   先出し: interim text unchanged for ~0.45s → emit now
+            //           (perceived "sensitivity": quiet/short speech becomes
+            //           words without waiting for the ~1s finalisation)
+            //   認識:   final → emit only the not-yet-emitted suffix; if the
+            //           final is a rewrite (kana→kanji) of what already rained,
+            //           skip it (no doubles)
+            //   補完:   session dies with interim only → emit the remainder
             let lastInterim = "";
             let gotFinal = false;
+            let interimEmitted = "";
+            let stableTimer = null;
+            const emitUnemitted = (text, tag) => {
+              if (!text || aud.mode !== "mic") return;
+              let part = null;
+              if (!interimEmitted) part = text;
+              else if (text.startsWith(interimEmitted)) {
+                part = text.slice(interimEmitted.length);
+              }
+              if (part && part.trim()) {
+                interimEmitted = text;
+                speechDiag.got++;
+                speechDiag.state = tag;
+                emitTranscript(part);
+              }
+            };
             r.onstart = () => { speechDiag.state = "聴取中"; };
             r.onspeechstart = () => { speechDiag.state = "発話検知"; };
             r.onresult = (event) => {
@@ -2080,14 +2102,24 @@
                 const res = event.results[i];
                 if (!res[0]) continue;
                 if (res.isFinal) {
-                  speechDiag.got++;
                   speechFatals = 0;
                   gotFinal = true;
-                  speechDiag.state = "認識";
-                  emitTranscript(res[0].transcript);
+                  if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
+                  emitUnemitted(res[0].transcript, "認識");
                 } else {
                   speechDiag.heard++;
-                  if (res[0].transcript) lastInterim = res[0].transcript;
+                  const t = res[0].transcript;
+                  if (t && t !== lastInterim) {
+                    lastInterim = t;
+                    // eager emission: if this interim stays unchanged for a
+                    // beat, rain it without waiting for the final
+                    if (stableTimer) clearTimeout(stableTimer);
+                    stableTimer = setTimeout(() => {
+                      if (!gotFinal && lastInterim === t) {
+                        emitUnemitted(t, "認識(先出し)");
+                      }
+                    }, 450);
+                  }
                   speechDiag.state = "認識中…";
                   // INSTANT feedback while the recogniser is still working:
                   // the backend only finalises a phrase ~1s after you stop
@@ -2126,13 +2158,11 @@
             };
             r.onend = () => {
               speechActive = false;
+              if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
               // SALVAGE: the session heard words (interim) but died before a
-              // final — emit the last interim instead of dropping the speech.
-              // Kana-not-kanji sometimes, but a fallen word beats silence.
+              // final — emit whatever hasn't rained yet instead of dropping it.
               if (!gotFinal && lastInterim && aud.mode === "mic") {
-                speechDiag.got++;
-                speechDiag.state = "認識(補完)";
-                emitTranscript(lastInterim);
+                emitUnemitted(lastInterim, "認識(補完)");
                 lastInterim = "";
               }
               if (aud.mode !== "mic") return;
