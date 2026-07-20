@@ -5,7 +5,10 @@
   概要:
   マイクで集めた音が墨の活字になって画面上部から降ってくる作品。声が取れれば言葉
   (Web Speech API — 対応環境のみの上乗せ層)、環境音は「ザー」「ゴロゴロ」「ポツ」等の
-  オノマトペになる。文字は剛体として落下・衝突・回転しながら物理演算で積もり、着地の
+  オノマトペになる。認識した単語・オノマトペは1文字ずつではなく「こんにちは」のような
+  文字の塊(複合剛体)としてまとまって落下・堆積する(向きは語ごとに縦書き/横書き)。
+  発話中はオノマトペを抑制し、認識語の塊だけを降らせる(環境音・無音の間にオノマトペが
+  戻る)。文字は剛体として落下・衝突・回転しながら物理演算で積もり、着地の
   瞬間に墨が和紙ににじむ(潤)。時間が経つと定着し(渇)、古い層ほど圧密されて濃く沈み、
   字形を失って墨痕に風化する。堆積が画面を満たすと風がひと払いして白紙に戻り、また
   最初から始まる。本質:「言葉=墨=時間とともに沈殿する無常」。
@@ -1162,8 +1165,12 @@
         ------------------------------------------------------------------ */
 
         const MAX_BODIES = 200;
+        const MAX_WORD = 7;          // glyphs per composite word body
         const FLOATS_PER_INST = 10;
-        const instData = new Float32Array((MAX_BODIES + 32) * FLOATS_PER_INST);
+        // A word body expands into up to MAX_WORD glyph instances, so the
+        // instance buffer is sized for glyph count, not body count.
+        const INST_CAP = MAX_BODIES * MAX_WORD + 64;
+        const instData = new Float32Array(INST_CAP * FLOATS_PER_INST);
         const instBuf = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
         gl.bufferData(gl.ARRAY_BUFFER, instData.byteLength, gl.DYNAMIC_DRAW);
@@ -1186,12 +1193,36 @@
         }
         gl.bindVertexArray(null);
 
-        // Fill instData from a list of {cx,cy,hw,hh,ang,u0,v0,ink,aka}.
+        // Fill instData from a list of bodies/stamps. A single-glyph item uses
+        // its own {cx,cy,dhw,dhh,ang,u0,v0,ink,aka,fresh}. A COMPOSITE word body
+        // carries a `glyphs` array of local-space glyphs {lx,ly,dhw,dhh,u0,v0};
+        // each expands into its own instance, placed at the body centre plus its
+        // local offset rotated by the body angle (the word falls/rotates as one).
         function fillInstances(list) {
           let o = 0;
-          const n = Math.min(list.length, MAX_BODIES + 32);
-          for (let i = 0; i < n; i++) {
+          let n = 0;
+          for (let i = 0; i < list.length && n < INST_CAP; i++) {
             const b = list[i];
+            if (b.glyphs) {
+              const c = Math.cos(b.ang);
+              const s = Math.sin(b.ang);
+              for (let g = 0; g < b.glyphs.length && n < INST_CAP; g++) {
+                const gl_ = b.glyphs[g];
+                instData[o] = b.cx + c * gl_.lx - s * gl_.ly;
+                instData[o + 1] = b.cy + s * gl_.lx + c * gl_.ly;
+                instData[o + 2] = gl_.dhw;
+                instData[o + 3] = gl_.dhh;
+                instData[o + 4] = b.ang;
+                instData[o + 5] = gl_.u0;
+                instData[o + 6] = gl_.v0;
+                instData[o + 7] = b.ink;
+                instData[o + 8] = b.aka;
+                instData[o + 9] = b.fresh || 0.9;
+                o += FLOATS_PER_INST;
+                n++;
+              }
+              continue;
+            }
             instData[o] = b.cx;
             instData[o + 1] = b.cy;
             instData[o + 2] = b.dhw;
@@ -1203,6 +1234,7 @@
             instData[o + 8] = b.aka;
             instData[o + 9] = b.fresh || 0.9;
             o += FLOATS_PER_INST;
+            n++;
           }
           gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
           gl.bufferSubData(gl.ARRAY_BUFFER, 0, instData.subarray(0, n * FLOATS_PER_INST));
@@ -1300,7 +1332,7 @@
           SOFT:  { font: 2, sizeMul: 0.82, vy0: -0.05, vxA: 0.08, tilt: 0.25,
             spin: 0.8, grav: 0.85, drag: 0.85, rest: 0.08, fric: 0.55,
             ink: 0.72, stagger: 0.14, sway: 0.5 },
-          WORD:  { font: 0, sizeMul: 1.0, vy0: -0.08, vxA: 0.03, tilt: 0.12,
+          WORD:  { font: 0, sizeMul: 1.55, vy0: -0.08, vxA: 0.03, tilt: 0.12,
             spin: 0.6, grav: 1.55, drag: 0.28, rest: 0.10, fric: 0.55,
             ink: 0.95, stagger: 0.09 },
           // slow drifting mote (fakesource centre stream / 塵): terminal
@@ -1329,33 +1361,38 @@
           return Math.min(0.17, (2.05 * GLYPH_PX) / Math.max(canvas.height, 200));
         }
 
-        // Queue one word: its characters spawn in sequence at the same x
-        // (縦書きの雨) with the kind's stagger. Vertical size ∝ RMS volume.
-        function fireWord(word, kindKey, fx, volN, akaOn, evSeed) {
+        // Queue one word as a COMPOSITE clump: all its characters belong to a
+        // single rigid body that falls, collides and piles as one unit (縦書き
+        // or 横書き, chosen per word). Vertical size ∝ RMS volume. Recognised
+        // speech words and multi-kana onomatopoeia both come through here.
+        function fireWord(word, kindKey, fx, volN, akaOn, evSeed, delay) {
           const K = KIND_DEF[kindKey];
           const h = (n) => hseed(evSeed * 613 + n + 17);
+          const d0 = delay || 0;
           let size = 0.052 * (0.55 + 0.9 * state.size) * K.sizeMul
             * (0.6 + 0.9 * volN);
           size = Math.max(16 / Math.max(canvas.height, 200),
             Math.min(size, maxGlyphWorld()));
-          const chars = [...word];
-          const dirSign = h(1) < 0.5 ? -1 : 1;
-          const reps = 1 + ((state.amount > 0.7 && h(2) < state.amount - 0.55) ? 1 : 0);
+          const chars = [...word].slice(0, MAX_WORD);
+          // orientation random per word (user choice: 語ごとにランダム). A slight
+          // bias toward vertical keeps the calligraphic 短冊 feel; single glyphs
+          // are orientation-agnostic.
+          const vertical = chars.length < 2 ? (h(8) < 0.5) : (h(2) < 0.56);
+          const reps = 1 + ((state.amount > 0.7 && h(4) < state.amount - 0.6) ? 1 : 0);
           for (let r = 0; r < reps; r++) {
             const rx = Math.min(0.94, Math.max(0.06,
               fx + (r ? (h(3) - 0.5) * 0.24 : 0)));
-            for (let i = 0; i < chars.length; i++) {
-              pending.push({
-                t: simTime + i * K.stagger + r * 0.31,
-                ch: chars[i],
-                kindKey,
-                x: rx * aspect + (h(10 + i) - 0.5) * 0.02 * aspect,
-                size,
-                aka: akaOn,
-                seed: evSeed * 131 + r * 37 + i,
-                dirSign: kindKey === "RAIN" ? dirSign : 0,
-              });
-            }
+            pending.push({
+              t: simTime + d0 + r * 0.28,
+              word: true,
+              chars,
+              kindKey,
+              vertical,
+              x: rx * aspect,
+              size,
+              aka: akaOn,
+              seed: evSeed * 131 + r * 37,
+            });
           }
         }
 
@@ -1376,11 +1413,70 @@
           });
         }
 
-        function spawnBody(spec) {
+        // Gather every atlas slot currently referenced by a live body (single
+        // or composite) so the LRU never evicts a glyph that is on screen.
+        function liveSlotSet() {
+          const s = new Set();
+          for (const bb of bodies) {
+            if (bb.glyphs) { for (const g of bb.glyphs) s.add(g.slot); }
+            else if (bb.slot !== undefined) s.add(bb.slot);
+          }
+          return s;
+        }
+
+        // Composite word body: N glyphs at fixed local offsets, one rigid body.
+        function spawnWordBody(spec) {
           if (bodies.length >= MAX_BODIES) return;
           const K = KIND_DEF[spec.kindKey];
           const h = (n) => hseed(spec.seed * 397 + n);
-          const liveSlots = new Set(bodies.map((bb) => bb.slot));
+          const chars = spec.chars;
+          const liveSlots = liveSlotSet();
+          const dh = spec.size * 0.5;          // per-glyph draw half-extent
+          const spc = spec.size * 0.9;         // glyph-to-glyph spacing
+          const glyphs = [];
+          for (let i = 0; i < chars.length; i++) {
+            const entry = glyphUv(chars[i], K.font, liveSlots);
+            if (!entry) continue;              // atlas exhausted → skip glyph
+            liveSlots.add(entry.slot);         // protect within this same word
+            const [u0, v0] = slotOrigin(entry.slot);
+            glyphs.push({ u0, v0, dhw: dh, dhh: dh, slot: entry.slot });
+          }
+          if (!glyphs.length) return;
+          const nG = glyphs.length;
+          const span = (nG - 1) * spc;
+          for (let k = 0; k < nG; k++) {
+            if (spec.vertical) { glyphs[k].lx = 0; glyphs[k].ly = span * 0.5 - k * spc; }
+            else { glyphs[k].lx = -span * 0.5 + k * spc; glyphs[k].ly = 0; }
+          }
+          // collision/height half-extents = the whole word's bounding box
+          const hw = spec.vertical ? dh * 0.72 : span * 0.5 + dh * 0.72;
+          const hh = spec.vertical ? span * 0.5 + dh * 0.80 : dh * 0.80;
+          const cx = Math.min(aspect - hw, Math.max(hw, spec.x));
+          bodies.push({
+            kindKey: spec.kindKey, K,
+            cx,
+            cy: 1.05 + hh + 0.05 * h(2),      // spawn fully above the top edge
+            vx: (h(3) - 0.5) * 2 * K.vxA,
+            vy: K.vy0 * (0.8 + 0.4 * h(4)),
+            ang: (h(5) - 0.5) * 2 * K.tilt,
+            om: (h(6) - 0.5) * K.spin,        // gentler spin for a clump
+            size: spec.size,
+            dhw: dh, dhh: dh,
+            hw, hh,
+            ink: K.ink * (spec.aka ? 0.5 : 1.0),
+            aka: spec.aka ? 0.85 : 0.0,
+            fresh: Math.min(1, Math.max(0.5, spec.size / 0.05)) * 0.92,
+            glyphs,
+            life: 0, sleep: 0, seed: h(7),
+          });
+        }
+
+        function spawnBody(spec) {
+          if (spec.word) return spawnWordBody(spec);
+          if (bodies.length >= MAX_BODIES) return;
+          const K = KIND_DEF[spec.kindKey];
+          const h = (n) => hseed(spec.seed * 397 + n);
+          const liveSlots = liveSlotSet();
           const entry = glyphUv(spec.ch, K.font, liveSlots);
           if (!entry) return;
           const [u0, v0] = slotOrigin(entry.slot);
@@ -1414,10 +1510,23 @@
         ------------------------------------------------------------------ */
 
         function stampBody(b) {
-          stampQueue.push({
-            cx: b.cx, cy: b.cy, dhw: b.dhw, dhh: b.dhh, ang: b.ang,
-            u0: b.u0, v0: b.v0, ink: b.ink * 0.95, aka: b.aka, fresh: b.fresh,
-          });
+          if (b.glyphs) {
+            const cc = Math.cos(b.ang);
+            const ss = Math.sin(b.ang);
+            for (const g of b.glyphs) {
+              stampQueue.push({
+                cx: b.cx + cc * g.lx - ss * g.ly,
+                cy: b.cy + ss * g.lx + cc * g.ly,
+                dhw: g.dhw, dhh: g.dhh, ang: b.ang,
+                u0: g.u0, v0: g.v0, ink: b.ink * 0.95, aka: b.aka, fresh: b.fresh,
+              });
+            }
+          } else {
+            stampQueue.push({
+              cx: b.cx, cy: b.cy, dhw: b.dhw, dhh: b.dhh, ang: b.ang,
+              u0: b.u0, v0: b.v0, ink: b.ink * 0.95, aka: b.aka, fresh: b.fresh,
+            });
+          }
           const c = Math.abs(Math.cos(b.ang));
           const s = Math.abs(Math.sin(b.ang));
           const px = c * b.hw + s * b.hh;
@@ -1811,6 +1920,15 @@
           meters.onset = 1;
           meters.exc = exc;
           if (sweeping) return;
+          // Suppress single-glyph onomatopoeia WHILE the user is voicing speech:
+          // recognised words arrive as clumps via the speech-recognition path
+          // (startSpeech → emitTranscript), so an onset during voiced speech must
+          // not also spit a lone kana (the "ぶつ切り 1〜2 文字" the user saw).
+          // Voice band = sustained + mid spectral centroid + not-too-noisy;
+          // percussive/hissy/environmental onsets fall through to onomatopoeia.
+          const voiced = speechAvail && aud.rmsS > 0.018
+            && aud.cen > 0.10 && aud.cen < 0.62 && aud.zcr < 0.52;
+          if (voiced) return;
           const akaOn = state.aka > 0.01 && exc > (1.02 - 0.72 * state.aka);
           let kindKey;
           const noisy = aud.zcr > 0.5;
@@ -1819,13 +1937,7 @@
           else if (noisy && sus) kindKey = "RAIN";
           else if (sus && !noisy) kindKey = "SOFT";
           else kindKey = "POTSU";
-          let word;
-          if (speechQueue.length) {   // recognised words take priority
-            word = speechQueue.shift();
-            kindKey = "WORD";
-          } else {
-            word = pickOnomatope(kindKey, micEvSeed);
-          }
+          const word = pickOnomatope(kindKey, micEvSeed);
           meters.kind = KIND_INDEX[kindKey];
           lastWord = word;
           fireWord(word, kindKey, 0.08 + 0.84 * hseed(micEvSeed * 71 + 3),
@@ -1834,9 +1946,46 @@
 
         // ---- Web Speech (progressive layer — Chrome系+online only; every
         // failure path is a SILENT fallback to onomatope, never an error) ----
-        const speechQueue = [];
+        // Recognised words are emitted IMMEDIATELY as word-clumps (not queued
+        // for the next onset), so speech feels responsive and reads as words.
         let speechRec = null;
         let speechRestarts = 0;
+        let speechAvail = false;     // SR constructed → suppress onomatopoeia while voicing
+
+        // A recognised phrase → one or more falling word-clumps. Split on spaces
+        // and Japanese punctuation into phrases, then chunk each phrase to
+        // ≤ MAX_WORD glyphs so a long sentence rains as successive 短冊 clumps.
+        function emitTranscript(text) {
+          const t = String(text || "").trim();
+          if (!t || aud.mode !== "mic" || sweeping) return;
+          const pieces = t.split(/[\s、。「」『』・,.!?！？]+/).filter(Boolean);
+          let idx = 0;
+          for (const piece of pieces) {
+            const arr = [...piece];
+            for (let s = 0; s < arr.length; s += MAX_WORD) {
+              emitSpeechWord(arr.slice(s, s + MAX_WORD).join(""), idx++);
+              if (idx > 10) return;          // safety cap on one utterance
+            }
+          }
+        }
+        function emitSpeechWord(word, idx) {
+          if (!word) return;
+          micEvSeed++;
+          // recognised words arrive AFTER the spoken peak (rmsF has decayed),
+          // so floor the volume high enough that a normal-voice word is a
+          // clearly-readable size, not a faint small clump (実機フィードバック)
+          const volN = Math.max(0.72, Math.min(1, aud.rmsF / 0.12));
+          const exc = volN * 0.5 + Math.min(1, aud.cen) * 0.5;
+          const akaOn = state.aka > 0.01 && exc > (1.05 - 0.72 * state.aka);
+          const fx = 0.12 + 0.76 * hseed(micEvSeed * 71 + idx * 17 + 3);
+          meters.kind = KIND_INDEX.WORD;
+          meters.onset = 1;
+          lastWord = word;
+          // stagger successive chunks so a sentence falls as a short cascade
+          fireWord(word, "WORD", fx, volN, akaOn, micEvSeed * 7 + idx * 5 + 1,
+            idx * 0.24);
+        }
+
         function startSpeech() {
           const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
           if (!SR) return;
@@ -1849,11 +1998,7 @@
               for (let i = event.resultIndex; i < event.results.length; i++) {
                 const res = event.results[i];
                 if (!res.isFinal || !res[0]) continue;
-                const words = String(res[0].transcript || "").trim().split(/\s+/);
-                for (const w of words) {
-                  const trimmed = [...w].slice(0, 7).join("");
-                  if (trimmed && speechQueue.length < 12) speechQueue.push(trimmed);
-                }
+                emitTranscript(res[0].transcript);
               }
             };
             speechRec.onerror = () => {};
@@ -1866,8 +2011,10 @@
               }
             };
             speechRec.start();
+            speechAvail = true;
           } catch (_) {
             speechRec = null;
+            speechAvail = false;
           }
         }
 
