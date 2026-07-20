@@ -1187,7 +1187,8 @@
            instance: cx, cy, hw, hh, rot, u0, v0, ink, aka.
         ------------------------------------------------------------------ */
 
-        const MAX_BODIES = 200;
+        const MAX_BODIES = 340;   // live rigid bodies (surface-dynamic pile);
+                                  // buried ones retire into the frozen ink layer
         const MAX_WORD = 7;          // glyphs per composite word body
         const FLOATS_PER_INST = 10;
         // A word body expands into up to MAX_WORD glyph instances, so the
@@ -1313,7 +1314,8 @@
         const PRE_STEPS = 1020;      // freeze pre-roll: 17s of scripted shigure
         const PRE_CHUNK = 60;        // steps per rAF while pre-rolling (glSync each)
 
-        const hcol = new Float32Array(NC);
+        const hcol = new Float32Array(NC);   // FROZEN (buried) ink height = solid base
+        const liveTopCol = new Float32Array(NC);   // surface of LIVE resting bodies
         const hBytes = new Uint8Array(NC);
         const bodies = [];
         const pending = [];          // scheduled char spawns {t, ch, kindKey, ...}
@@ -1613,15 +1615,22 @@
           }
         }
 
+        // Surface-dynamic pile (ユーザー要望: 積み上がった言葉もバランスを崩して
+        // 重力で崩れ落ちる). Settled glyphs stay LIVE rigid bodies — a new word
+        // landing on the pile collides with them and can trigger an avalanche —
+        // and only glyphs BURIED deep enough to be occluded are frozen into the
+        // ink layer (bounding the live count). A spatial-grid broadphase keeps
+        // hundreds of bodies cheap on mobile.
+        const GRID_CELL = 0.15;
+        const gridMap = new Map();
+        const gKey = (gx, gy) => gx * 8192 + gy;
         function stepPhysics(dt) {
           const cw = aspect / NC;
+          // ---- 1. integrate + walls + FROZEN-BASE (buried ink) contact ----
           for (let bi = bodies.length - 1; bi >= 0; bi--) {
             const b = bodies[bi];
             const K = b.K;
             b.life += dt;
-            // dissolve does NOT blow bodies sideways: at dissolve start every
-            // active body is retired into the ink layer (see stepSweep), so
-            // normally none remain here during a reset. Gravity stays normal.
             b.vy -= K.grav * dt;
             if (K.sway) b.vx += Math.sin(b.life * 2.3 + b.seed * 6.283) * K.sway * dt;
             const dragM = Math.exp(-dt * K.drag);
@@ -1630,27 +1639,27 @@
             b.cx += b.vx * dt;
             b.cy += b.vy * dt;
             b.ang += b.om * dt;
-            b.om *= Math.exp(-dt * 1.3);   // angular drag (was 0.4 → spin never died)
-            // NaN guard (§8-15): a broken body is removed, never propagated
+            b.om *= Math.exp(-dt * 1.3);
             if (!Number.isFinite(b.cx) || !Number.isFinite(b.cy) ||
                 !Number.isFinite(b.vx) || !Number.isFinite(b.vy) ||
                 !Number.isFinite(b.ang) || !Number.isFinite(b.om)) {
               bodies.splice(bi, 1);
               continue;
             }
-            if (b.cx < -0.3 || b.cx > aspect + 0.3 || b.cy > 2.5 ||
-                b.cy < -0.5 || b.life > 40) {
+            // off-screen cull only (NO life cull — a resting pile must persist;
+            // it is bounded by burial retirement + the MAX_BODIES cap instead)
+            if (b.cx < -0.3 || b.cx > aspect + 0.3 || b.cy > 2.6 || b.cy < -0.5) {
               bodies.splice(bi, 1);
               continue;
             }
-            if (sweepEnv <= 0) {   // side walls (open during the sweep)
+            if (sweepEnv <= 0) {   // side walls
               if (b.cx < b.hw) { b.cx = b.hw; b.vx = Math.abs(b.vx) * 0.3; }
               else if (b.cx > aspect - b.hw) {
                 b.cx = aspect - b.hw;
                 b.vx = -Math.abs(b.vx) * 0.3;
               }
             }
-            // height-field contact: rotated corners vs column heights
+            // frozen-base contact: rotated corners vs the buried-ink height field
             const c = Math.cos(b.ang);
             const s = Math.sin(b.ang);
             let maxPen = 0;
@@ -1664,89 +1673,127 @@
               const pen = hcol[col] - wy;
               if (pen > maxPen) { maxPen = pen; lever = wx - b.cx; }
             }
-            let contact = false;
-            if (maxPen > 0 && b.glyphs) {
-              // word clump touches ground → shatter into per-char bodies
-              breakWordBody(bi);
+            // drifting dust (fakesource centre stream, --motion): never joins
+            // the pile — recycled near the bottom so the centre stays a clean
+            // falling column. (MOTE exists only in fakesource; no effect on the
+            // real mic/demo artwork.)
+            if (b.kindKey === "MOTE") {
+              if (maxPen > 0 || b.cy < 0.06) { bodies.splice(bi, 1); }
               continue;
             }
             if (maxPen > 0) {
-              contact = true;
               b.cy += Math.min(maxPen, 0.05);
               if (b.vy < 0) {
                 b.vy = -b.vy * K.rest;
                 if (Math.abs(b.vy) < 0.05) b.vy = 0;
               }
               b.vx *= Math.max(0, 1 - K.fric * dt * 30);
-              // gravity torque about the supporting corner → bodies topple
-              // toward a stable rest instead of balancing on a corner
               b.om += lever * 18 * dt;
               b.om *= Math.exp(-dt * 6);
             }
-            // sleep (kills 永久振動): slow + supported for a while → transfer.
-            // Loosened thresholds so a settling pile stamps promptly, plus a
-            // GROUNDED backstop: a body that has been resting on the pile for
-            // a while is stamped even if it still micro-jitters — prevents the
-            // "文字がぐるぐる回り跳ね上がり止まらない" perpetual-motion pile.
-            const sp2 = b.vx * b.vx + b.vy * b.vy;
-            if (contact && sp2 < 0.004 && Math.abs(b.om) < 1.0 && sweepEnv <= 0) {
-              b.sleep += dt;
-            } else {
-              b.sleep = 0;
-            }
-            b.grounded = contact ? (b.grounded || 0) + dt : (b.grounded || 0) * 0.5;
-            if (sweepEnv <= 0 && (b.sleep > 0.2 || b.grounded > 1.4)) {
-              stampBody(b);
-              bodies.splice(bi, 1);
-            }
           }
-          // pairwise air collisions (circle approximation, n ≤ 200)
+          // ---- 2. body–body collisions via a spatial grid (O(n), not O(n²)) ----
+          gridMap.clear();
+          for (let i = 0; i < bodies.length; i++) {
+            const b = bodies[i];
+            const k = gKey(Math.floor(b.cx / GRID_CELL), Math.floor(b.cy / GRID_CELL));
+            let arr = gridMap.get(k);
+            if (!arr) { arr = []; gridMap.set(k, arr); }
+            arr.push(i);
+          }
           for (let i = 0; i < bodies.length; i++) {
             const a = bodies[i];
             const ra = a.size * 0.42;
-            for (let j = i + 1; j < bodies.length; j++) {
-              const b2 = bodies[j];
-              const rb = b2.size * 0.42;
-              const rr = ra + rb;
-              const dx = b2.cx - a.cx;
-              if (dx > rr || dx < -rr) continue;
-              const dy = b2.cy - a.cy;
-              if (dy > rr || dy < -rr) continue;
-              const d2 = dx * dx + dy * dy;
-              if (d2 >= rr * rr || d2 < 1e-9) continue;
-              const d = Math.sqrt(d2);
-              const nx = dx / d;
-              const ny = dy / d;
-              const overlap = rr - d;
-              const ma = a.size * a.size;
-              const mb = b2.size * b2.size;
-              const wa = mb / (ma + mb);
-              const wb = ma / (ma + mb);
-              a.cx -= nx * overlap * wa;
-              a.cy -= ny * overlap * wa;
-              b2.cx += nx * overlap * wb;
-              b2.cy += ny * overlap * wb;
-              const rvx = b2.vx - a.vx;
-              const rvy = b2.vy - a.vy;
-              const vn = rvx * nx + rvy * ny;
-              if (vn < 0) {
-                // restitution < 1 (was 1.15 — SUPER-elastic: every collision
-                // ADDED energy, so a dense pile never stopped bouncing)
-                const imp = -0.3 * vn / (1 / ma + 1 / mb);
-                a.vx -= imp * nx / ma;
-                a.vy -= imp * ny / ma;
-                b2.vx += imp * nx / mb;
-                b2.vy += imp * ny / mb;
-                // gentle friction spin only (was ×2.0 → runaway ぐるぐる)
-                const tv = rvx * -ny + rvy * nx;
-                a.om -= tv * 0.3;
-                b2.om += tv * 0.3;
+            const gx = Math.floor(a.cx / GRID_CELL);
+            const gy = Math.floor(a.cy / GRID_CELL);
+            for (let ox = -1; ox <= 1; ox++) {
+              for (let oy = -1; oy <= 1; oy++) {
+                const arr = gridMap.get(gKey(gx + ox, gy + oy));
+                if (!arr) continue;
+                for (let t = 0; t < arr.length; t++) {
+                  const j = arr[t];
+                  if (j <= i) continue;
+                  const b2 = bodies[j];
+                  const rb = b2.size * 0.42;
+                  const rr = ra + rb;
+                  const dx = b2.cx - a.cx;
+                  if (dx > rr || dx < -rr) continue;
+                  const dy = b2.cy - a.cy;
+                  if (dy > rr || dy < -rr) continue;
+                  const d2 = dx * dx + dy * dy;
+                  if (d2 >= rr * rr || d2 < 1e-9) continue;
+                  const d = Math.sqrt(d2);
+                  const nx = dx / d;
+                  const ny = dy / d;
+                  const overlap = rr - d;
+                  const ma = a.size * a.size;
+                  const mb = b2.size * b2.size;
+                  const wa = mb / (ma + mb);
+                  const wb = ma / (ma + mb);
+                  a.cx -= nx * overlap * wa;
+                  a.cy -= ny * overlap * wa;
+                  b2.cx += nx * overlap * wb;
+                  b2.cy += ny * overlap * wb;
+                  const rvx = b2.vx - a.vx;
+                  const rvy = b2.vy - a.vy;
+                  const vn = rvx * nx + rvy * ny;
+                  if (vn < 0) {
+                    const imp = -0.3 * vn / (1 / ma + 1 / mb);   // restitution 0.3
+                    a.vx -= imp * nx / ma;
+                    a.vy -= imp * ny / ma;
+                    b2.vx += imp * nx / mb;
+                    b2.vy += imp * ny / mb;
+                    const tv = rvx * -ny + rvy * nx;
+                    a.om -= tv * 0.3;
+                    b2.om += tv * 0.3;
+                  }
+                }
               }
             }
           }
-          // avalanche relaxation: the pile keeps a natural angle of repose
-          // (slopeMax per column pair ≈ 60°; spikier peaks slump so letters
-          // pile into mounds instead of hollow needles)
+          // ---- 3. settle damping + landed word-clump shatter ----
+          for (let bi = bodies.length - 1; bi >= 0; bi--) {
+            const b = bodies[bi];
+            if (b.glyphs && b.cy < 1.02 && b.vy > -0.15) {
+              breakWordBody(bi);   // clump landed (on base or pile) → per-char
+              continue;
+            }
+            // bleed off tiny residual motion so the pile falls quiet — a real
+            // disturbance (a word landing on it) is above threshold and still moves
+            const sp2 = b.vx * b.vx + b.vy * b.vy;
+            if (sp2 < 0.0007 && Math.abs(b.om) < 0.5) {
+              b.vx *= 0.3; b.vy *= 0.3; b.om *= 0.5;
+            }
+          }
+          // ---- 4. live surface + burial retirement (bounds the live count) ----
+          liveTopCol.fill(0);
+          for (let i = 0; i < bodies.length; i++) {
+            const b = bodies[i];
+            const col = Math.max(0, Math.min(NC - 1, Math.floor(b.cx / cw)));
+            const top = b.cy + b.hh;
+            if (top > liveTopCol[col]) liveTopCol[col] = top;
+          }
+          if (sweepEnv <= 0) {
+            for (let bi = bodies.length - 1; bi >= 0; bi--) {
+              const b = bodies[bi];
+              if (b.glyphs) continue;   // never freeze an intact clump mid-air
+              const col = Math.max(1, Math.min(NC - 2, Math.floor(b.cx / cw)));
+              const surf = Math.max(liveTopCol[col - 1], liveTopCol[col], liveTopCol[col + 1]);
+              // buried = enough live ink stacked above → occluded, so freezing
+              // it into the base is invisible and drops it from the sim
+              if (surf - (b.cy + b.hh) > 0.14) {
+                stampBody(b);
+                bodies.splice(bi, 1);
+              }
+            }
+            // hard cap: freeze the deepest (lowest) bodies if still over budget
+            if (bodies.length > MAX_BODIES) {
+              const order = bodies.map((_, i) => i).sort((p, q) => bodies[p].cy - bodies[q].cy);
+              const rm = order.slice(0, bodies.length - MAX_BODIES).sort((p, q) => q - p);
+              for (const i of rm) { stampBody(bodies[i]); bodies.splice(i, 1); }
+            }
+          }
+          // ---- 5. avalanche relaxation on the FROZEN base (angle of repose) ----
           const slopeMax = 0.014;
           for (let i = 0; i < NC - 1; i++) {
             const d = hcol[i] - hcol[i + 1];
@@ -1772,9 +1819,12 @@
         function stepSweep(dt) {
           let sum = 0;
           let mx = 0;
+          // the pile is now FROZEN base + LIVE resting bodies — measure both so
+          // the dissolve triggers on the real (visible) height, not just the base
           for (let i = 0; i < NC; i++) {
-            sum += hcol[i];
-            if (hcol[i] > mx) mx = hcol[i];
+            const h = Math.max(hcol[i], liveTopCol[i]);
+            sum += h;
+            if (h > mx) mx = h;
           }
           meanH = sum / NC;
           if (!sweeping) {
