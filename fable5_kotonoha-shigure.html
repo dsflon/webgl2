@@ -1403,22 +1403,21 @@
           // bias toward vertical keeps the calligraphic 短冊 feel; single glyphs
           // are orientation-agnostic.
           const vertical = chars.length < 2 ? (h(8) < 0.5) : (h(2) < 0.56);
-          const reps = 1 + ((state.amount > 0.7 && h(4) < state.amount - 0.6) ? 1 : 0);
-          for (let r = 0; r < reps; r++) {
-            const rx = Math.min(0.94, Math.max(0.06,
-              fx + (r ? (h(3) - 0.5) * 0.24 : 0)));
-            pending.push({
-              t: simTime + d0 + r * 0.28,
-              word: true,
-              chars,
-              kindKey,
-              vertical,
-              x: rx * aspect,
-              size,
-              aka: akaOn,
-              seed: evSeed * 131 + r * 37,
-            });
-          }
+          // ONE clump per event — the old `reps` spawned the SAME word twice at
+          // high 言葉の量, which read as "同じ言葉が2つ流れてくる". Density comes
+          // from the event RATE, not from duplicating a word.
+          const rx = Math.min(0.94, Math.max(0.06, fx));
+          pending.push({
+            t: simTime + d0,
+            word: true,
+            chars,
+            kindKey,
+            vertical,
+            x: rx * aspect,
+            size,
+            aka: akaOn,
+            seed: evSeed * 131,
+          });
         }
 
         // A single tiny rain mark (ヽ丶ゝ) — used by the sustained-hiss
@@ -1679,47 +1678,12 @@
             if (b.grounded > 0.12) { stampBody(b); bodies.splice(bi, 1); }
           }
 
-          // light POSITIONAL separation so a falling stream doesn't collapse into
-          // a single column (spreads the pile). No velocity change → no bounce.
-          gridMap.clear();
-          for (let i = 0; i < bodies.length; i++) {
-            const b = bodies[i];
-            const k = gKey(Math.floor(b.cx / GRID_CELL), Math.floor(b.cy / GRID_CELL));
-            let arr = gridMap.get(k);
-            if (!arr) { arr = []; gridMap.set(k, arr); }
-            arr.push(i);
-          }
-          for (let i = 0; i < bodies.length; i++) {
-            const a = bodies[i];
-            const ra = radOf(a);
-            const gx = Math.floor(a.cx / GRID_CELL);
-            const gy = Math.floor(a.cy / GRID_CELL);
-            for (let ox = -1; ox <= 1; ox++) {
-              for (let oy = -1; oy <= 1; oy++) {
-                const arr = gridMap.get(gKey(gx + ox, gy + oy));
-                if (!arr) continue;
-                for (let t = 0; t < arr.length; t++) {
-                  const j = arr[t];
-                  if (j <= i) continue;
-                  const b2 = bodies[j];
-                  const rb = radOf(b2);
-                  const rr = ra + rb;
-                  let dx = b2.cx - a.cx;
-                  if (dx > rr || dx < -rr) continue;
-                  let dy = b2.cy - a.cy;
-                  if (dy > rr || dy < -rr) continue;
-                  const d2 = dx * dx + dy * dy;
-                  if (d2 >= rr * rr) continue;
-                  let d = Math.sqrt(d2);
-                  if (d < 1e-6) { d = 1e-6; dx = 0; dy = rr; }
-                  const nx = dx / d, ny = dy / d;
-                  const push = (rr - d) * 0.5;
-                  a.cx -= nx * push; a.cy -= ny * push;
-                  b2.cx += nx * push; b2.cy += ny * push;
-                }
-              }
-            }
-          }
+          // NOTE: no body-body separation pass. It was re-shoving overlapping
+          // falling glyphs apart every frame, which read as "左右に激しく細かく
+          //揺れている" (violent fine left-right jitter). Falling glyphs may
+          // briefly overlap — that is harmless because each one stamps into the
+          // ink layer within ~0.12s of landing, so no live overlap persists.
+          // Horizontal spread of the pile comes from each event's own fx.
 
           // frozen-base avalanche relaxation (angle of repose of the ink base)
           const slopeMax = 0.014;
