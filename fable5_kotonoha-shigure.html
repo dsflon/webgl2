@@ -1332,7 +1332,7 @@
           SOFT:  { font: 2, sizeMul: 0.82, vy0: -0.05, vxA: 0.08, tilt: 0.25,
             spin: 0.8, grav: 0.85, drag: 0.85, rest: 0.08, fric: 0.55,
             ink: 0.72, stagger: 0.14, sway: 0.5 },
-          WORD:  { font: 0, sizeMul: 1.0, vy0: -0.08, vxA: 0.03, tilt: 0.12,
+          WORD:  { font: 0, sizeMul: 1.55, vy0: -0.08, vxA: 0.03, tilt: 0.12,
             spin: 0.6, grav: 1.55, drag: 0.28, rest: 0.10, fric: 0.55,
             ink: 0.95, stagger: 0.09 },
           // slow drifting mote (fakesource centre stream / 塵): terminal
@@ -1971,7 +1971,10 @@
         function emitSpeechWord(word, idx) {
           if (!word) return;
           micEvSeed++;
-          const volN = Math.max(0.5, Math.min(1, aud.rmsF / 0.14));
+          // recognised words arrive AFTER the spoken peak (rmsF has decayed),
+          // so floor the volume high enough that a normal-voice word is a
+          // clearly-readable size, not a faint small clump (実機フィードバック)
+          const volN = Math.max(0.72, Math.min(1, aud.rmsF / 0.12));
           const exc = volN * 0.5 + Math.min(1, aud.cen) * 0.5;
           const akaOn = state.aka > 0.01 && exc > (1.05 - 0.72 * state.aka);
           const fx = 0.12 + 0.76 * hseed(micEvSeed * 71 + idx * 17 + 3);
