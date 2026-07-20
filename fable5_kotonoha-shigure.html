@@ -1992,66 +1992,90 @@
             idx * 0.24);
         }
 
+        // Speech recognition — modelled on the WORKING reference in this repo
+        // (overflowing_aura_4taigyo_v2.html): a SHORT-lived recogniser
+        // (continuous=false) that is RE-CREATED on every end/error. That piece
+        // recognises Japanese reliably; its getUserMedia is video-only, so the
+        // recogniser owns the microphone. We do the same here — SR is started
+        // first and owns the mic; the volume analyser is best-effort (see
+        // startMic). This replaces the continuous=true recogniser that fought
+        // getUserMedia({audio}) for the mic and failed with `audio-capture`.
+        let speechActive = false;
         function startSpeech() {
           const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-          if (!SR) { speechDiag.state = "未対応(このブラウザ)"; return; }
-          try {
-            speechRec = new SR();
-            speechRec.lang = "ja-JP";
-            speechRec.continuous = true;
-            // interim results ON: fires while you speak (before the phrase is
-            // finalised). This both (a) makes recognition feel responsive and
-            // (b) is our proof that audio actually reaches the recogniser —
-            // if `heard` never climbs, SR is getting no audio.
-            speechRec.interimResults = true;
-            speechRec.maxAlternatives = 1;
-            speechRec.onstart = () => { speechDiag.state = "聴取中"; };
-            speechRec.onaudiostart = () => { speechDiag.state = "聴取中(音声)"; };
-            speechRec.onspeechstart = () => { speechDiag.state = "発話検知"; };
-            speechRec.onresult = (event) => {
+          if (!SR) { speechDiag.state = "未対応(このブラウザ)"; speechAvail = false; return; }
+          speechAvail = true;
+          const createAndStart = () => {
+            if (speechActive || aud.mode !== "mic") return;
+            speechActive = true;
+            const r = new SR();
+            speechRec = r;
+            r.lang = "ja-JP";
+            r.continuous = false;          // short utterances, re-created each time
+            r.interimResults = true;       // interim = proof audio is reaching SR
+            r.maxAlternatives = 3;
+            r.onstart = () => { speechDiag.state = "聴取中"; };
+            r.onspeechstart = () => { speechDiag.state = "発話検知"; };
+            r.onresult = (event) => {
               for (let i = event.resultIndex; i < event.results.length; i++) {
                 const res = event.results[i];
                 if (!res[0]) continue;
                 if (res.isFinal) {
                   speechDiag.got++;
                   speechDiag.state = "認識";
-                  speechRestarts = 0;              // real result → reset budget
                   emitTranscript(res[0].transcript);
                 } else {
-                  speechDiag.heard++;              // interim = audio is flowing
+                  speechDiag.heard++;
                   speechDiag.state = "認識中…";
                 }
               }
             };
-            speechRec.onerror = (e) => {
+            r.onerror = (e) => {
               speechDiag.err = (e && e.error) ? String(e.error) : "unknown";
-              speechDiag.state = "エラー:" + speechDiag.err;
-            };
-            speechRec.onend = () => {
-              // continuous recognisers stop periodically; restart while in mic
-              // mode. "no-speech"/"aborted" are benign — don't burn the budget
-              // on them; only truly repeated restarts (no results at all) stop.
-              if (aud.mode === "mic" && speechRestarts < 240) {
-                speechRestarts++;
-                setTimeout(() => {
-                  try { speechRec.start(); } catch (_) { /* already started */ }
-                }, 600);
-              } else if (aud.mode === "mic") {
-                speechDiag.state = "停止(再起動上限)";
+              if (speechDiag.err !== "no-speech") {
+                speechDiag.state = "エラー:" + speechDiag.err;
+              }
+              // AUTO-RECOVER from a mic conflict: if the recogniser can't
+              // capture audio because the volume analyser is holding the mic,
+              // release the analyser so SR can reclaim it (speech is primary).
+              // The piece then runs speech-only (default volume, no ambient
+              // onomatopoeia) — exactly the working reference's arrangement.
+              if (speechDiag.err === "audio-capture" && aud.stream) {
+                try {
+                  aud.stream.getTracks().forEach((t) => t.stop());
+                } catch (_) { /* ignore */ }
+                aud.stream = null;
+                aud.analyser = null;
+                speechDiag.err = "音量解析を解放し音声認識を優先";
               }
             };
-            speechRec.start();
-            speechAvail = true;
-            speechDiag.state = "開始";
-          } catch (_) {
-            speechRec = null;
-            speechAvail = false;
-            speechDiag.state = "開始失敗";
-          }
+            r.onend = () => {
+              speechActive = false;
+              if (aud.mode === "mic") setTimeout(createAndStart, 200);
+            };
+            try {
+              r.start();
+              if (speechDiag.state === "—" || speechDiag.state === "開始")
+                speechDiag.state = "開始";
+            } catch (_) {
+              speechActive = false;
+              setTimeout(createAndStart, 400);
+            }
+          };
+          speechDiag.state = "開始";
+          createAndStart();
         }
 
-        // ---- microphone acquisition (the 3 fallback paths all keep the
-        // demo shigure alive behind the overlay: order §1/§7) ----
+        // ---- microphone acquisition ----
+        // SPEECH-FIRST design (root-cause fix): the speech recogniser owns the
+        // microphone, exactly like the working reference in this repo. The
+        // volume analyser (getUserMedia({audio}) → AnalyserNode) is now a
+        // BEST-EFFORT extra requested AFTER speech has started: on devices
+        // where both can share the mic you get onomatopoeia + volume→size too;
+        // where they can't, speech still works and we simply fall back to a
+        // default volume with no ambient onomatopoeia. Previously getUserMedia
+        // grabbed the mic first and SpeechRecognition failed with
+        // `audio-capture` → no words were ever recognised.
         async function startMic() {
           if (FAKESOURCE) return;
           if (!window.isSecureContext) {
@@ -2061,13 +2085,31 @@
               { skip: true });
             return;
           }
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            setOverlay("error", "マイクに対応していません",
-              "このブラウザではマイク入力を取得できませんでした。"
-              + "デモ時雨をこのまま眺めることができます。",
-              { skip: true });
-            return;
+          // enter mic mode + start speech recognition FIRST (it opens its own
+          // mic). This is the primary input; the diagnostic now shows too.
+          aud.mode = "mic";
+          setOverlay("hidden", "", "", null);
+          startSpeech();
+
+          // DEFER the volume analyser: give the recogniser a head start to claim
+          // the microphone before getUserMedia({audio}) also opens it. On many
+          // devices both can share the mic (→ onomatopoeia + volume too); where
+          // they can't, speech keeps working and we simply run without the
+          // analyser. Never fatal to speech.
+          if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            setTimeout(startAnalyser, speechAvail ? 1200 : 0);
+          } else if (!speechAvail) {
+            setOverlay("error", "マイクを使えませんでした",
+              "このブラウザでは音声認識も音量解析も使えませんでした。"
+              + "その間もデモ時雨が降り続けています。",
+              { mic: true, skip: true, micLabel: "マイクを再試行" });
           }
+        }
+
+        let analyserStarted = false;
+        async function startAnalyser() {
+          if (analyserStarted || aud.mode !== "mic") return;
+          analyserStarted = true;
           try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -2081,20 +2123,20 @@
             aud.stream = stream;
             aud.timeData = new Float32Array(aud.analyser.fftSize);
             aud.freqData = new Uint8Array(aud.analyser.frequencyBinCount);
-            aud.mode = "mic";
-            speechRestarts = 0;
-            setOverlay("hidden", "", "", null);
-            startSpeech();
           } catch (err) {
-            const name = err && err.name;
-            const why = name === "NotAllowedError"
-              ? "マイクの使用が許可されませんでした。ブラウザのサイト設定から許可して再試行できます。"
-              : name === "NotFoundError"
-                ? "マイクが見つかりませんでした。接続を確認して再試行できます。"
-                : `マイクを開けませんでした(${name || "unknown"})。`;
-            setOverlay("error", "マイクを使えませんでした",
-              `${why} その間もデモ時雨が降り続けています。`,
-              { mic: true, skip: true, micLabel: "マイクを再試行" });
+            // analyser unavailable (mic busy with SR / denied). Speech still
+            // runs; note it in the diagnostic but do NOT block the piece.
+            aud.analyser = null;
+            analyserStarted = false;   // allow a later retry attempt
+            if (!speechAvail) {
+              setOverlay("error", "マイクを使えませんでした",
+                ((err && err.name === "NotAllowedError")
+                  ? "マイクの使用が許可されませんでした。"
+                  : "マイクを開けませんでした。")
+                + "ブラウザのマイク許可を確認して再試行できます。"
+                + "その間もデモ時雨が降り続けています。",
+                { mic: true, skip: true, micLabel: "マイクを再試行" });
+            }
           }
         }
 
@@ -2360,9 +2402,10 @@
             fpsFrames = 0;
             const modeLabel = aud.mode === "mic" ? "mic"
               : aud.mode === "fake" ? "fake" : "デモ";
-            // in mic mode, append the live speech diagnostic so the user can
-            // see whether recognition is actually working on their device
-            const speechInfo = aud.mode === "mic"
+            // append the live speech diagnostic so the user can see whether
+            // recognition is actually working on their device (shown once mic
+            // mode is entered or recognition has been attempted)
+            const speechInfo = (aud.mode === "mic" || speechDiag.state !== "—")
               ? ` / 音声 ${speechDiag.state}・認識${speechDiag.got}件`
                 + (speechDiag.heard ? `・聴取${speechDiag.heard}` : "")
                 + (speechDiag.err ? `・${speechDiag.err}` : "")
