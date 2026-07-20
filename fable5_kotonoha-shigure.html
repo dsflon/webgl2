@@ -1618,21 +1618,21 @@
         const GRID_CELL = 0.15;          // broadphase cell (> max glyph diameter)
         const gridMap = new Map();
         const gKey = (gx, gy) => gx * 8192 + gy;
-        // ---- Position-Based Dynamics pile (Suika-Game-like) ----------------
-        // Glyphs are solved as circles. Each substep: integrate velocity →
-        // predict position → iteratively resolve overlaps against neighbours,
-        // the per-column frozen base, and the side walls → DERIVE velocity from
-        // the net position change. Because velocity comes from the solved
-        // positions, contacts are inherently INELASTIC (no bounce), a resting
-        // stack self-settles to zero velocity (no perpetual motion), and a body
-        // with nothing under it simply keeps falling (no float). No ad-hoc
-        // restitution / settle-damping / support flags needed. Deeply buried &
-        // settled glyphs are frozen into the ink layer to bound the live count.
+        // ---- Calm settling pile (stability-first) --------------------------
+        // Physics tuned to NEVER bounce/float/jitter, at any frame rate: a glyph
+        // falls, and the moment it meets the frozen-ink base its downward speed
+        // is killed HARD (never reflected — zero restitution) and, after a short
+        // grounded moment, it is stamped into the ink layer and removed. Because
+        // a landed glyph becomes static ink almost immediately, there is no
+        // long-lived live stack to oscillate ("ぴょんぴょん"), ratchet up in
+        // mid-air, or spin forever. Mutual separation while falling is positional
+        // only (no velocity impulse → cannot inject bounce energy). Trade-off:
+        // the pile no longer collapses/avalanches (that dynamic layer was the
+        // source of the instability); it accumulates and dissolves calmly.
         function stepPhysics(dt) {
           const cw = aspect / NC;
           const radOf = (b) => (b.glyphs ? Math.max(b.hw, b.hh) : b.size * 0.42);
 
-          // 1. integrate velocity, predict position (save previous)
           for (let bi = bodies.length - 1; bi >= 0; bi--) {
             const b = bodies[bi];
             const K = b.K;
@@ -1642,8 +1642,6 @@
             const dm = Math.exp(-dt * K.drag);
             b.vx *= dm;
             b.vy *= dm;
-            b.px = b.cx;
-            b.py = b.cy;
             b.cx += b.vx * dt;
             b.cy += b.vy * dt;
             b.ang += b.om * dt;
@@ -1653,16 +1651,36 @@
               bodies.splice(bi, 1);
               continue;
             }
-            // drifting dust (fakesource centre stream, --motion): recycled at the
-            // base, never joins the pile. MOTE exists only in fakesource.
+            const r = radOf(b);
+            const col = Math.max(0, Math.min(NC - 1, Math.floor(b.cx / cw)));
+            // drifting dust (fakesource centre stream) — recycled, never piles
             if (b.kindKey === "MOTE") {
-              const col = Math.max(0, Math.min(NC - 1, Math.floor(b.cx / cw)));
               if (b.cy - b.size * 0.42 <= hcol[col] || b.cy < 0.06) bodies.splice(bi, 1);
               continue;
             }
+            // side walls (positional, gentle)
+            if (b.cx < r) { b.cx = r; if (b.vx < 0) b.vx = 0; }
+            else if (b.cx > aspect - r) { b.cx = aspect - r; if (b.vx > 0) b.vx = 0; }
+            // frozen-base contact: rest ON the ink base, kill downward speed HARD
+            // (zero restitution → never bounces up)
+            if (b.cy - r < hcol[col]) {
+              b.cy = hcol[col] + r;
+              if (b.vy < 0) b.vy = 0;
+              b.vx *= Math.max(0, 1 - K.fric * dt * 20);
+              b.grounded = (b.grounded || 0) + dt;
+            } else {
+              b.grounded = 0;
+            }
+            // a word clump that has grounded shatters into per-char glyphs
+            if (b.glyphs && b.grounded > 0) { breakWordBody(bi); continue; }
+            // stamp shortly after grounding → becomes static ink (no live stack
+            // left to bounce). Only grounded (base-contacting) bodies stamp, so
+            // nothing ever freezes in mid-air.
+            if (b.grounded > 0.12) { stampBody(b); bodies.splice(bi, 1); }
           }
 
-          // 2. build the broadphase grid once (per-iteration moves are tiny)
+          // light POSITIONAL separation so a falling stream doesn't collapse into
+          // a single column (spreads the pile). No velocity change → no bounce.
           gridMap.clear();
           for (let i = 0; i < bodies.length; i++) {
             const b = bodies[i];
@@ -1671,131 +1689,52 @@
             if (!arr) { arr = []; gridMap.set(k, arr); }
             arr.push(i);
           }
-
-          // 3. PBD constraint iterations (positional, inelastic, self-settling)
-          const ITERS = 4;
-          for (let it = 0; it < ITERS; it++) {
-            // circle–circle
-            for (let i = 0; i < bodies.length; i++) {
-              const a = bodies[i];
-              const ra = radOf(a);
-              const gx = Math.floor(a.cx / GRID_CELL);
-              const gy = Math.floor(a.cy / GRID_CELL);
-              for (let ox = -1; ox <= 1; ox++) {
-                for (let oy = -1; oy <= 1; oy++) {
-                  const arr = gridMap.get(gKey(gx + ox, gy + oy));
-                  if (!arr) continue;
-                  for (let t = 0; t < arr.length; t++) {
-                    const j = arr[t];
-                    if (j <= i) continue;
-                    const b2 = bodies[j];
-                    const rb = radOf(b2);
-                    const rr = ra + rb;
-                    let dx = b2.cx - a.cx;
-                    if (dx > rr || dx < -rr) continue;
-                    let dy = b2.cy - a.cy;
-                    if (dy > rr || dy < -rr) continue;
-                    let d2 = dx * dx + dy * dy;
-                    if (d2 >= rr * rr) continue;
-                    let d = Math.sqrt(d2);
-                    if (d < 1e-6) { d = 1e-6; dx = 0; dy = rr; }
-                    const nx = dx / d;
-                    const ny = dy / d;
-                    const overlap = rr - d;
-                    const ma = a.size * a.size;
-                    const mb = b2.size * b2.size;
-                    const wa = mb / (ma + mb);
-                    const wb = ma / (ma + mb);
-                    const push = overlap * 0.8;   // relaxation < 1 for stability
-                    a.cx -= nx * push * wa;
-                    a.cy -= ny * push * wa;
-                    b2.cx += nx * push * wb;
-                    b2.cy += ny * push * wb;
-                  }
+          for (let i = 0; i < bodies.length; i++) {
+            const a = bodies[i];
+            const ra = radOf(a);
+            const gx = Math.floor(a.cx / GRID_CELL);
+            const gy = Math.floor(a.cy / GRID_CELL);
+            for (let ox = -1; ox <= 1; ox++) {
+              for (let oy = -1; oy <= 1; oy++) {
+                const arr = gridMap.get(gKey(gx + ox, gy + oy));
+                if (!arr) continue;
+                for (let t = 0; t < arr.length; t++) {
+                  const j = arr[t];
+                  if (j <= i) continue;
+                  const b2 = bodies[j];
+                  const rb = radOf(b2);
+                  const rr = ra + rb;
+                  let dx = b2.cx - a.cx;
+                  if (dx > rr || dx < -rr) continue;
+                  let dy = b2.cy - a.cy;
+                  if (dy > rr || dy < -rr) continue;
+                  const d2 = dx * dx + dy * dy;
+                  if (d2 >= rr * rr) continue;
+                  let d = Math.sqrt(d2);
+                  if (d < 1e-6) { d = 1e-6; dx = 0; dy = rr; }
+                  const nx = dx / d, ny = dy / d;
+                  const push = (rr - d) * 0.5;
+                  a.cx -= nx * push; a.cy -= ny * push;
+                  b2.cx += nx * push; b2.cy += ny * push;
                 }
               }
             }
-            // frozen-base floor (per column) + side walls
-            for (let i = 0; i < bodies.length; i++) {
-              const b = bodies[i];
-              const r = radOf(b);
-              const col = Math.max(0, Math.min(NC - 1, Math.floor(b.cx / cw)));
-              if (b.cy - r < hcol[col]) b.cy = hcol[col] + r;
-              if (b.cx < r) b.cx = r;
-              else if (b.cx > aspect - r) b.cx = aspect - r;
-            }
           }
 
-          // 4. derive velocity from the solved positions (inelastic contacts),
-          // CLAMPED so a deep-overlap correction can't launch a body upward
-          // (classic PBD instability → the pile "pops"). 2.5 world-units/s is
-          // well above free-fall terminal here.
-          const invDt = dt > 0 ? 1 / dt : 0;
-          for (let i = 0; i < bodies.length; i++) {
-            const b = bodies[i];
-            let vx = (b.cx - b.px) * invDt;
-            let vy = (b.cy - b.py) * invDt;
-            if (vx > 2.5) vx = 2.5; else if (vx < -2.5) vx = -2.5;
-            if (vy > 2.5) vy = 2.5; else if (vy < -2.5) vy = -2.5;
-            b.vx = vx;
-            b.vy = vy;
-          }
-
-          // 5. landed word-clump shatter (on base or on the pile)
-          for (let bi = bodies.length - 1; bi >= 0; bi--) {
-            const b = bodies[bi];
-            if (b.glyphs && b.cy < 1.02 && Math.abs(b.vy) < 0.22) breakWordBody(bi);
-          }
-
-          // 6. live surface + burial retirement (freeze deep & settled glyphs)
-          liveTopCol.fill(0);
-          for (let i = 0; i < bodies.length; i++) {
-            const b = bodies[i];
-            const col = Math.max(0, Math.min(NC - 1, Math.floor(b.cx / cw)));
-            const top = b.cy + (b.glyphs ? b.hh : b.size * 0.42);
-            if (top > liveTopCol[col]) liveTopCol[col] = top;
-          }
-          if (sweepEnv <= 0) {
-            for (let bi = bodies.length - 1; bi >= 0; bi--) {
-              const b = bodies[bi];
-              if (b.glyphs) continue;
-              const col = Math.max(0, Math.min(NC - 1, Math.floor(b.cx / cw)));
-              const r = b.size * 0.42;
-              const top = b.cy + r;
-              // freeze only a body that is (a) actually RESTING ON the frozen
-              // base (its underside touches hcol), (b) BURIED under live ink,
-              // and (c) SETTLED. Requiring (a) is critical: without it a body
-              // that briefly went still MID-AIR could freeze there, ratcheting
-              // hcol up in empty space so later bodies rested on nothing and the
-              // pile never reached the bottom. Now hcol only grows bottom-up.
-              const onBase = (b.cy - r) <= hcol[col] + 0.02;
-              if (onBase && liveTopCol[col] - top > 0.28 &&
-                  (b.vx * b.vx + b.vy * b.vy) < 0.02) {
-                stampBody(b);
-                bodies.splice(bi, 1);
-              }
-            }
-            if (bodies.length > MAX_BODIES) {
-              const order = bodies.map((_, i) => i).sort((p, q) => bodies[p].cy - bodies[q].cy);
-              const rm = order.slice(0, bodies.length - MAX_BODIES).sort((p, q) => q - p);
-              for (const i of rm) { stampBody(bodies[i]); bodies.splice(i, 1); }
-            }
-          }
-
-          // 7. avalanche relaxation on the frozen base (angle of repose)
+          // frozen-base avalanche relaxation (angle of repose of the ink base)
           const slopeMax = 0.014;
           for (let i = 0; i < NC - 1; i++) {
             const d = hcol[i] - hcol[i + 1];
             if (d > slopeMax) {
               const f = (d - slopeMax) * 0.25;
-              hcol[i] -= f;
-              hcol[i + 1] += f;
+              hcol[i] -= f; hcol[i + 1] += f;
             } else if (-d > slopeMax) {
               const f = (-d - slopeMax) * 0.25;
-              hcol[i] += f;
-              hcol[i + 1] -= f;
+              hcol[i] += f; hcol[i + 1] -= f;
             }
           }
+          // live-surface height (for the dissolve trigger's max, harmless)
+          liveTopCol.fill(0);
         }
 
         // Sweep phase (invariant 5): pile height threshold → one wind pass.
