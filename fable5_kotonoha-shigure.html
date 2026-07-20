@@ -5,8 +5,9 @@
   概要:
   マイクで集めた音が墨の活字になって画面上部から降ってくる作品。声が取れれば言葉
   (Web Speech API — 対応環境のみの上乗せ層)、環境音は「ザー」「ゴロゴロ」「ポツ」等の
-  オノマトペになる。認識した単語・オノマトペは1文字ずつではなく「こんにちは」のような
-  文字の塊(複合剛体)としてまとまって落下・堆積する(向きは語ごとに縦書き/横書き)。
+  オノマトペになる。認識した単語・オノマトペは「こんにちは」のような文字の塊
+  (複合剛体・向きは語ごとに縦書き/横書き)として読める姿で落下し、地面に触れた
+  瞬間に一文字ずつへ砕けて転がり、個別に積もる(言葉が地に落ちて意味がほどける)。
   マイクの専有規律: 音声認識が使えるブラウザでは認識器がマイクを完全専有する
   (音量解析の getUserMedia を開くと多くの環境で認識器が無音化・audio-capture 化する
   ため)。音量解析+環境音オノマトペは認識非対応ブラウザ(iOS Chrome 等)のみで動く。
@@ -1549,6 +1550,49 @@
           }
         }
 
+        // SHATTER (user decision 2026-07-20): a word clump stays readable while
+        // falling, then BREAKS into per-character bodies at first ground
+        // contact — the letters tumble and pile ONE BY ONE (言葉が地に落ちて
+        // 意味がほどける). Each child keeps the parent's ink/aka/fresh and its
+        // glyph slot; child velocity = parent velocity + rotational tangential
+        // velocity at the glyph + a small hashed scatter.
+        function breakWordBody(bi) {
+          const b = bodies[bi];
+          bodies.splice(bi, 1);
+          const c = Math.cos(b.ang);
+          const s = Math.sin(b.ang);
+          for (let g = 0; g < b.glyphs.length; g++) {
+            const gl_ = b.glyphs[g];
+            const rx = c * gl_.lx - s * gl_.ly;
+            const ry = s * gl_.lx + c * gl_.ly;
+            const h = (n) => hseed(b.seed * 991 + g * 17 + n);
+            if (bodies.length < MAX_BODIES) {
+              bodies.push({
+                kindKey: b.kindKey, K: b.K,
+                cx: b.cx + rx,
+                cy: b.cy + ry + 0.004,          // lift a hair out of the pen
+                vx: b.vx - b.om * ry + (h(1) - 0.5) * 0.16,
+                vy: Math.max(b.vy, -0.4) * 0.4 + b.om * rx + 0.05 * h(2),
+                ang: b.ang + (h(3) - 0.5) * 0.5,
+                om: b.om + (h(4) - 0.5) * 3.0,
+                size: gl_.dhw * 2,
+                dhw: gl_.dhw, dhh: gl_.dhh,
+                hw: gl_.dhw * 0.72, hh: gl_.dhh * 0.80,
+                ink: b.ink, aka: b.aka, fresh: b.fresh,
+                u0: gl_.u0, v0: gl_.v0, slot: gl_.slot,
+                life: 0, sleep: 0, seed: h(7),
+              });
+            } else {
+              // body budget full — settle this glyph straight into the layer
+              stampQueue.push({
+                cx: b.cx + rx, cy: b.cy + ry, dhw: gl_.dhw, dhh: gl_.dhh,
+                ang: b.ang, u0: gl_.u0, v0: gl_.v0,
+                ink: b.ink * 0.95, aka: b.aka, fresh: b.fresh,
+              });
+            }
+          }
+        }
+
         function stepPhysics(dt) {
           const cw = aspect / NC;
           for (let bi = bodies.length - 1; bi >= 0; bi--) {
@@ -1603,6 +1647,11 @@
               if (pen > maxPen) { maxPen = pen; lever = wx - b.cx; }
             }
             let contact = false;
+            if (maxPen > 0 && b.glyphs) {
+              // word clump touches ground → shatter into per-char bodies
+              breakWordBody(bi);
+              continue;
+            }
             if (maxPen > 0) {
               contact = true;
               b.cy += Math.min(maxPen, 0.05);
