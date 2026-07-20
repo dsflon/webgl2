@@ -7,8 +7,10 @@
   (Web Speech API — 対応環境のみの上乗せ層)、環境音は「ザー」「ゴロゴロ」「ポツ」等の
   オノマトペになる。認識した単語・オノマトペは1文字ずつではなく「こんにちは」のような
   文字の塊(複合剛体)としてまとまって落下・堆積する(向きは語ごとに縦書き/横書き)。
-  発話中はオノマトペを抑制し、認識語の塊だけを降らせる(環境音・無音の間にオノマトペが
-  戻る)。文字は剛体として落下・衝突・回転しながら物理演算で積もり、着地の
+  マイクの専有規律: 音声認識が使えるブラウザでは認識器がマイクを完全専有する
+  (音量解析の getUserMedia を開くと多くの環境で認識器が無音化・audio-capture 化する
+  ため)。音量解析+環境音オノマトペは認識非対応ブラウザ(iOS Chrome 等)のみで動く。
+  文字は剛体として落下・衝突・回転しながら物理演算で積もり、着地の
   瞬間に墨が和紙ににじむ(潤)。時間が経つと定着し(渇)、古い層ほど圧密されて濃く沈み、
   字形を失って墨痕に風化する。堆積が画面を満たすと風がひと払いして白紙に戻り、また
   最初から始まる。本質:「言葉=墨=時間とともに沈殿する無常」。
@@ -2001,6 +2003,7 @@
         // startMic). This replaces the continuous=true recogniser that fought
         // getUserMedia({audio}) for the mic and failed with `audio-capture`.
         let speechActive = false;
+        let speechFatals = 0;   // consecutive fatal SR errors with zero results
         function startSpeech() {
           const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
           if (!SR) { speechDiag.state = "未対応(このブラウザ)"; speechAvail = false; return; }
@@ -2022,6 +2025,7 @@
                 if (!res[0]) continue;
                 if (res.isFinal) {
                   speechDiag.got++;
+                  speechFatals = 0;
                   speechDiag.state = "認識";
                   emitTranscript(res[0].transcript);
                 } else {
@@ -2034,12 +2038,13 @@
               speechDiag.err = (e && e.error) ? String(e.error) : "unknown";
               if (speechDiag.err !== "no-speech") {
                 speechDiag.state = "エラー:" + speechDiag.err;
+                // fatal-error streak (audio-capture / network /
+                // service-not-allowed / not-allowed …). no-speech is benign.
+                speechFatals++;
               }
               // AUTO-RECOVER from a mic conflict: if the recogniser can't
               // capture audio because the volume analyser is holding the mic,
               // release the analyser so SR can reclaim it (speech is primary).
-              // The piece then runs speech-only (default volume, no ambient
-              // onomatopoeia) — exactly the working reference's arrangement.
               if (speechDiag.err === "audio-capture" && aud.stream) {
                 try {
                   aud.stream.getTracks().forEach((t) => t.stop());
@@ -2051,7 +2056,17 @@
             };
             r.onend = () => {
               speechActive = false;
-              if (aud.mode === "mic") setTimeout(createAndStart, 200);
+              if (aud.mode !== "mic") return;
+              // GIVE UP on a permanently-broken recogniser: several fatal
+              // errors and not one result → hand the mic to the analyser so
+              // the piece still reacts to sound (volume + onomatopoeia).
+              if (speechFatals >= 3 && speechDiag.got === 0) {
+                speechAvail = false;
+                speechDiag.state = "認識不可→音量モード";
+                startAnalyser();
+                return;
+              }
+              setTimeout(createAndStart, 200);
             };
             try {
               r.start();
@@ -2070,12 +2085,11 @@
         // SPEECH-FIRST design (root-cause fix): the speech recogniser owns the
         // microphone, exactly like the working reference in this repo. The
         // volume analyser (getUserMedia({audio}) → AnalyserNode) is now a
-        // BEST-EFFORT extra requested AFTER speech has started: on devices
-        // where both can share the mic you get onomatopoeia + volume→size too;
-        // where they can't, speech still works and we simply fall back to a
-        // default volume with no ambient onomatopoeia. Previously getUserMedia
-        // grabbed the mic first and SpeechRecognition failed with
-        // `audio-capture` → no words were ever recognised.
+        // FALLBACK used only when SpeechRecognition is unavailable: on those
+        // browsers the analyser drives volume→size + onomatopoeia. On SR-capable
+        // browsers the recogniser owns the mic exclusively (see startMic) —
+        // sharing the mic muted the recogniser on mobile (0 results, no error),
+        // and grabbing it first failed SR with `audio-capture` on desktop.
         async function startMic() {
           if (FAKESOURCE) return;
           if (!window.isSecureContext) {
@@ -2091,18 +2105,24 @@
           setOverlay("hidden", "", "", null);
           startSpeech();
 
-          // DEFER the volume analyser: give the recogniser a head start to claim
-          // the microphone before getUserMedia({audio}) also opens it. On many
-          // devices both can share the mic (→ onomatopoeia + volume too); where
-          // they can't, speech keeps working and we simply run without the
-          // analyser. Never fatal to speech.
-          if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-            setTimeout(startAnalyser, speechAvail ? 1200 : 0);
-          } else if (!speechAvail) {
-            setOverlay("error", "マイクを使えませんでした",
-              "このブラウザでは音声認識も音量解析も使えませんでした。"
-              + "その間もデモ時雨が降り続けています。",
-              { mic: true, skip: true, micLabel: "マイクを再試行" });
+          // EXCLUSIVE-MIC arrangement (mobile field report: recogniser stayed
+          // in 聴取中 with 0 results while the analyser held the mic — many
+          // mobile browsers give SR no audio once getUserMedia({audio}) opens,
+          // WITHOUT raising audio-capture). The proven reference piece never
+          // opens an audio getUserMedia at all. So: when speech recognition is
+          // available it OWNS the microphone exclusively — no analyser at all
+          // (word clumps use a fixed volume floor; ambient onomatopoeia off).
+          // The analyser (volume→size + onomatopoeia) runs ONLY on browsers
+          // with no SpeechRecognition (e.g. iOS Chrome / in-app webviews).
+          if (!speechAvail) {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+              startAnalyser();
+            } else {
+              setOverlay("error", "マイクを使えませんでした",
+                "このブラウザでは音声認識も音量解析も使えませんでした。"
+                + "その間もデモ時雨が降り続けています。",
+                { mic: true, skip: true, micLabel: "マイクを再試行" });
+            }
           }
         }
 
