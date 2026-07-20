@@ -1631,6 +1631,7 @@
             const b = bodies[bi];
             const K = b.K;
             b.life += dt;
+            b.sup = false;   // "supported this frame" — reset; set on contact
             b.vy -= K.grav * dt;
             if (K.sway) b.vx += Math.sin(b.life * 2.3 + b.seed * 6.283) * K.sway * dt;
             const dragM = Math.exp(-dt * K.drag);
@@ -1682,6 +1683,7 @@
               continue;
             }
             if (maxPen > 0) {
+              b.sup = true;   // resting on the frozen base
               b.cy += Math.min(maxPen, 0.05);
               if (b.vy < 0) {
                 b.vy = -b.vy * K.rest;
@@ -1734,6 +1736,9 @@
                   a.cy -= ny * overlap * wa;
                   b2.cx += nx * overlap * wb;
                   b2.cy += ny * overlap * wb;
+                  // vertical support: the LOWER body holds up the UPPER one
+                  if (dy < -0.2 * rr) a.sup = true;      // b2 below a → a supported
+                  else if (dy > 0.2 * rr) b2.sup = true; // a below b2 → b2 supported
                   const rvx = b2.vx - a.vx;
                   const rvy = b2.vy - a.vy;
                   const vn = rvx * nx + rvy * ny;
@@ -1758,10 +1763,13 @@
               breakWordBody(bi);   // clump landed (on base or pile) → per-char
               continue;
             }
-            // bleed off tiny residual motion so the pile falls quiet — a real
-            // disturbance (a word landing on it) is above threshold and still moves
+            // bleed off tiny residual motion so the pile falls quiet — ONLY for
+            // SUPPORTED bodies (resting on the base or on another glyph). An
+            // unsupported body in mid-air is never damped, so gravity always
+            // pulls it down — fixes "文字が空中で止まる" (the damping used to
+            // cancel a floating body's fall faster than gravity could rebuild it).
             const sp2 = b.vx * b.vx + b.vy * b.vy;
-            if (sp2 < 0.0007 && Math.abs(b.om) < 0.5) {
+            if (b.sup && sp2 < 0.0007 && Math.abs(b.om) < 0.5) {
               b.vx *= 0.3; b.vy *= 0.3; b.om *= 0.5;
             }
           }
