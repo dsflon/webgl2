@@ -1,5 +1,20 @@
 [
   {
+    "slug": "fable5_kotonoha-shigure",
+    "file": "fable5_kotonoha-shigure.html",
+    "title": "言の葉時雨",
+    "date": "2026-07-20",
+    "desc": "マイクで拾った声が墨の活字になって和紙に降り積もる。声は言葉に、環境音はオノマトペになり、着地でにじみ定着し、満ちると墨が水に溶けて消える。Fable 5 で制作。",
+    "model": "Fable 5",
+    "tags": [
+      "WebGL2",
+      "Audio",
+      "Physics"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_kotonoha-shigure.jpg"
+  },
+  {
     "slug": "fable5_mosaic",
     "file": "fable5_mosaic.html",
     "title": "黄金地モザイク",
