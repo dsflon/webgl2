@@ -1951,6 +1951,12 @@
         let speechRec = null;
         let speechRestarts = 0;
         let speechAvail = false;     // SR constructed → suppress onomatopoeia while voicing
+        // ---- speech DIAGNOSTICS (surfaced in the readout so the user can see
+        // whether recognition actually works — it can't be sandbox-verified).
+        // speechDiag.state: 未対応/開始/聴取中/認識中/エラー; heard = interim
+        // events (proves audio reaches SR); got = final transcripts (proves
+        // full recognition); err = last error name (e.g. network / not-allowed).
+        const speechDiag = { state: "—", heard: 0, got: 0, err: "" };
 
         // A recognised phrase → one or more falling word-clumps. Split on spaces
         // and Japanese punctuation into phrases, then chunk each phrase to
@@ -1988,33 +1994,59 @@
 
         function startSpeech() {
           const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-          if (!SR) return;
+          if (!SR) { speechDiag.state = "未対応(このブラウザ)"; return; }
           try {
             speechRec = new SR();
             speechRec.lang = "ja-JP";
             speechRec.continuous = true;
-            speechRec.interimResults = false;
+            // interim results ON: fires while you speak (before the phrase is
+            // finalised). This both (a) makes recognition feel responsive and
+            // (b) is our proof that audio actually reaches the recogniser —
+            // if `heard` never climbs, SR is getting no audio.
+            speechRec.interimResults = true;
+            speechRec.maxAlternatives = 1;
+            speechRec.onstart = () => { speechDiag.state = "聴取中"; };
+            speechRec.onaudiostart = () => { speechDiag.state = "聴取中(音声)"; };
+            speechRec.onspeechstart = () => { speechDiag.state = "発話検知"; };
             speechRec.onresult = (event) => {
               for (let i = event.resultIndex; i < event.results.length; i++) {
                 const res = event.results[i];
-                if (!res.isFinal || !res[0]) continue;
-                emitTranscript(res[0].transcript);
+                if (!res[0]) continue;
+                if (res.isFinal) {
+                  speechDiag.got++;
+                  speechDiag.state = "認識";
+                  speechRestarts = 0;              // real result → reset budget
+                  emitTranscript(res[0].transcript);
+                } else {
+                  speechDiag.heard++;              // interim = audio is flowing
+                  speechDiag.state = "認識中…";
+                }
               }
             };
-            speechRec.onerror = () => {};
+            speechRec.onerror = (e) => {
+              speechDiag.err = (e && e.error) ? String(e.error) : "unknown";
+              speechDiag.state = "エラー:" + speechDiag.err;
+            };
             speechRec.onend = () => {
-              if (aud.mode === "mic" && speechRestarts < 60) {
+              // continuous recognisers stop periodically; restart while in mic
+              // mode. "no-speech"/"aborted" are benign — don't burn the budget
+              // on them; only truly repeated restarts (no results at all) stop.
+              if (aud.mode === "mic" && speechRestarts < 240) {
                 speechRestarts++;
                 setTimeout(() => {
-                  try { speechRec.start(); } catch (_) { /* silent */ }
-                }, 1200);
+                  try { speechRec.start(); } catch (_) { /* already started */ }
+                }, 600);
+              } else if (aud.mode === "mic") {
+                speechDiag.state = "停止(再起動上限)";
               }
             };
             speechRec.start();
             speechAvail = true;
+            speechDiag.state = "開始";
           } catch (_) {
             speechRec = null;
             speechAvail = false;
+            speechDiag.state = "開始失敗";
           }
         }
 
@@ -2328,10 +2360,17 @@
             fpsFrames = 0;
             const modeLabel = aud.mode === "mic" ? "mic"
               : aud.mode === "fake" ? "fake" : "デモ";
+            // in mic mode, append the live speech diagnostic so the user can
+            // see whether recognition is actually working on their device
+            const speechInfo = aud.mode === "mic"
+              ? ` / 音声 ${speechDiag.state}・認識${speechDiag.got}件`
+                + (speechDiag.heard ? `・聴取${speechDiag.heard}` : "")
+                + (speechDiag.err ? `・${speechDiag.err}` : "")
+              : "";
             readout.textContent = `FPS ${fps.toFixed(0)} / 描画 ${canvas.width}×${
               canvas.height} / 文字 ${bodies.length}・堆積 ${
               Math.round(meanH * 100)}% / 入力 ${modeLabel}${
-              lastWord ? " 「" + lastWord + "」" : ""}`;
+              lastWord ? " 「" + lastWord + "」" : ""}${speechInfo}`;
           }
           requestAnimationFrame(frame);
         }
