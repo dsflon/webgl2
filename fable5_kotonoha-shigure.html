@@ -2066,6 +2066,13 @@
             r.continuous = false;          // short utterances, re-created each time
             r.interimResults = true;       // interim = proof audio is reaching SR
             r.maxAlternatives = 3;
+            // per-session salvage state: many sessions on mobile produce
+            // interim text but die (abort / network hiccup / timeout) before a
+            // FINAL ever arrives — previously that speech was silently thrown
+            // away ("たまに出るがなかなか出ない" の正体). Keep the latest
+            // interim text; if the session ends with no final, emit it.
+            let lastInterim = "";
+            let gotFinal = false;
             r.onstart = () => { speechDiag.state = "聴取中"; };
             r.onspeechstart = () => { speechDiag.state = "発話検知"; };
             r.onresult = (event) => {
@@ -2075,10 +2082,12 @@
                 if (res.isFinal) {
                   speechDiag.got++;
                   speechFatals = 0;
+                  gotFinal = true;
                   speechDiag.state = "認識";
                   emitTranscript(res[0].transcript);
                 } else {
                   speechDiag.heard++;
+                  if (res[0].transcript) lastInterim = res[0].transcript;
                   speechDiag.state = "認識中…";
                   // INSTANT feedback while the recogniser is still working:
                   // the backend only finalises a phrase ~1s after you stop
@@ -2117,6 +2126,15 @@
             };
             r.onend = () => {
               speechActive = false;
+              // SALVAGE: the session heard words (interim) but died before a
+              // final — emit the last interim instead of dropping the speech.
+              // Kana-not-kanji sometimes, but a fallen word beats silence.
+              if (!gotFinal && lastInterim && aud.mode === "mic") {
+                speechDiag.got++;
+                speechDiag.state = "認識(補完)";
+                emitTranscript(lastInterim);
+                lastInterim = "";
+              }
               if (aud.mode !== "mic") return;
               // GIVE UP on a permanently-broken recogniser: several fatal
               // errors and not one result → hand the mic to the analyser so
@@ -2127,7 +2145,9 @@
                 startAnalyser();
                 return;
               }
-              setTimeout(createAndStart, 200);
+              // restart fast: this gap is a deaf window — speech begun inside
+              // it is lost entirely, one cause of "words rarely appear"
+              setTimeout(createAndStart, 80);
             };
             try {
               r.start();
