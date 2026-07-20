@@ -1736,9 +1736,12 @@
                   a.cy -= ny * overlap * wa;
                   b2.cx += nx * overlap * wb;
                   b2.cy += ny * overlap * wb;
-                  // vertical support: the LOWER body holds up the UPPER one
-                  if (dy < -0.2 * rr) a.sup = true;      // b2 below a → a supported
-                  else if (dy > 0.2 * rr) b2.sup = true; // a below b2 → b2 supported
+                  // NOTE: body–body contact does NOT grant "support" for the
+                  // settle damping. Two glyphs touching in mid-air would each
+                  // think the other holds it up → both get damped → the whole
+                  // cluster FLOATS (observed on mobile). Only the frozen base
+                  // (real ink underneath, maxPen>0 above) grants support, so a
+                  // cluster with nothing solid below always keeps falling.
                   const rvx = b2.vx - a.vx;
                   const rvy = b2.vy - a.vy;
                   const vn = rvx * nx + rvy * ny;
@@ -1785,11 +1788,15 @@
             for (let bi = bodies.length - 1; bi >= 0; bi--) {
               const b = bodies[bi];
               if (b.glyphs) continue;   // never freeze an intact clump mid-air
-              const col = Math.max(1, Math.min(NC - 2, Math.floor(b.cx / cw)));
-              const surf = Math.max(liveTopCol[col - 1], liveTopCol[col], liveTopCol[col + 1]);
-              // buried = enough live ink stacked above → occluded, so freezing
-              // it into the base is invisible and drops it from the sim
-              if (surf - (b.cy + b.hh) > 0.14) {
+              const col = Math.max(0, Math.min(NC - 1, Math.floor(b.cx / cw)));
+              // buried = live ink stacked directly above IN THIS COLUMN (own
+              // column only — using the neighbour max froze the whole surface
+              // next to a tall stack, killing the dynamic top layer). The
+              // top-most body of each column stays live, so the surface can
+              // still be knocked over / avalanche. 0.28 ≈ ~3 glyph layers stay
+              // live (a thicker dynamic surface = more collapse); anything
+              // deeper is occluded and frozen into the base (bounds the count).
+              if (liveTopCol[col] - (b.cy + b.hh) > 0.28) {
                 stampBody(b);
                 bodies.splice(bi, 1);
               }
