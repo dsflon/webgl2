@@ -1,0 +1,1751 @@
+<!doctype html>
+<!--
+  fable5_uchimizu.html — WebGL2「打ち水(Uchimizu — Cooling by Water)」— ポインタ入力
+
+  概要:
+  記録的酷暑への「対処」を体験にする作品。陽炎の立つ乾いた灼熱の路面を、指
+  (タップ/ドラッグ)でなぞると水を撒ける。撒いた水は Stable Fluids の流体場に
+  『濡れ密度』として注入され、速度場で移流・拡散して路面に広がる。乾湿の境界に
+  濃く暗い『濡れの縁』ができ、涼の帯として通り抜ける。濡れた面は地熱で時間とともに
+  蒸発して薄れ、蒸発分は浮力を持つ『湯気密度』へ移って白い湯気として立ちのぼる。
+  触らない待機時間は路面がじりじり乾き、灼けた空気の陽炎(heat haze)の屈折ゆらぎが
+  domain warp で戻る — この乾き↔打ち水のループそのものが主役である。カメラ・マイクは
+  使わず、路面・水・陽炎・湯気はすべてジェネラティブに合成する。
+  <meta name="art-input" content="none"> 宣言(カメラ規約の免除プロファイル)。
+  入力が全く無くても作品は成立し(乾いた路面+陽炎)、数秒無操作なら淡いヒントを出す。
+
+  実行方法:
+    python3 -m http.server 8888 → http://localhost:8888/fable5_uchimizu.html
+    (指/マウスでなぞると水が撒ける。数秒触らないと陽炎の待機状態に戻る)
+    ?fakesource=1 … 実ポインタなしで、決定的な散水ストローク列(画面中央を横切る
+                    ドラッグ)を一定周期で発行し、注入→拡散→蒸発→湯気→乾きの全経路を
+                    駆動する。周期の後半は放置で陽炎へ戻る様子も含む(--motion 前提)。
+    ?freeze=1     … 時間駆動(陽炎・湯気・蒸発)を停止し決定的な静止フレームを出す。
+                    fixed-dt(1/60)の preroll で場を育ててから dt=0 で保持。乱数は
+                    座標由来(hash に時間を混ぜない)ので毎回同じ絵になる。
+    デバッグ表示: 0=最終合成 / 1=濡れ密度場 / 2=速度場(可視化) / 3=湯気密度 /
+                  4=標本(乾湿の温度色見本 + 陽炎ゆらぎのテストパッチ + 水面の照り見本)
+
+  様式解析の要約(視覚的不変量。優先度 1 > 3 > 2 > 4 > 6 > 5):
+    1. 濡れの注入と広がり・濡れの縁(場/知覚) — ポインタ軌跡に沿って濡れ密度を
+       Stable Fluids 場へ splat 注入、移動速度を速度場へ与える。水膜が移流・拡散で
+       広がり、濡れ密度の勾配を edge darkening で強調して『濡れの縁』を暗帯にする。
+    3. 待機時の乾き→陽炎(時間/知覚) — 乾き度に比例して背景路面のサンプル座標を
+       時間発展 fbm の domain warp で歪める。歪みは下→上で強く、濡れ域では抑える。
+       放置状態そのものが主役級に成立する。
+    2. 蒸発と湯気の立ちのぼり(物質/時間) — 濡れ密度に時間減衰(乾き=高温域ほど強い)。
+       蒸発分を浮力(velocity 場への上向き buoyancy 結合)を持つ湯気密度へ移し、
+       curl noise で揺らして ping-pong で clamp。撒くほど一時濡れ、放置で必ず乾く。
+    4. 温度対比の色(色) — 濡れ密度から oklab で暖色(乾=白茶〜赤みの照り)→
+       低彩度の青暗(濡)を補間。照り返しの白飛びは上限、周縁は edge darkening のビネット。
+    6. 発散しない定常ループ(時間/場) — 濡れ・湯気密度を ping-pong 各 step で clamp、
+       注入は既濡れ域でテーパ、速度平滑に ema、蒸発率で散逸>注入の域を必ず残す(§A5)。
+    5. 水面の照り(マーク/物質) — 濡れ密度勾配から擬似法線を作り、固定光方向との
+       ハイライトを濡れ度でゲート。路面は fbm マイクロ凹凸、水面だけ滑らか。
+
+  パイプライン図(SIM=半解像度・長辺≤512・float RG16F ping-pong。float 非対応時 RGBA8):
+    [CPU input ] pointer/touch(または fakesource 決定列)→ 直近軌跡を線分補間し
+                 最大16 splat/フレーム(pos, vel, wet量)。DPR 込みで canvas→UV 変換。
+    [S1 advectVel ] vel(RG,half) =self-advect=> vel'            (毎 substep 1/60)
+    [S2 forces    ] vel' + 浮力(湯気) + vorticity + ambient curl + ポインタ impulse
+    [S3 divergence] vel'' => div(R,half)
+    [S4 jacobi×18 ] (div, pres_prev) => pres(R,half) ping-pong
+    [S5 gradSub   ] vel'' - grad(pres) => vel(非圧縮)
+    [S6 advectDye ] dye(R=濡れ,G=湯気) を vel で移流 + 拡散(spread) + 蒸発(evap,
+                    乾き域ほど強) + 注入(splat, 既濡れテーパ) + clamp[0,cap]
+    [reduce    ] 20フレームごと dye.R を 32×32 に縮約 → readback → 濡れ率%
+    [composite ] フル解像度: 路面 fbm × 陽炎 domain warp × oklab 温度色 + 濡れの縁
+                 edge darkening + 水面 sheen + 湯気加算 + 周縁ビネット + uDebug 0..4
+    [resize    ] SIM 再確保。dye は world 座標リマップで状態保持。vel/pres はクリア。
+
+  スライダーの説明(全て単一 state に集約 / DEFAULTS と RESET LOOK):
+    water   水量     一回の注入で撒かれる濡れ密度と初速
+    evap    蒸発の速さ 濡れ密度の時間減衰率(大きいほど早く乾く)
+    spread  広がり   濡れ密度の拡散係数と移流の効き
+    haze    陽炎の強さ 乾き域の domain warp 屈折振幅(下→上で増加)
+    vapor   湯気     蒸発→湯気密度への変換量と浮力
+    heat    路面の暑さ 乾き色の色温度(白茶〜赤みの照り)
+    cool    濡れの涼  濡れ色の彩度低下と青みへの沈み込み(温度対比)
+    sheen   濡れの照り 水面ハイライトの強さ
+
+  依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00。外部ライブラリ/アセット無し)。
+-->
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="art-input" content="none" />
+    <title>打ち水 — Uchimizu (WebGL2 pointer)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #24211c;
+        --ink: #f0e9dc;
+        --muted: rgba(240, 233, 220, 0.66);
+        --panel: rgba(28, 24, 18, 0.86);
+        --line: rgba(240, 233, 220, 0.18);
+        --accent: #4fb3d0;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #26221c, #2e2820 55%, #24201a);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        background: var(--bg); touch-action: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(240, 233, 220, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(240, 233, 220, 0.14); }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(240, 233, 220, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 92px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(240, 233, 220, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #hint {
+        position: fixed; left: 50%; top: 62%; transform: translate(-50%, -50%);
+        z-index: 6; padding: 10px 18px; border: 1px solid var(--line);
+        border-radius: 999px; background: rgba(28, 24, 18, 0.5);
+        color: var(--ink); font-size: 12px; letter-spacing: 0.14em;
+        pointer-events: none; opacity: 0; transition: opacity 0.6s ease;
+        backdrop-filter: blur(3px); text-shadow: 0 1px 6px rgba(0,0,0,0.5);
+      }
+      #hint.show { opacity: 0.9; }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(20, 17, 12, 0.82);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0; font-size: 11px; line-height: 1.6; }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 pointer-driven uchimizu (water on hot pavement)"></canvas>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+
+    <section id="panel" class="panel" aria-label="Uchimizu controls"></section>
+
+    <div id="hint" aria-hidden="true">タップ / ドラッグで打ち水</div>
+
+    <div id="overlay" class="hidden" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle"></h2>
+        <p id="overlayText"></p>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const hintEl = document.getElementById("hint");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?freeze=1 — deterministic still frame: the fluid field is developed
+        // by a fixed-dt (1/60) pre-roll (driven by the fake stroke script when
+        // fakesource is on), then time holds at dt = 0. Hashes are seeded by
+        // coordinates only (repo §8-9) so the still is flicker-free.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakesource=1 — synthetic input: a deterministic scripted list of
+        // watering strokes (a drag across the centre, then idle) drives the
+        // whole pipeline. No real pointer needed. Screen keeps moving for
+        // the --motion check (both the stroke AND the ambient haze shimmer).
+        const FAKESOURCE = QUERY.get("fakesource") === "1";
+
+        const DEBUG_MODES = [
+          "最終合成",
+          "濡れ密度場",
+          "速度場",
+          "湯気密度",
+          "標本(温度色・陽炎・照り)",
+        ];
+
+        const DEFAULTS = {
+          water: 0.6,
+          evap: 0.5,
+          spread: 0.5,
+          haze: 0.55,
+          vapor: 0.5,
+          heat: 0.6,
+          cool: 0.55,
+          sheen: 0.45,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          // reduced-motion: stop the ambient shimmer / steam wiggle by default.
+          // (The interactive fluid still resolves; only the ambient turbulence
+          //  and heat-haze phase are frozen — order §6 / §7 "揺れを止める".)
+          pauseAnim: reducedMotion,
+        };
+
+        const uiRows = [
+          ["water", "水量", "一回の注入で撒かれる濡れ密度と初速", 0, 1, 0.01],
+          ["evap", "蒸発の速さ", "濡れ密度の時間減衰率(大きいほど早く乾く)", 0, 1, 0.01],
+          ["spread", "広がり", "濡れ密度の拡散係数と移流の効き", 0, 1, 0.01],
+          ["haze", "陽炎の強さ", "乾き域の domain warp 屈折振幅(下→上で増加)", 0, 1, 0.01],
+          ["vapor", "湯気", "蒸発→湯気密度への変換量と浮力", 0, 1, 0.01],
+          ["heat", "路面の暑さ", "乾き色の色温度(白茶〜赤みの照り)", 0, 1, 0.01],
+          ["cool", "濡れの涼", "濡れ色の彩度低下と青みへの沈み込み", 0, 1, 0.01],
+          ["sheen", "濡れの照り", "水面ハイライトの強さ", 0, 1, 0.01],
+        ];
+
+        // プリセット(標本 = uDebug 4 で温度色見本の承認を得る前提)
+        const PRESETS = {
+          炎天のアスファルト: { water: 0.55, evap: 0.72, spread: 0.45, haze: 0.82,
+            vapor: 0.58, heat: 0.85, cool: 0.42, sheen: 0.4 },
+          夕暮れの打ち水: { water: 0.66, evap: 0.4, spread: 0.55, haze: 0.42,
+            vapor: 0.5, heat: 0.5, cool: 0.62, sheen: 0.52 },
+          石畳の涼: { water: 0.72, evap: 0.3, spread: 0.62, haze: 0.3,
+            vapor: 0.44, heat: 0.4, cool: 0.76, sheen: 0.6 },
+        };
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>打ち水 — Uchimizu</h1>
+          <p>
+            陽炎の立つ乾いた灼熱の路面を指でなぞると<b>水が撒けます</b>。
+            撒いた水は流体場として広がり、濡れの縁が涼の帯として通り、
+            地熱で湯気を上げながら蒸発します。触らずにいると路面は乾き、
+            陽炎の屈折ゆらぎが戻ります。<b>乾き↔打ち水のループそのものが主役です。</b>
+          </p>
+          <div class="select-row">
+            <span>プリセット</span>
+            <select id="presetSel" aria-label="プリセット">
+              <option value="">— 選択 —</option>
+              ${Object.keys(PRESETS)
+                .map((k) => `<option value="${k}">${k}</option>`)
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>揺れを止める(陽炎・湯気)</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+            <button id="hideUi" type="button">HIDE UI</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 描画 -- / 濡れ率 -- / 入力 --</div>
+            <span class="badge" id="glBadge">WebGL2 · Stable Fluids · oklab · pointer</span>
+          </div>
+          </div>
+        `;
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("presetSel").addEventListener("change", (event) => {
+          const preset = PRESETS[event.currentTarget.value];
+          if (preset) Object.keys(preset).forEach((k) => setSlider(k, preset[k]));
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          document.getElementById("presetSel").value = "";
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        document.getElementById("hideUi").addEventListener("click", () =>
+          setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-uchimizu-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function setOverlay(title, text, show) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          overlay.classList.toggle("hidden", !show);
+        }
+
+        /* ==================================================================
+           WebGL2 setup
+        ================================================================== */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "WEBGL2 UNAVAILABLE",
+            "この作品は WebGL2 を必要とします。ハードウェアアクセラレーションが有効な最新のブラウザでお試しください。",
+            true,
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // float render targets (Stable Fluids fields). Fallback to RGBA8 with a
+        // signed encode when EXT_color_buffer_float is missing (repo §8-3).
+        const FLOAT_OK = !!gl.getExtension("EXT_color_buffer_float");
+        gl.getExtension("OES_texture_float_linear"); // harmless if absent (16F is core-filterable)
+
+        /* ------------------------------------------------------------------
+           Shared GLSL — fullscreen VS, encode/decode header, noise, oklab
+        ------------------------------------------------------------------ */
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Signed fields (velocity, pressure, divergence) are stored directly in
+        // float mode; in the RGBA8 fallback they are packed as v/(2R)+0.5. The
+        // scalar fields (wet, vapor) live in [0,1] in BOTH modes (no encode).
+        const CHUNK_CODEC = FLOAT_OK
+          ? `
+            vec2 decV(vec4 t){ return t.rg; }
+            vec4 encV(vec2 v){ return vec4(v, 0.0, 1.0); }
+            float decS(vec4 t){ return t.r; }
+            vec4 encS(float s){ return vec4(s, 0.0, 0.0, 1.0); }
+          `
+          : `
+            const float VRANGE = 10.0;
+            vec2 decV(vec4 t){ return (t.rg * 2.0 - 1.0) * VRANGE; }
+            vec4 encV(vec2 v){ return vec4(clamp(v / VRANGE * 0.5 + 0.5, 0.0, 1.0), 0.0, 1.0); }
+            float decS(vec4 t){ return (t.r * 2.0 - 1.0) * VRANGE; }
+            vec4 encS(float s){ return vec4(clamp(s / VRANGE * 0.5 + 0.5, 0.0, 1.0), 0.0, 0.0, 1.0); }
+          `;
+
+        // pcg-flavoured hash + value noise + fbm + curl noise. Seeds are
+        // POSITION-ONLY (repo §8-9): time never enters a hash, so ?freeze=1 is
+        // deterministic and the untouched dry road never flickers.
+        const CHUNK_NOISE = `
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = p - i;
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm(vec2 p) {
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 5; i++) {
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc;
+          }
+          float fbm3(vec2 p) {
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 3; i++) {
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc;
+          }
+          // curl of an fbm potential — divergence-free wiggle for steam/air
+          vec2 curlNoise(vec2 p) {
+            float e = 0.02;
+            float n1 = fbm3(p + vec2(0.0, e));
+            float n2 = fbm3(p - vec2(0.0, e));
+            float n3 = fbm3(p + vec2(e, 0.0));
+            float n4 = fbm3(p - vec2(e, 0.0));
+            return vec2(n1 - n2, -(n3 - n4)) / (2.0 * e);
+          }
+        `;
+
+        // correct oklab transform (sRGB→linear→LMS→oklab and back). The
+        // temperature ramp (dry warm → wet cool blue) is interpolated here.
+        const CHUNK_OKLAB = `
+          vec3 srgb2lin(vec3 c) {
+            return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),
+              step(0.04045, c));
+          }
+          vec3 lin2srgb(vec3 c) {
+            c = clamp(c, 0.0, 1.0);
+            return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+              step(0.0031308, c));
+          }
+          vec3 lin2oklab(vec3 c) {
+            float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+            float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+            float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+            float l_ = pow(max(l, 0.0), 1.0 / 3.0);
+            float m_ = pow(max(m, 0.0), 1.0 / 3.0);
+            float s_ = pow(max(s, 0.0), 1.0 / 3.0);
+            return vec3(
+              0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+              1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+              0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_);
+          }
+          vec3 oklab2srgb(vec3 lab) {
+            float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+            float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+            float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+            float l = l_ * l_ * l_;
+            float m = m_ * m_ * m_;
+            float s = s_ * s_ * s_;
+            vec3 lin = vec3(
+              4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+            return lin2srgb(lin);
+          }
+          vec3 oklabMix(vec3 a, vec3 b, float t) {
+            return oklab2srgb(mix(lin2oklab(srgb2lin(a)), lin2oklab(srgb2lin(b)), t));
+          }
+        `;
+
+        const SPLAT_DECL = `
+          const int MAX_SPLATS = 16;
+          uniform int uSplatCount;
+          uniform float uSplatRad;
+          uniform vec2 uSplatPos[MAX_SPLATS];
+          uniform vec2 uSplatVel[MAX_SPLATS];
+          uniform float uSplatAmt[MAX_SPLATS];
+        `;
+
+        /* ------------------------------------------------------------------
+           S1 — self-advection of the velocity field (semi-Lagrangian)
+        ------------------------------------------------------------------ */
+        const advectVelFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform float uDt;
+          uniform float uDissipate;
+          ${CHUNK_CODEC}
+          void main() {
+            vec2 v = decV(texture(uVel, vUv));
+            vec2 back = vUv - v * uDt;
+            vec2 adv = decV(texture(uVel, back));
+            adv *= uDissipate;   // ema-style velocity smoothing / damping
+            fragColor = encV(adv);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           S2 — forces: buoyancy(vapor) + vorticity confinement + ambient curl
+           + pointer/fake impulse splats. (Ambient turbulence is gated to 0 by
+           uAmbient when 揺れを止める / freeze — keeps idle truly still.)
+        ------------------------------------------------------------------ */
+        const forcesFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uDye;
+          uniform vec2 uTexel;
+          uniform float uAspect;
+          uniform float uDt;
+          uniform float uBuoy;
+          uniform float uVort;
+          uniform float uAmbient;
+          uniform float uVisc;
+          uniform float uTime;
+          ${CHUNK_CODEC}
+          ${CHUNK_NOISE}
+          ${SPLAT_DECL}
+          float curlAt(vec2 uv) {
+            float vyR = decV(texture(uVel, uv + vec2(uTexel.x, 0.0))).y;
+            float vyL = decV(texture(uVel, uv - vec2(uTexel.x, 0.0))).y;
+            float vxT = decV(texture(uVel, uv + vec2(0.0, uTexel.y))).x;
+            float vxB = decV(texture(uVel, uv - vec2(0.0, uTexel.y))).x;
+            return (vyR - vyL) - (vxT - vxB);
+          }
+          void main() {
+            vec2 v = decV(texture(uVel, vUv));
+            vec2 dye = texture(uDye, vUv).rg;
+            float vap = dye.g;
+
+            // viscosity — Laplacian smoothing toward the neighbour average.
+            // A collocated (non-staggered) grid pressure solve leaves an
+            // odd-even checkerboard null mode; a little viscosity damps it so
+            // the wet front stays a smooth film instead of a dithered checker.
+            vec2 nv = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)))
+                    + decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)))
+                    + decV(texture(uVel, vUv + vec2(0.0, uTexel.y)))
+                    + decV(texture(uVel, vUv - vec2(0.0, uTexel.y)));
+            v = mix(v, nv * 0.25, uVisc);
+
+            // buoyancy: steam rises (upward = +y). Coupled to vapor density.
+            v.y += uBuoy * vap * uDt;
+
+            // vorticity confinement — restores the small swirls advection eats
+            float wc = curlAt(vUv);
+            float wl = abs(curlAt(vUv - vec2(uTexel.x, 0.0)));
+            float wr = abs(curlAt(vUv + vec2(uTexel.x, 0.0)));
+            float wb = abs(curlAt(vUv - vec2(0.0, uTexel.y)));
+            float wt = abs(curlAt(vUv + vec2(0.0, uTexel.y)));
+            vec2 grad = vec2(wr - wl, wt - wb);
+            float gl2 = max(length(grad), 1e-5);
+            vec2 N = grad / gl2;
+            v += uVort * uAmbient * uDt * vec2(N.y * wc, -N.x * wc);
+
+            // ambient curl-noise breathing — the heat-shimmer air motion,
+            // concentrated where steam is (and a faint global term)
+            vec2 cn = curlNoise(vUv * vec2(uAspect, 1.0) * 4.5 + vec2(0.0, uTime * 0.25));
+            v += uAmbient * uDt * cn * (0.12 + 1.1 * vap);
+
+            // pointer / fake watering impulses
+            for (int i = 0; i < MAX_SPLATS; i++) {
+              if (i >= uSplatCount) break;
+              vec2 d = vUv - uSplatPos[i];
+              d.x *= uAspect;
+              float f = exp(-dot(d, d) / (uSplatRad * uSplatRad));
+              v += uSplatVel[i] * f * uDt;
+            }
+
+            fragColor = encV(v);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           S3 — divergence of the velocity field
+        ------------------------------------------------------------------ */
+        const divergenceFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_CODEC}
+          void main() {
+            float R = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0))).x;
+            float L = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0))).x;
+            float T = decV(texture(uVel, vUv + vec2(0.0, uTexel.y))).y;
+            float B = decV(texture(uVel, vUv - vec2(0.0, uTexel.y))).y;
+            float div = 0.5 * ((R - L) + (T - B));
+            fragColor = encS(div);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           S4 — Jacobi pressure iteration (∇²p = div)
+        ------------------------------------------------------------------ */
+        const jacobiFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPres;
+          uniform sampler2D uDiv;
+          uniform vec2 uTexel;
+          ${CHUNK_CODEC}
+          void main() {
+            float L = decS(texture(uPres, vUv - vec2(uTexel.x, 0.0)));
+            float R = decS(texture(uPres, vUv + vec2(uTexel.x, 0.0)));
+            float B = decS(texture(uPres, vUv - vec2(0.0, uTexel.y)));
+            float T = decS(texture(uPres, vUv + vec2(0.0, uTexel.y)));
+            float d = decS(texture(uDiv, vUv));
+            float p = (L + R + B + T - d) * 0.25;
+            fragColor = encS(p);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           S5 — subtract the pressure gradient (make velocity divergence-free)
+        ------------------------------------------------------------------ */
+        const gradSubFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uPres;
+          uniform vec2 uTexel;
+          ${CHUNK_CODEC}
+          void main() {
+            float L = decS(texture(uPres, vUv - vec2(uTexel.x, 0.0)));
+            float R = decS(texture(uPres, vUv + vec2(uTexel.x, 0.0)));
+            float B = decS(texture(uPres, vUv - vec2(0.0, uTexel.y)));
+            float T = decS(texture(uPres, vUv + vec2(0.0, uTexel.y)));
+            vec2 v = decV(texture(uVel, vUv));
+            v -= 0.5 * vec2(R - L, T - B);
+            fragColor = encV(v);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           S5b — post-projection velocity smoothing. The collocated-grid
+           pressure gradient subtraction (S5) leaves an odd-even checkerboard
+           null mode; a Laplacian smooth applied AFTER projection damps that
+           high-frequency mode (spares the bulk flow) so the advected dye front
+           is a smooth film, not a dithered checker.
+        ------------------------------------------------------------------ */
+        const smoothVelFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          uniform float uVisc;
+          ${CHUNK_CODEC}
+          void main() {
+            vec2 v = decV(texture(uVel, vUv));
+            vec2 nv = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)))
+                    + decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)))
+                    + decV(texture(uVel, vUv + vec2(0.0, uTexel.y)))
+                    + decV(texture(uVel, vUv - vec2(0.0, uTexel.y)));
+            fragColor = encV(mix(v, nv * 0.25, uVisc));
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           S6 — dye advect + diffuse + evaporate(wet→vapor) + inject + clamp.
+           Wet stays grounded (vertical advection reduced); vapor rides the full
+           velocity so buoyancy lifts it. Evaporation is stronger where wet is
+           thin/hot; vapor dissipates with height (containment §A5). Injection
+           tapers in already-wet areas so density can't run away.
+        ------------------------------------------------------------------ */
+        const advectDyeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uDye;
+          uniform vec2 uTexel;
+          uniform float uAspect;
+          uniform float uDt;
+          uniform float uSpread;
+          uniform float uEvap;
+          uniform float uVaporGain;
+          uniform float uWetCap;
+          ${CHUNK_CODEC}
+          ${SPLAT_DECL}
+          void main() {
+            vec2 v = decV(texture(uVel, vUv));
+            vec2 backWet = vUv - vec2(v.x, v.y * 0.30) * uDt;
+            vec2 backVap = vUv - v * uDt;
+            float wet = texture(uDye, backWet).r;
+            float vap = texture(uDye, backVap).g;
+
+            // diffusion (spread) on wet — a convex blend toward the neighbour
+            // average. This is an unconditionally-stable low-pass; the earlier
+            // explicit Laplacian (wet += k·∇²) oscillated into a checkerboard
+            // once k approached the forward-Euler limit (diagnosed at spread≈0).
+            float navg = 0.25 * (
+                texture(uDye, vUv + vec2(uTexel.x, 0.0)).r
+              + texture(uDye, vUv - vec2(uTexel.x, 0.0)).r
+              + texture(uDye, vUv + vec2(0.0, uTexel.y)).r
+              + texture(uDye, vUv - vec2(0.0, uTexel.y)).r);
+            wet = mix(wet, navg, uSpread);
+
+            // evaporation: thin/hot film dries faster. Evaporated water → steam.
+            float evRate = uEvap * (0.5 + 1.3 * (1.0 - clamp(wet, 0.0, 1.0)));
+            float ev = wet * (1.0 - exp(-uDt * evRate));
+            wet -= ev;
+            vap += ev * uVaporGain;
+
+            // vapor dissipation — faster as it rises (封じ込め; no whiteout)
+            float rise = smoothstep(0.35, 1.0, vUv.y);
+            vap *= exp(-uDt * (0.55 + 1.7 * rise));
+
+            // watering injection — deposit TOWARD a target wet level via an
+            // idempotent max(). This is frame-rate independent (unlike the old
+            // additive rate, which a passing stroke barely raised above ~0.1)
+            // and bounded by uSplatAmt ≤ uWetCap, so density can never run away.
+            for (int i = 0; i < MAX_SPLATS; i++) {
+              if (i >= uSplatCount) break;
+              vec2 d = vUv - uSplatPos[i];
+              d.x *= uAspect;
+              float f = exp(-dot(d, d) / (uSplatRad * uSplatRad));
+              wet = max(wet, min(uSplatAmt[i] * f, uWetCap));
+            }
+
+            wet = clamp(wet, 0.0, uWetCap);
+            vap = clamp(vap, 0.0, 0.9);
+            fragColor = vec4(wet, vap, 0.0, 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           reduce — average wet density into a small target for the coverage %
+           readout (avoids a per-frame full-res readPixels, repo §13)
+        ------------------------------------------------------------------ */
+        const reduceFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDye;
+          uniform vec2 uTexel;
+          void main() {
+            float acc = 0.0;
+            for (int j = -1; j <= 1; j++) {
+              for (int i = -1; i <= 1; i++) {
+                float w = texture(uDye, vUv + vec2(float(i), float(j)) * uTexel * 6.0).r;
+                acc += smoothstep(0.06, 0.22, w);
+              }
+            }
+            fragColor = vec4(vec3(acc / 9.0), 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           copyDye — world-space remap of the wet/vapor field on resize
+           (state-preserving; centre stays centre)
+        ------------------------------------------------------------------ */
+        const copyDyeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform float uAspect;
+          uniform float uOldAspect;
+          void main() {
+            float wx = vUv.x * uAspect - 0.5 * (uAspect - uOldAspect);
+            vec2 old = vec2(wx / uOldAspect, vUv.y);
+            if (old.x < 0.0 || old.x > 1.0) { fragColor = vec4(0.0); return; }
+            fragColor = texture(uSrc, old);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           roadFS — bake the dry asphalt colour ONCE (fbm micro-bumps +
+           aggregate grain × oklab warm tint). Re-baked only on resize / heat
+           change so the per-frame composite pays a single texture fetch
+           instead of multi-octave fbm (software-GL relief, CRAFT-style bake).
+        ------------------------------------------------------------------ */
+        const roadFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform float uAspect;
+          uniform float uHeat;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          void main() {
+            vec2 rp = vec2(vUv.x * uAspect, vUv.y);
+            float bump = fbm(rp * 22.0) * 0.55 + fbm(rp * 68.0) * 0.30 + fbm(rp * 155.0) * 0.15;
+            float grain = hash12(floor(rp * 430.0));
+            float roadShade = 0.80 + 0.40 * (bump - 0.5) + 0.055 * (grain - 0.5);
+            vec3 dry = oklabMix(vec3(0.52, 0.49, 0.46), vec3(0.88, 0.79, 0.66), uHeat);
+            dry = oklabMix(dry, vec3(0.82, 0.54, 0.42), uHeat * 0.35);   // reddish照り
+            fragColor = vec4(clamp(dry * roadShade, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           composite — the full-resolution look pass (+ uDebug views)
+        ------------------------------------------------------------------ */
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uDye;
+          uniform sampler2D uVel;
+          uniform vec2 uRes;
+          uniform vec2 uSimTexel;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uHaze;
+          uniform float uHeat;
+          uniform float uCool;
+          uniform float uSheen;
+          uniform int uDebug;
+          uniform sampler2D uRoad;   // baked dry road colour (perf: no per-frame fbm5)
+          uniform vec3 uWetCol;      // wet endpoint colour (CPU oklab from cool)
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+
+          vec3 dryColor() {
+            vec3 c = oklabMix(vec3(0.52, 0.49, 0.46), vec3(0.88, 0.79, 0.66), uHeat);
+            return oklabMix(c, vec3(0.82, 0.54, 0.42), uHeat * 0.35); // reddish照り
+          }
+          vec3 wetColor() {
+            return oklabMix(vec3(0.20, 0.23, 0.27), vec3(0.06, 0.105, 0.16), uCool);
+          }
+
+          void main() {
+            float wet = texture(uDye, vUv).r;
+            float vap = texture(uDye, vUv).g;
+
+            if (uDebug == 1) {   // 濡れ密度場
+              fragColor = vec4(vec3(clamp(wet, 0.0, 1.0)), 1.0);
+              return;
+            }
+            if (uDebug == 2) {   // 速度場(x=R, y=G, 中間=0.5)
+              vec2 v = texture(uVel, vUv).rg;
+              vec3 c = vec3(0.5 + 0.5 * clamp(v.x * 0.4, -1.0, 1.0),
+                            0.5 + 0.5 * clamp(v.y * 0.4, -1.0, 1.0), 0.5);
+              fragColor = vec4(c, 1.0);
+              return;
+            }
+            if (uDebug == 3) {   // 湯気密度
+              fragColor = vec4(vec3(clamp(vap * 1.3, 0.0, 1.0)), 1.0);
+              return;
+            }
+            if (uDebug == 4) {   // 標本
+              vec3 c;
+              if (vUv.y > 0.66) {
+                float t = clamp((vUv.x - 0.05) / 0.9, 0.0, 1.0);
+                c = oklabMix(dryColor(), wetColor(), t);
+              } else if (vUv.y > 0.33) {
+                vec2 gp = vec2(vUv.x, (vUv.y - 0.33) / 0.33);
+                vec2 wq = gp * 4.5 + vec2(0.0, uTime * 0.9);
+                vec2 warp = vec2(fbm(wq), fbm(wq + vec2(9.0, 3.0))) - 0.5;
+                vec2 q = gp + warp * (0.2 + uHaze) * 0.08 * pow(gp.y, 1.2);
+                float grid = max(step(0.92, fract(q.x * 9.0)), step(0.92, fract(q.y * 9.0)));
+                c = mix(vec3(0.22, 0.19, 0.16), vec3(0.78, 0.62, 0.46), grid);
+              } else {
+                vec2 d = (vUv - vec2(0.5, 0.16)) * vec2(uAspect, 1.0);
+                float wb = exp(-dot(d, d) / 0.02);
+                vec3 c0 = oklabMix(dryColor(), wetColor(), smoothstep(0.0, 0.55, wb));
+                vec3 Ndir = normalize(vec3(-(-2.0 * d * wb) * 3.0, 1.0));
+                float spec = pow(max(dot(Ndir, normalize(vec3(0.35, 0.5, 0.78))), 0.0), 42.0)
+                  * (0.4 + uSheen) * smoothstep(0.1, 0.5, wb);
+                c = c0 + spec * vec3(0.85, 0.93, 1.0);
+              }
+              fragColor = vec4(clamp(c, vec3(0.03), vec3(0.93)), 1.0);
+              return;
+            }
+
+            // ---- final composite ----
+            vec2 p = vec2(vUv.x * uAspect, vUv.y);
+
+            // heat-haze domain warp: rising shimmer, stronger upward, gated by
+            // dryness (wet areas don't shimmer). Time enters only as a phase.
+            // (fbm3 — the road pattern itself is baked into uRoad, so the only
+            //  per-frame fbm is this shimmer offset.)
+            float dryness = 1.0 - smoothstep(0.03, 0.4, wet);
+            float up = pow(clamp(vUv.y, 0.0, 1.0), 1.25);
+            vec2 wq = p * 3.2 + vec2(0.0, uTime * 0.85);
+            vec2 warp = vec2(fbm3(wq), fbm3(wq + vec2(13.1, 7.7))) - 0.5;
+            warp += 0.6 * (vec2(fbm3(p * 8.5 + vec2(0.0, uTime * 1.7)),
+                                fbm3(p * 8.5 + vec2(5.0, uTime * 2.1))) - 0.5);
+            float hazeAmp = uHaze * dryness * up;
+            vec2 rUv = vUv + warp * hazeAmp * vec2(0.058, 0.038);
+
+            // baked dry asphalt sampled at the warped coordinate (the mirage)
+            vec3 dryC = texture(uRoad, rUv).rgb;
+
+            // Smoothed wet field for shading — the half-resolution dye upsamples
+            // with sim-grid facets, so a 5-tap average over ~3 texels gives a
+            // smooth film (invariant 5: the water surface is smooth, not diced).
+            float t = uSimTexel.x * 3.0;
+            float ty = uSimTexel.y * 3.0;
+            float wl = texture(uDye, vUv - vec2(t, 0.0)).r;
+            float wr = texture(uDye, vUv + vec2(t, 0.0)).r;
+            float wb = texture(uDye, vUv - vec2(0.0, ty)).r;
+            float wt = texture(uDye, vUv + vec2(0.0, ty)).r;
+            float wetS = wet * 0.34 + 0.165 * (wl + wr + wb + wt);
+            vec2 g = vec2(wr - wl, wt - wb);
+
+            // wet reaches the cool colour quickly so the dry road grain does
+            // not speckle through a half-wet film
+            float wetAmt = smoothstep(0.02, 0.20, wetS);
+            vec3 col = oklabMix(dryC, uWetCol, wetAmt);
+
+            // 濡れの縁 — edge darkening from the (smoothed) wet-density gradient
+            float edge = length(g);
+            col *= 1.0 - clamp(edge * 6.0, 0.0, 0.60) * smoothstep(0.006, 0.10, wetS);
+
+            // 水面の照り — one broad soft highlight from the smoothed wet normal,
+            // gated hard by coverage so it never sparkles on the dry road
+            vec3 Nrm = normalize(vec3(-g * 11.0, 1.0));
+            vec3 Ldir = normalize(vec3(0.30, 0.44, 0.85));
+            float spec = pow(max(dot(Nrm, Ldir), 0.0), 14.0)
+              * uSheen * smoothstep(0.10, 0.42, wetS);
+            col += clamp(spec, 0.0, 0.40) * vec3(0.80, 0.90, 1.0);
+            // broad soft sky glaze on the wet film (cheap linear tint —
+            // reads as "water is here" without a per-pixel oklab call)
+            col = mix(col, mix(col, vec3(0.42, 0.60, 0.78), 0.5), 0.22 * wetAmt);
+
+            // 逃げ水 / 照り返し — a shimmering bright glare band near the top of
+            // the dry road. It is sampled through the SAME warp (rUv) as the
+            // road, so it wobbles with the heat haze — the road-mirage that
+            // makes the untouched idle state read as blazing hot.
+            float glare = smoothstep(0.42, 1.0, rUv.y) * dryness * (0.08 + 0.10 * uHaze);
+            col += glare * vec3(0.97, 0.91, 0.79);
+
+            // 湯気 — additive whitish steam, capped (no whiteout, §A5; longrun
+            // headroom is large — background mean ≈127/255 with 0% white)
+            col += clamp(vap, 0.0, 0.9) * 0.55 * vec3(0.93, 0.95, 0.98);
+
+            //周縁ビネット(edge darkening) + aged warm burn
+            float rr = length((vUv - 0.5) * vec2(uAspect, 1.0))
+              / (0.5 * length(vec2(uAspect, 1.0)));
+            col *= 1.0 - 0.20 * smoothstep(0.55, 1.08, rr);
+            col = mix(col, col * vec3(0.92, 0.82, 0.66),
+              0.28 * smoothstep(0.78, 1.16, rr));
+
+            col = clamp(col, vec3(0.02), vec3(0.92));
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        /* ==================================================================
+           Program + target plumbing
+        ================================================================== */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          advectVel: createProgram(fullscreenVS, advectVelFS),
+          forces: createProgram(fullscreenVS, forcesFS),
+          divergence: createProgram(fullscreenVS, divergenceFS),
+          jacobi: createProgram(fullscreenVS, jacobiFS),
+          gradSub: createProgram(fullscreenVS, gradSubFS),
+          smoothVel: createProgram(fullscreenVS, smoothVelFS),
+          advectDye: createProgram(fullscreenVS, advectDyeFS),
+          reduce: createProgram(fullscreenVS, reduceFS),
+          copyDye: createProgram(fullscreenVS, copyDyeFS),
+          road: createProgram(fullscreenVS, roadFS),
+          composite: createProgram(fullscreenVS, compositeFS),
+        };
+
+        const SPLAT_U = ["uSplatCount", "uSplatRad", "uSplatPos", "uSplatVel", "uSplatAmt"];
+        const locations = {
+          advectVel: getLocations(programs.advectVel, ["uVel", "uDt", "uDissipate"]),
+          forces: getLocations(programs.forces, [
+            "uVel", "uDye", "uTexel", "uAspect", "uDt", "uBuoy", "uVort",
+            "uAmbient", "uVisc", "uTime", ...SPLAT_U,
+          ]),
+          divergence: getLocations(programs.divergence, ["uVel", "uTexel"]),
+          jacobi: getLocations(programs.jacobi, ["uPres", "uDiv", "uTexel"]),
+          gradSub: getLocations(programs.gradSub, ["uVel", "uPres", "uTexel"]),
+          smoothVel: getLocations(programs.smoothVel, ["uVel", "uTexel", "uVisc"]),
+          advectDye: getLocations(programs.advectDye, [
+            "uVel", "uDye", "uTexel", "uAspect", "uDt", "uSpread", "uEvap",
+            "uVaporGain", "uWetCap", ...SPLAT_U,
+          ]),
+          reduce: getLocations(programs.reduce, ["uDye", "uTexel"]),
+          copyDye: getLocations(programs.copyDye, ["uSrc", "uAspect", "uOldAspect"]),
+          road: getLocations(programs.road, ["uAspect", "uHeat"]),
+          composite: getLocations(programs.composite, [
+            "uDye", "uVel", "uRes", "uSimTexel", "uAspect", "uTime",
+            "uHaze", "uHeat", "uCool", "uSheen", "uDebug", "uRoad", "uWetCol",
+          ]),
+        };
+
+        // internal formats for the fluid fields (float or RGBA8 fallback).
+        // The DYE field is ALWAYS RGBA8: it is bounded to [0,1] and is the
+        // texture the composite upsamples for display, and 16-bit-float LINEAR
+        // filtering is not implemented on every GL backend (swiftshader point-
+        // samples it → sim-grid halftone on the wet front). RGBA8 is linear-
+        // filterable everywhere, so the water film stays smooth.
+        const FMT = FLOAT_OK
+          ? {
+              vel: [gl.RG16F, gl.RG, gl.HALF_FLOAT],
+              scl: [gl.R16F, gl.RED, gl.HALF_FLOAT],
+              dye: [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
+            }
+          : {
+              vel: [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
+              scl: [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
+              dye: [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
+            };
+
+        function createTarget(width, height, fmt) {
+          const [internal, format, type] = fmt;
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (!ok) throw new Error("RENDER TARGET INCOMPLETE");
+          return { tex, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+
+        // True GPU sync (CRAFT §C4): gl.finish() is unreliable on software GL,
+        // so a 1×1 readPixels round-trip is used to drain the queue.
+        const syncPx = new Uint8Array(4);
+        function glSync() {
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+        }
+
+        /* ==================================================================
+           Fields, targets, resize
+        ================================================================== */
+
+        const SIM_MAX = 256;   // sim long-side cap (half-res, but bounded)
+        const JACOBI = FLOAT_OK ? 16 : 18;
+        const STEP = 1 / 60;
+        const MAX_SUBSTEPS = 4;
+        const REDUCE_N = 32;
+
+        const RGBA8_FMT = [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE];
+        let simW = 2, simH = 2;
+        let aspect = 1;
+        let velA, velB, dyeA, dyeB, presA, presB, divT, reduceT, roadT;
+        let velPing = false, dyePing = false;
+        let targetsReady = false;
+        let simTexelX = 0.5, simTexelY = 0.5;
+        let roadBakedHeat = -1;
+        let wetCol = [0.1, 0.14, 0.2];
+
+        function curVel() { return velPing ? velB : velA; }
+        function curDye() { return dyePing ? dyeB : dyeA; }
+
+        // JS oklab (matches the GLSL transform) — the wet endpoint colour is
+        // interpolated on the CPU once per frame and passed as a uniform, so
+        // the composite pays no per-pixel oklab for the temperature ramp except
+        // the single dry→wet mix.
+        function srgb2lin(c) {
+          return c.map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+        }
+        function lin2srgb(c) {
+          return c.map((v) => {
+            v = Math.min(1, Math.max(0, v));
+            return v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+          });
+        }
+        function lin2oklab(c) {
+          const l = 0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2];
+          const m = 0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2];
+          const s = 0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2];
+          const l_ = Math.cbrt(l), m_ = Math.cbrt(m), s_ = Math.cbrt(s);
+          return [
+            0.2104542553 * l_ + 0.793617785 * m_ - 0.0040720468 * s_,
+            1.9779984951 * l_ - 2.428592205 * m_ + 0.4505937099 * s_,
+            0.0259040371 * l_ + 0.7827717662 * m_ - 0.808675766 * s_,
+          ];
+        }
+        function oklab2lin(lab) {
+          const l_ = lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2];
+          const m_ = lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2];
+          const s_ = lab[0] - 0.0894841775 * lab[1] - 1.291485548 * lab[2];
+          const l = l_ ** 3, m = m_ ** 3, s = s_ ** 3;
+          return [
+            4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+          ];
+        }
+        function oklabMixJS(a, b, t) {
+          const la = lin2oklab(srgb2lin(a));
+          const lb = lin2oklab(srgb2lin(b));
+          return lin2srgb(oklab2lin(la.map((v, i) => v + (lb[i] - v) * t)));
+        }
+        function updateWetCol() {
+          wetCol = oklabMixJS([0.2, 0.23, 0.27], [0.06, 0.105, 0.16], state.cool);
+        }
+
+        function bakeRoad() {
+          renderPass(roadT, programs.road, () => {
+            const u = locations.road;
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uHeat, state.heat);
+          });
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          roadBakedHeat = state.heat;
+        }
+
+        function allocSim(w, h) {
+          velA = createTarget(w, h, FMT.vel);
+          velB = createTarget(w, h, FMT.vel);
+          dyeA = createTarget(w, h, FMT.dye);
+          dyeB = createTarget(w, h, FMT.dye);
+          presA = createTarget(w, h, FMT.scl);
+          presB = createTarget(w, h, FMT.scl);
+          divT = createTarget(w, h, FMT.scl);
+          // RGBA8 encodes 0-velocity / 0-pressure as 0.5; float mode as 0.
+          if (!FLOAT_OK) {
+            for (const tt of [velA, velB, presA, presB, divT]) {
+              gl.bindFramebuffer(gl.FRAMEBUFFER, tt.fbo);
+              gl.viewport(0, 0, w, h);
+              gl.clearColor(0.5, 0.5, 0.5, 1.0);
+              gl.clear(gl.COLOR_BUFFER_BIT);
+            }
+          } else {
+            for (const tt of [velA, velB, presA, presB, divT]) clearTarget(tt);
+          }
+          clearTarget(dyeA);
+          clearTarget(dyeB);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          velPing = false;
+          dyePing = false;
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const w = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const h = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width === w && canvas.height === h && targetsReady) return;
+          const oldA = canvas.width / Math.max(canvas.height, 1);
+          const hadState = targetsReady && preRoll === 0;
+          const oldDye = hadState ? curDye() : null;
+          const oldSimW = simW, oldSimH = simH;
+
+          canvas.width = w;
+          canvas.height = h;
+          aspect = w / h;
+
+          // half-resolution sim, long side capped
+          let sw = Math.max(2, Math.round(w * 0.5));
+          let sh = Math.max(2, Math.round(h * 0.5));
+          const longSide = Math.max(sw, sh);
+          if (longSide > SIM_MAX) {
+            const k = SIM_MAX / longSide;
+            sw = Math.max(2, Math.round(sw * k));
+            sh = Math.max(2, Math.round(sh * k));
+          }
+          simW = sw; simH = sh;
+          simTexelX = 1 / sw; simTexelY = 1 / sh;
+
+          let preservedDye = null;
+          if (hadState && oldDye) {
+            // remap the wet/vapor field in world coords into a temp texture
+            preservedDye = createTarget(sw, sh, FMT.dye);
+            renderPass(preservedDye, programs.copyDye, () => {
+              const u = locations.copyDye;
+              bindTexture(0, oldDye.tex);
+              gl.uniform1i(u.uSrc, 0);
+              gl.uniform1f(u.uAspect, aspect);
+              gl.uniform1f(u.uOldAspect, oldA);
+            });
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          }
+
+          if (targetsReady) {
+            destroyTarget(velA); destroyTarget(velB);
+            destroyTarget(dyeA); destroyTarget(dyeB);
+            destroyTarget(presA); destroyTarget(presB);
+            destroyTarget(divT);
+          }
+          allocSim(sw, sh);
+
+          if (preservedDye) {
+            // copy remapped dye into the live dyeA
+            renderPass(dyeA, programs.copyDye, () => {
+              const u = locations.copyDye;
+              bindTexture(0, preservedDye.tex);
+              gl.uniform1i(u.uSrc, 0);
+              gl.uniform1f(u.uAspect, aspect);
+              gl.uniform1f(u.uOldAspect, aspect);
+            });
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            destroyTarget(preservedDye);
+            dyePing = false;
+          }
+          if (!reduceT) reduceT = createTarget(REDUCE_N, REDUCE_N, RGBA8_FMT);
+          // baked road is canvas-resolution (RGBA8) — re-create + re-bake here
+          destroyTarget(roadT);
+          roadT = createTarget(canvas.width, canvas.height, RGBA8_FMT);
+          bakeRoad();
+          targetsReady = true;
+          void oldSimW; void oldSimH;
+        }
+
+        /* ==================================================================
+           Input — pointer/touch splats + fakesource script
+        ================================================================== */
+
+        const MAX_SPLATS = 16;
+        const splatPos = new Float32Array(MAX_SPLATS * 2);
+        const splatVel = new Float32Array(MAX_SPLATS * 2);
+        const splatAmt = new Float32Array(MAX_SPLATS);
+        const pending = [];   // splats accumulated this frame
+
+        const VMAX = 6.0;     // velocity clamp (CFL, UV/sec)
+        let pointerActive = false;
+        let lastPos = null;   // last pointer UV
+        let lastInputT = -1e9; // sim-time of last real input (for the hint)
+        let hintShown = false;
+
+        function clientToUv(clientX, clientY) {
+          const rect = canvas.getBoundingClientRect();
+          const x = (clientX - rect.left) / Math.max(rect.width, 1);
+          // canvas Y is top-down; GL/field UV is bottom-up → flip
+          const y = 1 - (clientY - rect.top) / Math.max(rect.height, 1);
+          return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
+        }
+
+        function pushSplat(uv, vel, amt) {
+          if (pending.length >= 64) return;
+          pending.push({ x: uv[0], y: uv[1], vx: vel[0], vy: vel[1], amt });
+        }
+
+        function addStroke(uv, dtSec) {
+          const wa = 0.5 + 0.45 * state.water;      // target wet level (max-blend)
+          const va = 3.0 + 4.0 * state.water;        // velocity impulse scale
+          if (lastPos) {
+            let vx = (uv[0] - lastPos[0]) / Math.max(dtSec, 1e-3);
+            let vy = (uv[1] - lastPos[1]) / Math.max(dtSec, 1e-3);
+            const m = Math.hypot(vx, vy);
+            if (m > VMAX) { vx = (vx / m) * VMAX; vy = (vy / m) * VMAX; }
+            // interpolate along the segment so fast drags stay continuous
+            const dist = Math.hypot(uv[0] - lastPos[0], uv[1] - lastPos[1]);
+            const steps = Math.min(10, Math.max(1, Math.round(dist / 0.02)));
+            for (let s = 1; s <= steps; s++) {
+              const f = s / steps;
+              const px = lastPos[0] + (uv[0] - lastPos[0]) * f;
+              const py = lastPos[1] + (uv[1] - lastPos[1]) * f;
+              pushSplat([px, py], [vx * va, vy * va], wa);
+            }
+          } else {
+            pushSplat(uv, [0, 0], wa);
+          }
+          lastPos = uv;
+        }
+
+        canvas.addEventListener("pointerdown", (e) => {
+          pointerActive = true;
+          lastPos = null;
+          const uv = clientToUv(e.clientX, e.clientY);
+          addStroke(uv, STEP);
+          lastInputT = simTime;
+          hideHint();
+          canvas.setPointerCapture?.(e.pointerId);
+        });
+        canvas.addEventListener("pointermove", (e) => {
+          if (!pointerActive) return;
+          const uv = clientToUv(e.clientX, e.clientY);
+          addStroke(uv, STEP);
+          lastInputT = simTime;
+        });
+        function endPointer() { pointerActive = false; lastPos = null; }
+        canvas.addEventListener("pointerup", endPointer);
+        canvas.addEventListener("pointercancel", endPointer);
+        canvas.addEventListener("pointerleave", () => { if (pointerActive) lastPos = null; });
+
+        // deterministic fake watering: a drag across the centre (y=0.5), then a
+        // diagonal, then idle so the field dries and the haze returns. Crosses
+        // the centre for the --motion sampler (§E3). A function of sim-time.
+        function fakeStrokes(t) {
+          const P = 7.0;
+          const ph = t % P;
+          const wa = 0.5 + 0.45 * state.water;
+          const va = 3.0 + 4.0 * state.water;
+          if (ph < 2.4) {
+            const u = ph / 2.4;
+            const x = 0.12 + 0.76 * u;
+            const y = 0.5 + 0.05 * Math.sin(u * 6.2832);
+            pushSplat([x, y], [0.9 * va, 0.1 * Math.cos(u * 6.2832) * va], wa);
+          } else if (ph > 3.0 && ph < 4.4) {
+            const u = (ph - 3.0) / 1.4;
+            const x = 0.5 + 0.28 * Math.cos(u * 3.1416);
+            const y = 0.28 + 0.42 * u;
+            pushSplat([x, y], [-0.5 * Math.sin(u * 3.1416) * va, 0.7 * va], 0.9 * wa);
+          }
+          // (ph in [4.4, 7): idle → dries → heat haze returns)
+        }
+
+        function showHint() {
+          if (hintShown || FAKESOURCE) return;
+          hintShown = true;
+          hintEl.classList.add("show");
+        }
+        function hideHint() {
+          if (!hintShown) return;
+          hintShown = false;
+          hintEl.classList.remove("show");
+        }
+
+        /* ==================================================================
+           Simulation step + composite
+        ================================================================== */
+
+        function setSplatUniforms(u) {
+          const n = Math.min(MAX_SPLATS, pending.length);
+          for (let i = 0; i < n; i++) {
+            const s = pending[pending.length - n + i]; // most recent
+            splatPos[i * 2] = s.x; splatPos[i * 2 + 1] = s.y;
+            splatVel[i * 2] = s.vx; splatVel[i * 2 + 1] = s.vy;
+            splatAmt[i] = s.amt;
+          }
+          gl.uniform1i(u.uSplatCount, n);
+          gl.uniform1f(u.uSplatRad, 0.050);
+          gl.uniform2fv(u.uSplatPos, splatPos);
+          gl.uniform2fv(u.uSplatVel, splatVel);
+          gl.uniform1fv(u.uSplatAmt, splatAmt);
+        }
+
+        function simStep(dt, ambientOn) {
+          const texel = [simTexelX, simTexelY];
+          // S1 advect velocity
+          renderPass(velPing ? velA : velB, programs.advectVel, () => {
+            const u = locations.advectVel;
+            bindTexture(0, curVel().tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uDissipate, Math.exp(-dt * 0.6));
+          });
+          velPing = !velPing;
+
+          // S2 forces (buoyancy + vorticity + ambient curl + splats)
+          renderPass(velPing ? velA : velB, programs.forces, () => {
+            const u = locations.forces;
+            bindTexture(0, curVel().tex);
+            bindTexture(1, curDye().tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uDye, 1);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uBuoy, 2.6 * (0.4 + state.vapor));
+            gl.uniform1f(u.uVort, 0.35);
+            gl.uniform1f(u.uAmbient, ambientOn ? 1.0 : 0.0);
+            gl.uniform1f(u.uVisc, 0.12);
+            gl.uniform1f(u.uTime, ambientTime);
+            setSplatUniforms(u);
+          });
+          velPing = !velPing;
+
+          // S3 divergence
+          renderPass(divT, programs.divergence, () => {
+            const u = locations.divergence;
+            bindTexture(0, curVel().tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+          });
+
+          // S4 Jacobi pressure iterations (ping-pong presA/presB)
+          let presRead = presA, presWrite = presB;
+          // clear pressure to 0 (encoded) each solve for stability
+          if (!FLOAT_OK) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, presRead.fbo);
+            gl.viewport(0, 0, simW, simH);
+            gl.clearColor(0.5, 0.5, 0.5, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+          } else {
+            clearTarget(presRead);
+          }
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          for (let k = 0; k < JACOBI; k++) {
+            renderPass(presWrite, programs.jacobi, () => {
+              const u = locations.jacobi;
+              bindTexture(0, presRead.tex);
+              bindTexture(1, divT.tex);
+              gl.uniform1i(u.uPres, 0);
+              gl.uniform1i(u.uDiv, 1);
+              gl.uniform2f(u.uTexel, texel[0], texel[1]);
+            });
+            const tmp = presRead; presRead = presWrite; presWrite = tmp;
+          }
+
+          // S5 gradient subtract
+          renderPass(velPing ? velA : velB, programs.gradSub, () => {
+            const u = locations.gradSub;
+            bindTexture(0, curVel().tex);
+            bindTexture(1, presRead.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uPres, 1);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+          });
+          velPing = !velPing;
+
+          // S5b post-projection velocity smoothing (kills the checkerboard mode
+          // before the dye is advected by this velocity)
+          renderPass(velPing ? velA : velB, programs.smoothVel, () => {
+            const u = locations.smoothVel;
+            bindTexture(0, curVel().tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+            gl.uniform1f(u.uVisc, 0.5);
+          });
+          velPing = !velPing;
+
+          // S6 dye advect + diffuse + evaporate + inject
+          renderPass(dyePing ? dyeA : dyeB, programs.advectDye, () => {
+            const u = locations.advectDye;
+            bindTexture(0, curVel().tex);
+            bindTexture(1, curDye().tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uDye, 1);
+            gl.uniform2f(u.uTexel, texel[0], texel[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uSpread, 0.05 + 0.30 * state.spread);
+            gl.uniform1f(u.uEvap, 0.10 + 1.0 * state.evap);
+            gl.uniform1f(u.uVaporGain, 0.5 + 1.4 * state.vapor);
+            gl.uniform1f(u.uWetCap, 0.96);
+            setSplatUniforms(u);
+          });
+          dyePing = !dyePing;
+        }
+
+        function compositePass() {
+          if (roadBakedHeat !== state.heat) bakeRoad();
+          updateWetCol();
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, curDye().tex);
+            bindTexture(1, curVel().tex);
+            bindTexture(2, roadT.tex);
+            gl.uniform1i(u.uDye, 0);
+            gl.uniform1i(u.uVel, 1);
+            gl.uniform1i(u.uRoad, 2);
+            gl.uniform3f(u.uWetCol, wetCol[0], wetCol[1], wetCol[2]);
+            gl.uniform2f(u.uRes, canvas.width, canvas.height);
+            gl.uniform2f(u.uSimTexel, simTexelX, simTexelY);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, ambientTime);
+            gl.uniform1f(u.uHaze, state.haze);
+            gl.uniform1f(u.uHeat, state.heat);
+            gl.uniform1f(u.uCool, state.cool);
+            gl.uniform1f(u.uSheen, state.sheen);
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+        }
+
+        // wet-coverage readback (periodic; not every frame — repo §13)
+        const reducePx = new Uint8Array(REDUCE_N * REDUCE_N * 4);
+        let coverage = 0;
+        function measureCoverage() {
+          renderPass(reduceT, programs.reduce, () => {
+            const u = locations.reduce;
+            bindTexture(0, curDye().tex);
+            gl.uniform1i(u.uDye, 0);
+            gl.uniform2f(u.uTexel, simTexelX, simTexelY);
+          });
+          gl.bindFramebuffer(gl.FRAMEBUFFER, reduceT.fbo);
+          gl.readPixels(0, 0, REDUCE_N, REDUCE_N, gl.RGBA, gl.UNSIGNED_BYTE, reducePx);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          let sum = 0;
+          for (let i = 0; i < reducePx.length; i += 4) sum += reducePx[i];
+          coverage = sum / (REDUCE_N * REDUCE_N) / 255;
+        }
+
+        /* ==================================================================
+           Frame loop
+        ================================================================== */
+
+        const PRE_STEPS = FREEZE ? 300 : 0;
+        const PRE_CHUNK = 40;
+        let preRoll = PRE_STEPS;
+        let simTime = 0;       // physics clock (advances while the sim runs)
+        let ambientTime = 0;   // shimmer/curl phase (frozen when paused/frozen)
+        let acc = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let frameCount = 0;
+        let readyStamped = false;
+        const readout = document.getElementById("readout");
+
+        function runSubsteps(nSteps, dt, ambientOn) {
+          for (let i = 0; i < nSteps; i++) {
+            if (FAKESOURCE) fakeStrokes(simTime);
+            simStep(dt, ambientOn);
+            simTime += dt;
+            if (ambientOn) ambientTime += dt;
+            pending.length = 0;   // consumed
+          }
+        }
+
+        function frame(now) {
+          resize();
+          const rawDt = Math.min(MAX_SUBSTEPS / 60, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+
+          if (preRoll > 0) {
+            const steps = Math.min(PRE_CHUNK, preRoll);
+            // freeze pre-roll: fixed dt, ambient frozen (deterministic still)
+            runSubsteps(steps, STEP, false);
+            preRoll -= steps;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            glSync();
+            if (preRoll > 0) {
+              requestAnimationFrame(frame);
+              return;
+            }
+          } else if (!FREEZE) {
+            const ambientOn = !state.pauseAnim;
+            acc += rawDt;
+            let n = 0;
+            while (acc >= STEP && n < MAX_SUBSTEPS) {
+              runSubsteps(1, STEP, ambientOn);
+              acc -= STEP;
+              n++;
+            }
+            if (n === MAX_SUBSTEPS) acc = 0;
+          }
+
+          compositePass();
+
+          // coverage readout every 20 frames (cheap; small target)
+          if ((frameCount % 20) === 0) measureCoverage();
+          frameCount++;
+
+          if (!readyStamped && preRoll === 0) {
+            glSync();
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          // idle hint (real pointer only): show after a few seconds untouched
+          if (!FAKESOURCE && !FREEZE && readyStamped) {
+            if (!pointerActive && simTime - lastInputT > 4.0) showHint();
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            const modeLabel = FAKESOURCE ? "fake" : (pointerActive ? "pointer●" : "pointer");
+            readout.textContent = `FPS ${fps.toFixed(0)} / 描画 ${canvas.width}×${
+              canvas.height}(場 ${simW}×${simH}) / 濡れ率 ${
+              Math.round(coverage * 100)}% / 入力 ${modeLabel}`;
+          }
+          requestAnimationFrame(frame);
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+
+        try {
+          resize();
+          if (!FLOAT_OK) {
+            document.getElementById("glBadge").textContent =
+              "WebGL2 · Stable Fluids · oklab · pointer · RGBA8";
+          }
+          requestAnimationFrame(frame);
+        } catch (error) {
+          const msg = error && error.message ? error.message : "";
+          if (/RENDER TARGET INCOMPLETE/.test(msg)) {
+            setOverlay("RENDER TARGET UNAVAILABLE",
+              "流体場のレンダーターゲットを確保できませんでした。別のブラウザ/GPU でお試しください。",
+              true);
+          } else {
+            setOverlay("WEBGL SETUP ERROR",
+              msg || "レンダラーを初期化できませんでした。", true);
+          }
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
