@@ -800,7 +800,13 @@
           ${SPLAT_DECL}
           void main() {
             vec2 v = decV(texture(uVel, vUv));
-            vec2 backWet = vUv - vec2(v.x, v.y * 0.30) * uDt;
+            // Wet film stays grounded: vertical advection is already reduced, and
+            // the horizontal component is damped too so the film does not ram
+            // forward and pile a dense rounded "head" at the drag terminus once
+            // the pointer lifts (leading-edge convergence). The stroke is still
+            // marked by the along-path splat deposits + isotropic diffusion, so it
+            // reads as a spreading thin film rather than a shoved blob.
+            vec2 backWet = vUv - vec2(v.x * 0.55, v.y * 0.28) * uDt;
             vec2 backVap = vUv - v * uDt;
             float wet = texture(uDye, backWet).r;
             float vap = texture(uDye, backVap).g;
@@ -979,13 +985,12 @@
                 float grid = max(step(0.92, fract(q.x * 9.0)), step(0.92, fract(q.y * 9.0)));
                 c = mix(vec3(0.22, 0.19, 0.16), vec3(0.78, 0.62, 0.46), grid);
               } else {
+                // 照り見本 — matches the composite: a FLAT wet stain (dark cool
+                // sink + broad weak glaze), no specular / no bevel normal.
                 vec2 d = (vUv - vec2(0.5, 0.16)) * vec2(uAspect, 1.0);
                 float wb = exp(-dot(d, d) / 0.02);
                 vec3 c0 = oklabMix(dryColor(), wetColor(), smoothstep(0.0, 0.55, wb));
-                vec3 Ndir = normalize(vec3(-(-2.0 * d * wb) * 3.0, 1.0));
-                float spec = pow(max(dot(Ndir, normalize(vec3(0.35, 0.5, 0.78))), 0.0), 42.0)
-                  * (0.4 + uSheen) * smoothstep(0.1, 0.5, wb);
-                c = c0 + spec * vec3(0.85, 0.93, 1.0);
+                c = c0 + uSheen * 0.11 * smoothstep(0.0, 0.55, wb) * vec3(0.52, 0.63, 0.78);
               }
               fragColor = vec4(clamp(c, vec3(0.03), vec3(0.93)), 1.0);
               return;
@@ -1027,28 +1032,40 @@
             float wetAmt = smoothstep(0.02, 0.20, wetS);
             vec3 col = oklabMix(dryC, uWetCol, wetAmt);
 
-            // 濡れの縁 — edge darkening from the (smoothed) wet-density gradient
+            // 濡れの縁 — a FLAT edge-darkening band from the (smoothed) wet-density
+            // gradient. Kept as the only outline cue (invariant 1), but the cap is
+            // lowered so the dense drag-terminus is not ringed by a strong dark
+            // halo that domed it into a 3D blob — a plain darker rim, not a bevel.
             float edge = length(g);
-            col *= 1.0 - clamp(edge * 6.0, 0.0, 0.60) * smoothstep(0.006, 0.10, wetS);
+            col *= 1.0 - clamp(edge * 6.0, 0.0, 0.42) * smoothstep(0.006, 0.10, wetS);
 
-            // 水面の照り — a SOFT, diffuse wet-asphalt sheen (not a plastic/gel
-            // mirror). The old hard highlight (normal ×11, exp 14) read as molded
-            // gloss; here the normal gain is gentler and its slope is broken by an
-            // fbm micro-relief (§A1/§A3) so the highlight scatters into many small
-            // glints across the film instead of one sharp streak. Broader exponent
-            // + lower cap = the wide low sheen of water soaked into rough asphalt.
-            vec2 mp = vUv * vec2(uAspect, 1.0);
-            vec2 micro = vec2(
-                fbm3(mp * 85.0) - fbm3(mp * 85.0 + vec2(0.15, 0.0)),
-                fbm3(mp * 85.0 + vec2(3.7, 1.9)) - fbm3(mp * 85.0 + vec2(3.85, 1.9)));
-            vec3 Nrm = normalize(vec3(-g * 5.5 + micro * 2.2, 1.0));
-            vec3 Ldir = normalize(vec3(0.30, 0.44, 0.85));
-            float spec = pow(max(dot(Nrm, Ldir), 0.0), 6.0)
-              * uSheen * 0.55 * smoothstep(0.12, 0.5, wetS);
-            col += clamp(spec, 0.0, 0.20) * vec3(0.86, 0.90, 0.95);
-            // faint desaturated glaze on the wet film — enough to say "water is
-            // here" but not the bright blue plastic tint that made it read as gel
-            col = mix(col, mix(col, vec3(0.40, 0.52, 0.62), 0.5), 0.13 * wetAmt);
+            // 水面の照り — a FLAT wet stain, NOT a 3D gel. Every prior round kept
+            // a pseudo-normal specular (a normal built from the wet-density
+            // gradient g + an fbm micro-relief, lit by a fixed light) and every
+            // round it still read as a molded blue-gel blob: the gradient normal
+            // raised a bevel at the wet edge and the highlight put a plastic gloss
+            // on the dense head (§A1 石膏の塊 / §A3 ステッカー・ベベル縁). So the
+            // 3D shading is now REMOVED entirely — no normal, no light direction,
+            // no specular point/streak, no bevel. Wet is read purely as a plane
+            // that has gone DARK + COOL (the dry→uWetCol mix above) with a flat
+            // edge-darkening band; its "wetness" is a colour sink, not relief.
+            // What "照り" remains is a BROAD SKYLIGHT GLAZE: the wet film is a
+            // LIQUID, so it faintly mirrors the cool sky. There is NO gradient and
+            // NO normal term here (so it can never form a hotspot or a bevel like
+            // the old gel specular), but unlike a flat matte wash it VARIES across
+            // the frame — brighter toward the top where the bright sky sits — so the
+            // film "picks up" the environment the way standing water does. This
+            // large-scale reflectance, cool-tinted, is the cue that separates a WET
+            // film from a matte burn / oil / shadow stain (which stays warm-dark and
+            // never glistens with skylight). Kept low so the wet still reads as a
+            // sunk plane (its median stays darker than the dry road), not a bright
+            // reflective object.
+            float sky = 0.35 + 0.65 * smoothstep(0.0, 1.0, vUv.y);
+            col += uSheen * 0.11 * wetAmt * sky * vec3(0.52, 0.63, 0.78);
+            // faint desaturated cool cast on the wet film — keeps "water is here"
+            // readable (blue > red, so it stays visible) without the bright blue
+            // plastic tint that made the film look like a solid gel.
+            col = mix(col, mix(col, vec3(0.34, 0.44, 0.54), 0.5), 0.12 * wetAmt);
 
             // 逃げ水 / 照り返し — a shimmering bright glare band near the top of
             // the dry road. It is sampled through the SAME warp (rUv) as the
@@ -1416,8 +1433,8 @@
         }
 
         function addStroke(uv, dtSec) {
-          const wa = 0.5 + 0.45 * state.water;      // target wet level (max-blend)
-          const va = 3.0 + 4.0 * state.water;        // velocity impulse scale
+          const wa = 0.40 + 0.34 * state.water;      // target wet level (max-blend)
+          const va = 2.0 + 2.6 * state.water;        // velocity impulse scale
           if (lastPos) {
             let vx = (uv[0] - lastPos[0]) / Math.max(dtSec, 1e-3);
             let vy = (uv[1] - lastPos[1]) / Math.max(dtSec, 1e-3);
@@ -1464,8 +1481,8 @@
         function fakeStrokes(t) {
           const P = 7.0;
           const ph = t % P;
-          const wa = 0.5 + 0.45 * state.water;
-          const va = 3.0 + 4.0 * state.water;
+          const wa = 0.40 + 0.34 * state.water;
+          const va = 2.0 + 2.6 * state.water;
           if (ph < 2.4) {
             const u = ph / 2.4;
             const x = 0.12 + 0.76 * u;
@@ -1608,7 +1625,7 @@
             gl.uniform1f(u.uSpread, 0.05 + 0.30 * state.spread);
             gl.uniform1f(u.uEvap, 0.10 + 1.0 * state.evap);
             gl.uniform1f(u.uVaporGain, 1.1 + 2.6 * state.vapor);
-            gl.uniform1f(u.uWetCap, 0.96);
+            gl.uniform1f(u.uWetCap, 0.62);
             setSplatUniforms(u);
           });
           dyePing = !dyePing;
