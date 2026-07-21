@@ -1062,6 +1062,30 @@
             // reflective object.
             float sky = 0.35 + 0.65 * smoothstep(0.0, 1.0, vUv.y);
             col += uSheen * 0.11 * wetAmt * sky * vec3(0.52, 0.63, 0.78);
+
+            // やわらかい照りの割れ — the middle ground between the two failed
+            // extremes (hard gel specular = §A1/§A3; flat dark stain = no touch).
+            // A LIQUID film picks up the sky UNEVENLY, in soft organic patches,
+            // so the skylight glaze above is broken up ("面で割れた") into a weak,
+            // low-contrast shimmer rather than a flat sheet OR one specular hotspot.
+            // Deliberately NOT a gradient-normal specular: the break-up is a pair of
+            // octave-rotated fbm fields (multi-freq, so no regular value-noise
+            // lattice / mesh) and is INDEPENDENT of the wet-density gradient g — g is
+            // exactly what domed the wet edge into a bevel / plastic gel head every
+            // prior round (§A1 石膏の塊 / §A3 ステッカー・ベベル縁), so it is kept out
+            // entirely and the shimmer can never raise a rim or a 3D blob. A soft
+            // smoothstep gate keeps each patch broad and gentle; the finer octave
+            // AVERAGES OUT when the frame is shrunk (so the reduced 'final' can't
+            // re-form a lit gel sheet) yet reads as a damp glisten at 1:1. Weak
+            // strength + low ceiling keep it a shimmer that merely reflects the sky,
+            // never a white hotspot (no whiteout); the wet median stays darker than
+            // the dry road (still a sunk plane, not a bright reflective object).
+            vec2 gp = vUv * vec2(uAspect, 1.0);
+            float broad = fbm(gp * 6.5 + 3.1);          // low-freq organic patches (kept modest: does NOT shrink-average, so it must not gel the reduced view)
+            float fine  = fbm(gp * 22.0 + vec2(8.0, 2.0)); // finer break-up — carries most of the 1:1 sparkle and AVERAGES OUT when shrunk
+            float glint = smoothstep(0.34, 0.95, broad * 0.5 + fine * 0.6);
+            col += uSheen * 0.26 * wetAmt * glint * sky * vec3(0.60, 0.70, 0.82);
+
             // faint desaturated cool cast on the wet film — keeps "water is here"
             // readable (blue > red, so it stays visible) without the bright blue
             // plastic tint that made the film look like a solid gel.
