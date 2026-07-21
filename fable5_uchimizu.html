@@ -1077,7 +1077,7 @@
               // refraction: bend the road under the surface. Small → a gentle
               // liquid wobble, not a lens; gated by wetGate so only the film
               // distorts, and the dry road stays crisp.
-              rUv += rn * (0.055 + 0.030 * uSheen) * wetGate;
+              rUv += rn * (0.115 + 0.065 * uSheen) * wetGate;
             }
 
             // baked dry asphalt sampled at the (haze + refraction) warped coord.
@@ -1128,8 +1128,8 @@
             float rippleSky = clamp(0.5 + 1.6 * rn.y, 0.0, 1.0);
             vec3 skyCol = vec3(0.60, 0.73, 0.92);
             float refl = sky * (0.55 + 0.45 * rippleSky);
-            col += clamp((0.16 + 0.34 * fres) * uSheen * wetAmt * refl,
-                         0.0, 0.55) * skyCol;
+            col += clamp((0.26 + 0.50 * fres) * uSheen * wetAmt * refl,
+                         0.0, 0.72) * skyCol;
 
             // 水面の照り(2/3) — SOFT BROAD SPECULAR (Blinn, low exponent). A few
             // large, soft streaks where the gently-tilted ripples face the light.
@@ -1143,7 +1143,7 @@
             vec3 Hd = normalize(Ld + vec3(0.0, 0.0, 1.0));
             float ndh = max(dot(N, Hd), 0.0);
             float spec = pow(ndh, 10.0);
-            col += uSheen * spec * 0.26 * wetAmt * sky * vec3(0.90, 0.96, 1.06);
+            col += uSheen * spec * 0.36 * wetAmt * sky * vec3(0.90, 0.96, 1.06);
 
             // --- meniscus / Fresnel rim: a bright thin band on the wet ramp —
             //     the "puddle edge" cue. Keyed off the wet RAMP (not a gradient
