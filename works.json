@@ -1,5 +1,20 @@
 [
   {
+    "slug": "fable5_uchimizu",
+    "file": "fable5_uchimizu.html",
+    "title": "打ち水",
+    "date": "2026-07-21",
+    "desc": "記録的酷暑への対処。陽炎の立つ乾いた灼熱の路面を指でなぞると水を撒ける。水膜が広がり、地熱で湯気を上げて蒸発し、涼の帯が通る。触らない待機時は乾き、また陽炎が揺れる。",
+    "model": "",
+    "tags": [
+      "WebGL2",
+      "Pointer",
+      "Stable Fluids"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_uchimizu.jpg"
+  },
+  {
     "slug": "fable5_kotonoha-shigure",
     "file": "fable5_kotonoha-shigure.html",
     "title": "言の葉時雨",
