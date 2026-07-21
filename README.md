@@ -33,3 +33,5 @@
 [https://dsflon.github.io/webgl2/fable5_taifu-no-me.html](https://dsflon.github.io/webgl2/fable5_taifu-no-me.html)
 
 [https://dsflon.github.io/webgl2/fable5_kotonoha-shigure.html](https://dsflon.github.io/webgl2/fable5_kotonoha-shigure.html)
+
+[https://dsflon.github.io/webgl2/fable5_uchimizu.html](https://dsflon.github.io/webgl2/fable5_uchimizu.html)

@@ -31,7 +31,7 @@
 | **MediaPipe 人物検知**(セグメンテーション±Pose) | 身体の変容・「人が○○になる」・図地(人型)が主役 | mosaic / flower-being / gas-head / oneline / scribble / typo / water-cam / overflowing_aura 系 / live_portrait | CRAFT §C 全部(Y反転・スケール・モバイルrecipe必須)。Pose は必要時のみ(C3) | **V-C**(要実機注記が残る) |
 | **Webカメラ映像のみ**(検知なし) | 環境・光・色彩の変換。人が写ってもよいが主役は画面全体 | van-gogh / ascii / smoke-portrait / blue-dissolve | 検知がないぶん軽量・実機乖離が小さい | **V-B**(fakesource で概ね完結) |
 | **マイク音声** | 声・音楽・爆発的イベント・エネルギーの可視化。音の言語化(文字・オノマトペ) | ds_voice / overflowing_aura_4taigyo 系(音声コマンド) / dogra-magra / kotonoha-shigure(音→墨の活字) | 無音時の見た目を必ず設計(音がなくても成立する絵)。実マイク・Web Speech(ネット必須)は sandbox 検証不能=目視の領分 | V-B(合成イベント列で主要経路を検証可) |
-| **ポインタ/タッチ** | 触れる・かき混ぜる・介入する遊び | suibokuga_sakana(水面かき混ぜ) / ds(粒が逃げる) | 触らない時間が大半 — 放置状態が主役級に美しいこと | **V-A**(完全オフライン検証可) |
+| **ポインタ/タッチ** | 触れる・かき混ぜる・介入する遊び | suibokuga_sakana(水面かき混ぜ) / ds(粒が逃げる) / uchimizu(打ち水=水を撒く介入) | 触らない時間が大半 — 放置状態が主役級に美しいこと(uchimizu は乾き→陽炎の待機ループ) | **V-A**(完全オフライン検証可) |
 | **無入力**(時間のみ・純ジェネラティブ) | 自然現象・群れ・抽象・成長するシステム | iwashi_ball(Boids) | 実機乖離ゼロ。単調化に注意(決定論+ゆらぎの設計) | **V-A**(sandbox で 100% 検証可) |
 
 複数入力の併用は可(例: 検知+音声 = overflowing_aura 系)。ただし主入力を 1 つ
@@ -41,7 +41,7 @@
 
 | エンジン | 得意なテーマの本質 | 実績(作品) | CRAFT の該当リスク |
 |---|---|---|---|
-| **Stable Fluids(流体場)** | 煙・霧・水・オーラ・にじみ(連続体の流れ) | gas-head / smoke-portrait / water-cam / suibokuga / overflowing_aura 系 | §A1 石膏化 / §A5 whiteout / **§A4: 空中を舞う個体には使わない** |
+| **Stable Fluids(流体場)** | 煙・霧・水・オーラ・にじみ(連続体の流れ) | gas-head / smoke-portrait / water-cam / suibokuga / overflowing_aura 系 / uchimizu(水膜と蒸発・湯気) | §A1 石膏化 / §A5 whiteout / **§A4: 空中を舞う個体には使わない** / **§A7: 液体の照りはゲル塊↔死んだ染みで振動** |
 | **GPU パーティクル**(状態 ping-pong+インスタンス描画) | 花びら・雪・群れ・粒の集散(個体が舞う) | flower-being / iwashi_ball / ds / ds_voice / live_portrait | §B1 星化(スプライトに形を彫る) / §B3 発生失敗 |
 | **Voronoi / セル分割** | モザイク・タイル・結晶・ステンドグラス | mosaic | セルサイズと目地の設計が命(mosaic の brief 参照) |
 | **グリフ / タイポグラフィ** | 文字・記号・意味の重ね合わせ | typo-cam / ascii | 可読性と絵画性のバランス |
