@@ -953,6 +953,24 @@
             return oklabMix(vec3(0.20, 0.23, 0.27), vec3(0.06, 0.105, 0.16), uCool);
           }
 
+          // animated ripple SURFACE height (water-cam FS_NORMALS, adapted). This
+          // is a small, fast FBM surface used ONLY to build the water normal that
+          // (a) refracts the road underneath and (b) drives a crisp moving
+          // specular. It is INDEPENDENT of the wet-density gradient — that
+          // dependence is exactly what domed the wet edge into a bevel / plastic
+          // gel head every prior round (§A1/§A7). Overhead view → the flow is a
+          // gentle isotropic drift, not water-cam's strong downward run.
+          float waterHeight(vec2 uv, float t) {
+            vec2 pp = uv * vec2(uAspect, 1.0) * 9.0;
+            vec2 flow = vec2(0.12 * sin(t * 0.40 + pp.y * 1.5),
+                             0.12 * cos(t * 0.33 + pp.x * 1.2));
+            float h = fbm3(pp + flow);
+            h += 0.5 * fbm3(pp * 2.3 + flow * 1.6 + 17.0);
+            h += 0.18 * sin(pp.x * 17.0 + pp.y * 13.0 + t * 3.0
+                            + fbm3(pp * 3.0 + flow) * 7.0);   // thin water-film bands
+            return h / 1.68;
+          }
+
           void main() {
             float wet = texture(uDye, vUv).r;
             float vap = texture(uDye, vUv).g;
@@ -1012,7 +1030,30 @@
             float hazeAmp = uHaze * dryness * up;
             vec2 rUv = vUv + warp * hazeAmp * vec2(0.058, 0.038);
 
-            // baked dry asphalt sampled at the warped coordinate (the mirage)
+            // --- moving ripple surface on the wet film (透明な水膜) ---
+            // Gated by a cheap wet read so the dry road pays nothing (perf: the
+            // ripple FBM only runs inside puddles). The normal refracts the road
+            // BELOW the water and drives the specular. Ripple strength grows with
+            // wetness → freshly-watered puddles ripple, drying ones go calm.
+            float wetGate = smoothstep(0.02, 0.22, wet);
+            vec2 rn = vec2(0.0);
+            float rHeight = 0.0;
+            if (wetGate > 0.001) {
+              float rt = uTime * 1.25;
+              float e = 0.004;
+              float h0 = waterHeight(vUv, rt);
+              float hx = waterHeight(vUv + vec2(e, 0.0), rt);
+              float hy = waterHeight(vUv + vec2(0.0, e), rt);
+              rn = clamp(vec2(h0 - hx, h0 - hy) / e * 0.14, -1.0, 1.0);
+              rHeight = h0;
+              // refraction: bend the road under the surface. Small → a gentle
+              // liquid wobble, not a lens; gated by wetGate so only the film
+              // distorts, and the dry road stays crisp.
+              rUv += rn * (0.030 + 0.022 * uSheen) * wetGate;
+            }
+
+            // baked dry asphalt sampled at the (haze + refraction) warped coord.
+            // Inside a puddle this is the road seen THROUGH the moving water.
             vec3 dryC = texture(uRoad, rUv).rgb;
 
             // Smoothed wet field for shading — the half-resolution dye upsamples
@@ -1030,7 +1071,11 @@
             // wet reaches the cool colour quickly so the dry road grain does
             // not speckle through a half-wet film
             float wetAmt = smoothstep(0.02, 0.20, wetS);
-            vec3 col = oklabMix(dryC, uWetCol, wetAmt);
+            // Wet tint — darken + cool toward uWetCol, but only PARTLY so the
+            // refracted road keeps showing through: the film is TRANSPARENT, we
+            // are looking at wet-darkened asphalt through moving water, not an
+            // opaque blue layer. The wet median stays darker than dry (§A7).
+            vec3 col = oklabMix(dryC, uWetCol, wetAmt * 0.62);
 
             // 濡れの縁 — a FLAT edge-darkening band from the (smoothed) wet-density
             // gradient. Kept as the only outline cue (invariant 1), but the cap is
@@ -1039,52 +1084,42 @@
             float edge = length(g);
             col *= 1.0 - clamp(edge * 6.0, 0.0, 0.42) * smoothstep(0.006, 0.10, wetS);
 
-            // 水面の照り — a FLAT wet stain, NOT a 3D gel. Every prior round kept
-            // a pseudo-normal specular (a normal built from the wet-density
-            // gradient g + an fbm micro-relief, lit by a fixed light) and every
-            // round it still read as a molded blue-gel blob: the gradient normal
-            // raised a bevel at the wet edge and the highlight put a plastic gloss
-            // on the dense head (§A1 石膏の塊 / §A3 ステッカー・ベベル縁). So the
-            // 3D shading is now REMOVED entirely — no normal, no light direction,
-            // no specular point/streak, no bevel. Wet is read purely as a plane
-            // that has gone DARK + COOL (the dry→uWetCol mix above) with a flat
-            // edge-darkening band; its "wetness" is a colour sink, not relief.
-            // What "照り" remains is a BROAD SKYLIGHT GLAZE: the wet film is a
-            // LIQUID, so it faintly mirrors the cool sky. There is NO gradient and
-            // NO normal term here (so it can never form a hotspot or a bevel like
-            // the old gel specular), but unlike a flat matte wash it VARIES across
-            // the frame — brighter toward the top where the bright sky sits — so the
-            // film "picks up" the environment the way standing water does. This
-            // large-scale reflectance, cool-tinted, is the cue that separates a WET
-            // film from a matte burn / oil / shadow stain (which stays warm-dark and
-            // never glistens with skylight). Kept low so the wet still reads as a
-            // sunk plane (its median stays darker than the dry road), not a bright
-            // reflective object.
+            // 水面の照り(1/3) — BROAD SKYLIGHT GLAZE. The wet film is a LIQUID,
+            // so it faintly mirrors the cool sky, brighter toward the top. This is
+            // the large-scale, low-contrast reflectance that separates WET from a
+            // matte burn / oil / shadow stain (which stays warm-dark). It carries
+            // NO normal, so it can never form a hotspot; kept low so the wet still
+            // reads as a sunk plane (median darker than the dry road, §A7). The
+            // crisp moving highlights come from the ripple normal in the next block.
             float sky = 0.35 + 0.65 * smoothstep(0.0, 1.0, vUv.y);
-            col += uSheen * 0.11 * wetAmt * sky * vec3(0.52, 0.63, 0.78);
+            col += uSheen * 0.10 * wetAmt * sky * vec3(0.52, 0.63, 0.78);
 
-            // やわらかい照りの割れ — the middle ground between the two failed
-            // extremes (hard gel specular = §A1/§A3; flat dark stain = no touch).
-            // A LIQUID film picks up the sky UNEVENLY, in soft organic patches,
-            // so the skylight glaze above is broken up ("面で割れた") into a weak,
-            // low-contrast shimmer rather than a flat sheet OR one specular hotspot.
-            // Deliberately NOT a gradient-normal specular: the break-up is a pair of
-            // octave-rotated fbm fields (multi-freq, so no regular value-noise
-            // lattice / mesh) and is INDEPENDENT of the wet-density gradient g — g is
-            // exactly what domed the wet edge into a bevel / plastic gel head every
-            // prior round (§A1 石膏の塊 / §A3 ステッカー・ベベル縁), so it is kept out
-            // entirely and the shimmer can never raise a rim or a 3D blob. A soft
-            // smoothstep gate keeps each patch broad and gentle; the finer octave
-            // AVERAGES OUT when the frame is shrunk (so the reduced 'final' can't
-            // re-form a lit gel sheet) yet reads as a damp glisten at 1:1. Weak
-            // strength + low ceiling keep it a shimmer that merely reflects the sky,
-            // never a white hotspot (no whiteout); the wet median stays darker than
-            // the dry road (still a sunk plane, not a bright reflective object).
-            vec2 gp = vUv * vec2(uAspect, 1.0);
-            float broad = fbm(gp * 6.5 + 3.1);          // low-freq organic patches (kept modest: does NOT shrink-average, so it must not gel the reduced view)
-            float fine  = fbm(gp * 22.0 + vec2(8.0, 2.0)); // finer break-up — carries most of the 1:1 sparkle and AVERAGES OUT when shrunk
-            float glint = smoothstep(0.34, 0.95, broad * 0.5 + fine * 0.6);
-            col += uSheen * 0.26 * wetAmt * glint * sky * vec3(0.60, 0.70, 0.82);
+            // 水面の照り(2/3) — crisp moving specular + crest glints from the RIPPLE normal ---
+            // (Blinn, fixed light.) This is the core "living water" cue: the
+            // highlights are small, they MOVE with the ripple surface, and they
+            // scatter across crests instead of forming one plastic hotspot on a
+            // domed gel head. The normal is the animated ripple normal (rn), NOT
+            // the wet-density gradient — so it can never raise a bevel/gel (§A7).
+            // Capped strength + wetAmt gate → the dry road never sparkles and it
+            // cannot white out (§A5): the glints are sparse, sub-pixel-sparse in
+            // the reduced view, and transient, so the longrun full-frame mean of
+            // white stays 0%.
+            vec3 N = normalize(vec3(rn, 0.9));
+            vec3 Ld = normalize(vec3(-0.35, 0.55, 0.74));
+            vec3 Hd = normalize(Ld + vec3(0.0, 0.0, 1.0));
+            float ndh = max(dot(N, Hd), 0.0);
+            float spec  = pow(ndh, 64.0);
+            float glint = pow(ndh, 220.0);
+            float crest = smoothstep(0.55, 0.90, rHeight);
+            col += uSheen * (spec * 0.70 + glint * 2.0 * (0.4 + crest))
+                   * wetAmt * sky * vec3(0.92, 0.98, 1.06);
+
+            // --- meniscus / Fresnel rim: a bright thin band on the wet ramp —
+            //     the "puddle edge" cue. Keyed off the wet RAMP (not a gradient
+            //     normal), so it is a bright edge, not a raised bevel. ---
+            float rim = smoothstep(0.02, 0.16, wetS)
+                        * (1.0 - smoothstep(0.16, 0.42, wetS));
+            col += uSheen * 0.20 * rim * vec3(0.75, 0.88, 1.0);
 
             // faint desaturated cool cast on the wet film — keeps "water is here"
             // readable (blue > red, so it stays visible) without the bright blue
