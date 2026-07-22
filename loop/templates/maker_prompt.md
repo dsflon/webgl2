@@ -75,3 +75,16 @@ Phase 1〜2 の成果物(不変量の復唱・設計比較・パス構成図)は
 - 1000行を超えるファイルは論理単位で分割して書き込む。
 - 報告様式: 成果物 / 自分で確認したこと(目視所見と第一印象を含む) / 未確認のこと
   (実機依存項目を含む) / 判断に迷った点。
+- **新規ページの `<head>` 直後に GA タグを必ず挿入する**(全公開ページ共通、
+  index.html の `<head>` 直後を参照):
+  ```html
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-Q0Y8RMED5C');
+  </script>
+  ```

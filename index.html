@@ -9,6 +9,8 @@
     1. works.json に1エントリ追記(slug/file/title/date/desc/model/tags/series/thumb)
     2. node tools/thumbs.mjs <slug> でサムネ生成(要 http://localhost:8888)
     3. README.md にもリンク1行(リポジトリの目次として併存)
+    4. 新規ページの <head> 直後に GA タグ(gtag.js, G-Q0Y8RMED5C)を必ず挿入
+       (このファイルの <head> 直後の実装を参照)
     ※ 下の <noscript> のリンク一覧にも1行足すとJS無効環境でも辿れる(任意)
 
   背景演出「展示室の光と塵」: WebGL2 の単一フルスクリーンパス。
@@ -21,6 +23,16 @@
 -->
 <html lang="ja">
   <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>WEBGL2 — Realtime Graphics Experiments</title>
