@@ -1361,7 +1361,8 @@
            delta (STEP·1000 ms) → deterministic, so ?freeze stays reproducible.
         ------------------------------------------------------------------ */
         const { Engine: MEngine, Composite: MComposite, Bodies: MBodies,
-          Body: MBody, Events: MEvents } = Matter;
+          Body: MBody, Events: MEvents, Query: MQuery,
+          Constraint: MConstraint } = Matter;
         const PS = 1000;                 // px per world unit inside Matter
         const MDT = STEP * 1000;         // Matter delta (ms) — fixed for determinism
         // unit bridges measured empirically (see design notes):
@@ -1372,7 +1373,10 @@
         const GRAV_A = PS / 1.017e6;
         const OM_CONV = 0.05 / 2.2416;
         const MAX_LIVE = 220;            // awake/falling glyph bodies (spawn gate)
-        const MAX_STATIC = 320;          // settled colliders kept for stacking
+        const MAX_SHARP = 200;           // settled letters kept as SHARP, grabbable
+                                         // bodies; older ones bleed into the paper
+        const MAX_STATIC = 260;          // buried ink colliders kept for stacking
+        const sharpQ = [];               // FIFO of settled-sharp descriptors
         // settle detection (matter-js' global sleep won't fire reliably in a
         // live, continuously-fed pile): a body whose linear+angular speed stays
         // below these for SETTLE_T seconds is treated as come-to-rest → bled
@@ -1389,6 +1393,9 @@
         const mWorld = mEngine.world;
         const staticColliders = [];      // settled letters (collide only; drawn in layer)
         const shatterSet = new Set();    // word compound bodies that touched → break
+        const gDir = { x: 0, y: -1 };    // gravity DIRECTION (device tilt rotates it)
+        let dragBody = null;             // descriptor currently held by the pointer
+        let intK = 0;                    // interaction rng counter (live-only, ≠ freeze)
 
         // Map a KIND preset onto matter-js material properties.
         function matterOpts(K) {
@@ -1557,9 +1564,18 @@
           return s;
         }
 
+        // count only FALLING (dynamic) glyph bodies — the spawn gate limits
+        // airborne type, not the settled sharp pile (which is static and lives
+        // in `bodies` too now).
         function liveCount() {
           let n = 0;
-          for (const b of bodies) if (b.mb) n++;
+          for (const b of bodies) if (b.mb && !b.mb.isStatic) n++;
+          return n;
+        }
+        // settled-sharp letters (static, still drawn crisp & grabbable in `bodies`)
+        function countSharp() {
+          let n = 0;
+          for (const b of bodies) if (b.settled && b.mb && b.mb.isStatic) n++;
           return n;
         }
 
@@ -1683,7 +1699,12 @@
            — active bodies stay bounded, the pile lives in the layer.
         ------------------------------------------------------------------ */
 
-        function stampBody(b) {
+        // Draw the letter's ink INTO the accumulation layer (にじみ→定着). Split
+        // out from the height-field update: a settled letter raises the pile
+        // height immediately (so dissolve/weathering track it) but is only bled
+        // into the paper once it is BURIED (retireToInk) — until then it stays a
+        // sharp, grabbable rigid body, so dragging MOVES it (no ink left behind).
+        function stampInk(b) {
           if (b.glyphs) {
             const cc = Math.cos(b.ang);
             const ss = Math.sin(b.ang);
@@ -1701,6 +1722,8 @@
               u0: b.u0, v0: b.v0, ink: b.ink * 0.95, aka: b.aka, fresh: b.fresh,
             });
           }
+        }
+        function raiseHeight(b) {
           const c = Math.abs(Math.cos(b.ang));
           const s = Math.abs(Math.sin(b.ang));
           const px = c * b.hw + s * b.hh;
@@ -1720,6 +1743,9 @@
             if (top > hcol[i]) hcol[i] = Math.min(H_MAX, top);
           }
         }
+        // full stamp (ink + height) — used when a body is flushed all at once
+        // (the dissolve/sweep retires everything into the layer together).
+        function stampBody(b) { stampInk(b); raiseHeight(b); }
 
         // SHATTER: a word clump stays readable while airborne, then BREAKS into
         // per-character bodies on first contact (flagged by collisionStart,
@@ -1817,9 +1843,10 @@
               b.life += dt;
               ax = Math.sin(b.life * 2.3 + b.seed * 6.283) * K.sway;
             }
+            const gf = mb.mass * K.grav * GRAV_A;
             MBody.applyForce(mb, mb.position, {
-              x: mb.mass * ax * GRAV_A,
-              y: -mb.mass * K.grav * GRAV_A,     // world-up: down = -y
+              x: gf * gDir.x + mb.mass * ax * GRAV_A,   // gDir = down, tilted by device
+              y: gf * gDir.y,
             });
           }
 
@@ -1835,7 +1862,7 @@
             shatterSet.clear();
           }
 
-          // (5)-(6) sync, cull, sleep→stamp→static
+          // (5)-(6) sync, cull, settle→sharp-static (stays grabbable in `bodies`)
           for (let bi = bodies.length - 1; bi >= 0; bi--) {
             const b = bodies[bi];
             if (b.isMote || !b.mb) continue;
@@ -1849,6 +1876,9 @@
               bodies.splice(bi, 1);
               continue;
             }
+            if (mb.isStatic) continue;         // already settled-sharp (grabbable)
+            // a body held by the pointer never freezes
+            if (b === dragBody) { b.settle = 0; continue; }
             // settle timer: low speed sustained for SETTLE_T ⇒ come-to-rest.
             // A falling body keeps accelerating (speed grows → timer resets),
             // so only a supported body completes the timer — no mid-air freeze.
@@ -1863,15 +1893,31 @@
               continue;
             }
             if (b.settle > SETTLE_T) {
-              stampBody(b);                    // bleed into the paper (invariant #3)
-              MBody.setStatic(mb, true);       // freeze as an immovable collider
-              mb.plugDesc = null;
-              staticColliders.push(mb);
-              bodies.splice(bi, 1);
+              // come to rest: raise the pile height and FREEZE to a static
+              // collider, but keep it as a SHARP body in `bodies` — it stays
+              // grabbable and leaves NO ink behind until it is buried below.
+              raiseHeight(b);
+              MBody.setStatic(mb, true);
+              b.settled = true;
+              if (!b.inSharpQ) { b.inSharpQ = true; sharpQ.push(b); }
             }
           }
 
-          // (7) retire the oldest (most buried) settled colliders over budget
+          // (7a) bleed the OLDEST settled-sharp letters into the paper once the
+          // sharp pile is over budget — this is the 定着 (invariant #3): buried
+          // type soaks into the page. They become invisible ink colliders.
+          while (sharpQ.length && countSharp() > MAX_SHARP) {
+            const b = sharpQ.shift();
+            b.inSharpQ = false;
+            if (!b.settled || !b.mb || !b.mb.isStatic) continue;   // woken again → skip
+            stampInk(b);                       // now bleed into the paper
+            staticColliders.push(b.mb);
+            b.mb.plugDesc = null;
+            const idx = bodies.indexOf(b);
+            if (idx >= 0) bodies.splice(idx, 1);
+          }
+          // (7b) retire the oldest buried ink colliders over budget (footprint
+          // already lives in the height field, so the pile height is preserved)
           while (staticColliders.length > MAX_STATIC) {
             MComposite.remove(mWorld, staticColliders.shift());
           }
@@ -1926,9 +1972,12 @@
                 if (b.mb) MComposite.remove(mWorld, b.mb);
               }
               bodies.length = 0;
+              sharpQ.length = 0;
               for (const mb of staticColliders) MComposite.remove(mWorld, mb);
               staticColliders.length = 0;
               shatterSet.clear();
+              if (dragC) { MComposite.remove(mWorld, dragC); dragC = null; }
+              dragBody = null;
             }
             sweepEnv = 0;
             return;
@@ -2624,9 +2673,156 @@
             layerPing = false;
           }
           rebuildBounds();     // floor/walls follow the new aspect
+          if (targetsReady) wakeAll();   // pile re-settles against the new bounds
           targetsReady = true;
         }
         window.addEventListener("resize", resize, { passive: true });
+
+        /* ------------------------------------------------------------------
+           Interaction (user request 2026-07-22): drag & fling the type with a
+           pointer; on devices, tilt gravity / shake to scatter. Grabbing WAKES
+           settled ink back into a moving body — the ink it already bled into the
+           paper stays as a faint print (墨は紙に染みる). Resizing the window (see
+           resize) wakes the whole pile so it collapses & re-settles.
+           These are LIVE-only: freeze pre-roll never fires pointer/device/resize
+           events, so ?freeze determinism is untouched.
+        ------------------------------------------------------------------ */
+
+        // wake a settled-SHARP letter (already in `bodies`) back into motion.
+        // Only sharp letters are wakeable; buried ink (staticColliders) has
+        // soaked into the paper and stays put — so nothing is ever duplicated.
+        function wakeBody(b) {
+          if (!b || !b.mb || !b.mb.isStatic || !b.settled) return;
+          MBody.setStatic(b.mb, false);
+          b.settled = false;
+          b.settle = 0;
+        }
+        function wakeAll() {
+          for (const b of bodies) if (b.settled) wakeBody(b);
+        }
+        function wakeRegion(wx, wy, r) {
+          const r2 = r * r;
+          for (const b of bodies) {
+            if (!b.settled || !b.mb) continue;
+            const dx = b.mb.position.x / PS - wx, dy = b.mb.position.y / PS - wy;
+            if (dx * dx + dy * dy < r2) wakeBody(b);
+          }
+        }
+
+        // pointer → world (y up, visible band 0..1) → Matter (×PS)
+        function pointerWorld(ev) {
+          const rect = canvas.getBoundingClientRect();
+          return {
+            x: ((ev.clientX - rect.left) / rect.width) * aspect,
+            y: 1 - (ev.clientY - rect.top) / rect.height,
+          };
+        }
+        // find the grabbable descriptor under the pointer — only letters in
+        // `bodies` (falling + settled-sharp), never buried ink.
+        function bodyAt(wx, wy) {
+          const mp = { x: wx * PS, y: wy * PS };
+          const pool = [];
+          for (const b of bodies) if (b.mb) pool.push(b.mb);
+          const hit = MQuery.point(pool, mp);
+          let mb = null;
+          if (hit.length) {
+            hit.sort((a, b) => b.position.y - a.position.y);   // topmost = front
+            mb = hit[0];
+          } else {
+            let bd = (0.055 * PS) ** 2;   // else nearest centre within grab radius
+            for (const m of pool) {
+              const dx = m.position.x - mp.x, dy = m.position.y - mp.y;
+              const d = dx * dx + dy * dy;
+              if (d < bd) { bd = d; mb = m; }
+            }
+          }
+          return mb ? mb.plugDesc || null : null;
+        }
+
+        let dragC = null;
+        function startDrag(ev) {
+          maybeAskDeviceMotion();
+          const wp = pointerWorld(ev);
+          wakeRegion(wp.x, wp.y, 0.11);              // scoop up the neighbourhood
+          const b = bodyAt(wp.x, wp.y);
+          if (!b || !b.mb) return;
+          if (b.mb.isStatic) wakeBody(b);
+          dragBody = b;
+          const mb = b.mb;
+          const mp = { x: wp.x * PS, y: wp.y * PS };
+          const off = { x: mp.x - mb.position.x, y: mp.y - mb.position.y };
+          const ca = Math.cos(-mb.angle), sa = Math.sin(-mb.angle);
+          dragC = MConstraint.create({
+            pointA: mp,
+            bodyB: mb,
+            pointB: { x: ca * off.x - sa * off.y, y: sa * off.x + ca * off.y },
+            stiffness: 0.26, damping: 0.14, length: 0,
+          });
+          MComposite.add(mWorld, dragC);
+          if (canvas.setPointerCapture) canvas.setPointerCapture(ev.pointerId);
+        }
+        function moveDrag(ev) {
+          if (!dragC) return;
+          const wp = pointerWorld(ev);
+          dragC.pointA = { x: wp.x * PS, y: wp.y * PS };
+        }
+        function endDrag() {
+          if (dragC) { MComposite.remove(mWorld, dragC); dragC = null; }
+          dragBody = null;                            // let it fling free & re-settle
+        }
+        canvas.addEventListener("pointerdown", startDrag);
+        canvas.addEventListener("pointermove", moveDrag);
+        window.addEventListener("pointerup", endDrag);
+        window.addEventListener("pointercancel", endDrag);
+
+        // ---- device motion: tilt → gravity direction, shake → scatter ----
+        // (silent fallback if unsupported/denied — never errors on input.)
+        let deviceAsked = false;
+        let lastAccMag = 0;
+        function maybeAskDeviceMotion() {
+          if (deviceAsked) return;
+          deviceAsked = true;
+          const DM = window.DeviceMotionEvent, DO = window.DeviceOrientationEvent;
+          const attach = () => {
+            window.addEventListener("deviceorientation", onOrient, { passive: true });
+            window.addEventListener("devicemotion", onMotion, { passive: true });
+          };
+          try {
+            if (DM && typeof DM.requestPermission === "function") {
+              DM.requestPermission().then((s) => { if (s === "granted") attach(); }).catch(() => {});
+            } else if (DO && typeof DO.requestPermission === "function") {
+              DO.requestPermission().then((s) => { if (s === "granted") attach(); }).catch(() => {});
+            } else {
+              attach();
+            }
+          } catch (e) { /* silent */ }
+        }
+        function onOrient(ev) {
+          if (ev.gamma == null) return;              // left-right tilt (deg)
+          const a = Math.max(-1, Math.min(1, ev.gamma / 45)) * 0.9;  // clamp ≈52°
+          const nx = Math.sin(a), ny = -Math.cos(a);
+          if (Math.abs(nx - gDir.x) > 0.04) wakeAll();  // pile slides toward the low side
+          gDir.x = nx; gDir.y = ny;
+        }
+        function onMotion(ev) {
+          const a = ev.accelerationIncludingGravity || ev.acceleration;
+          if (!a) return;
+          const mag = Math.hypot(a.x || 0, a.y || 0, a.z || 0);
+          const jolt = Math.abs(mag - lastAccMag);
+          lastAccMag = mag;
+          if (jolt > 13) {                           // a sharp shake scatters the pile
+            wakeAll();
+            for (const b of bodies) {
+              if (!b.mb || b.mb.isStatic) continue;
+              const r1 = hseed(intK++), r2 = hseed(intK++);
+              MBody.setVelocity(b.mb, {
+                x: (r1 - 0.5) * 0.9 * VEL_CONV,
+                y: (0.25 + 0.6 * r2) * VEL_CONV,
+              });
+              MBody.setAngularVelocity(b.mb, (r1 - 0.5) * 2.2 * OM_CONV);
+            }
+          }
+        }
 
         /* ------------------------------------------------------------------
            Frame loop
