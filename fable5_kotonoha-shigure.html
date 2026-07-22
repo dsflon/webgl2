@@ -2284,7 +2284,8 @@
         // startMic). This replaces the continuous=true recogniser that fought
         // getUserMedia({audio}) for the mic and failed with `audio-capture`.
         let speechActive = false;
-        let speechFatals = 0;   // consecutive fatal SR errors with zero results
+        let speechFatals = 0;   // consecutive PERMANENT SR failures with zero results
+        let restartTimer = null;   // single pending restart (no overlapping sessions)
         let interimDrizzleAt = -1;   // throttle for the listening drizzle
         function startSpeech() {
           const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -2328,7 +2329,7 @@
                 emitTranscript(part);
               }
             };
-            r.onstart = () => { speechDiag.state = "聴取中"; };
+            r.onstart = () => { speechDiag.state = "聴取中"; speechFatals = 0; };
             r.onspeechstart = () => { speechDiag.state = "発話検知"; };
             r.onresult = (event) => {
               for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -2371,11 +2372,18 @@
             };
             r.onerror = (e) => {
               speechDiag.err = (e && e.error) ? String(e.error) : "unknown";
-              if (speechDiag.err !== "no-speech") {
+              // Only PERMANENT failures may force the volume-mode fallback.
+              // `aborted` and `no-speech` are TRANSIENT — desktop Chrome emits
+              // them constantly while cycling short sessions in silence — so
+              // they must NOT count, or recognition is abandoned before the user
+              // even speaks (observed on PC: aborted×3 → 認識不可→音量モード).
+              const benign = speechDiag.err === "no-speech" || speechDiag.err === "aborted";
+              if (!benign) {
                 speechDiag.state = "エラー:" + speechDiag.err;
-                // fatal-error streak (audio-capture / network /
-                // service-not-allowed / not-allowed …). no-speech is benign.
-                speechFatals++;
+                // hard denials never recover by retrying → give up promptly;
+                // network / audio-capture may be a blip → tolerate a few.
+                speechFatals += (speechDiag.err === "not-allowed"
+                  || speechDiag.err === "service-not-allowed") ? 3 : 1;
               }
               // AUTO-RECOVER from a mic conflict: if the recogniser can't
               // capture audio because the volume analyser is holding the mic,
@@ -2408,9 +2416,11 @@
                 startAnalyser();
                 return;
               }
-              // restart fast: this gap is a deaf window — speech begun inside
-              // it is lost entirely, one cause of "words rarely appear"
-              setTimeout(createAndStart, 80);
+              // restart via a SINGLE pending timer (overlapping sessions abort
+              // each other — a source of the `aborted` streak). Small gap keeps
+              // the deaf window short without racing the previous teardown.
+              if (restartTimer) clearTimeout(restartTimer);
+              restartTimer = setTimeout(createAndStart, 160);
             };
             try {
               r.start();
@@ -2418,7 +2428,8 @@
                 speechDiag.state = "開始";
             } catch (_) {
               speechActive = false;
-              setTimeout(createAndStart, 400);
+              if (restartTimer) clearTimeout(restartTimer);
+              restartTimer = setTimeout(createAndStart, 400);
             }
           };
           speechDiag.state = "開始";
