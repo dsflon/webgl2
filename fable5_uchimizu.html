@@ -89,128 +89,304 @@
         --line: rgba(240, 233, 220, 0.18);
         --accent: #4fb3d0;
       }
-      * { box-sizing: border-box; }
-      html, body {
-        width: 100%; height: 100%; margin: 0; overflow: hidden;
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
         background: linear-gradient(160deg, #26221c, #2e2820 55%, #24201a);
-        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
       }
       canvas {
-        display: block; width: 100%; height: 100%;
-        background: var(--bg); touch-action: none;
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+        touch-action: none;
       }
       .top-btn {
-        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
-        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
-        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
-        letter-spacing: 0.08em; cursor: pointer;
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        z-index: 11;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: var(--panel);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
       }
       #togglePanel {
-        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
-        font-size: 15px; line-height: 1; text-align: center;
+        left: max(14px, env(safe-area-inset-left));
+        width: 38px;
+        padding: 8px 0;
+        font-size: 15px;
+        line-height: 1;
+        text-align: center;
       }
-      #togglePanel.hidden { display: none; }
+      #togglePanel.hidden {
+        display: none;
+      }
       #closePanel {
-        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
-        display: flex; align-items: center; justify-content: center; padding: 0;
-        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
-        background: rgba(240, 233, 220, 0.06); font: inherit; font-size: 14px;
-        line-height: 1; cursor: pointer;
+        position: absolute;
+        top: 9px;
+        right: 9px;
+        z-index: 2;
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        background: rgba(240, 233, 220, 0.06);
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
       }
-      #closePanel:hover { background: rgba(240, 233, 220, 0.14); }
+      #closePanel:hover {
+        background: rgba(240, 233, 220, 0.14);
+      }
       .panel {
-        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
-        left: max(14px, env(safe-area-inset-left)); z-index: 10;
-        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
-        overflow: hidden; display: flex; flex-direction: column;
-        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
-        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
-        transition: transform 0.25s ease, opacity 0.25s ease;
+        position: fixed;
+        top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(360px, calc(100vw - 28px));
+        max-height: calc(100vh - 76px);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        backdrop-filter: blur(10px);
+        transition:
+          transform 0.25s ease,
+          opacity 0.25s ease;
       }
-      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel-body {
+        overflow-y: auto;
+        flex: 1 1 auto;
+        min-height: 0;
+      }
       .panel h1 {
-        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
-        letter-spacing: 0.14em; color: var(--ink);
+        margin: 0 0 6px;
+        padding-right: 30px;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--ink);
       }
-      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .panel p {
+        margin: 0 0 12px;
+        font-size: 10.5px;
+        line-height: 1.55;
+      }
       .select-row {
-        display: flex; align-items: center; justify-content: space-between;
-        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 0 0 10px;
+        font-size: 10px;
+        letter-spacing: 0.08em;
       }
       .select-row select {
-        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
-        background: rgba(240, 233, 220, 0.06); border: 1px solid var(--line);
-        border-radius: 7px; font: inherit; font-size: 10.5px;
+        flex: 1;
+        max-width: 210px;
+        padding: 5px 6px;
+        color: var(--ink);
+        background: rgba(240, 233, 220, 0.06);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        font: inherit;
+        font-size: 10.5px;
       }
       .row {
-        display: grid; grid-template-columns: 1fr 44px;
-        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
-        padding: 7px 0 2px; border-top: 1px solid var(--line);
+        display: grid;
+        grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider";
+        gap: 2px 8px;
+        padding: 7px 0 2px;
+        border-top: 1px solid var(--line);
       }
-      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label {
+        grid-area: label;
+        font-size: 11px;
+        color: var(--ink);
+      }
       .row label span {
-        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+        display: block;
+        font-size: 9.5px;
+        color: var(--muted);
+        letter-spacing: 0.02em;
       }
-      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
-      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .row output {
+        grid-area: out;
+        justify-self: end;
+        font-size: 10.5px;
+        color: var(--accent);
+      }
+      .row input[type="range"] {
+        grid-area: slider;
+        width: 100%;
+        accent-color: var(--accent);
+      }
       .check-row {
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0 2px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--ink);
       }
-      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
       .buttons button {
-        flex: 1; min-width: 92px; padding: 8px 10px; border: 1px solid var(--line);
-        border-radius: 8px; color: var(--ink); background: rgba(240, 233, 220, 0.06);
-        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+        flex: 1;
+        min-width: 92px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(240, 233, 220, 0.06);
+        font: inherit;
+        font-size: 10.5px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
       }
       .status {
-        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
-        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+        font-size: 9.5px;
+        line-height: 1.7;
+        letter-spacing: 0.05em;
       }
       .badge {
-        display: inline-block; margin-top: 4px; padding: 3px 8px;
-        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+        display: inline-block;
+        margin-top: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 9px;
+        color: var(--muted);
       }
       #hint {
-        position: fixed; left: 50%; top: 62%; transform: translate(-50%, -50%);
-        z-index: 6; padding: 10px 18px; border: 1px solid var(--line);
-        border-radius: 999px; background: rgba(28, 24, 18, 0.5);
-        color: var(--ink); font-size: 12px; letter-spacing: 0.14em;
-        pointer-events: none; opacity: 0; transition: opacity 0.6s ease;
-        backdrop-filter: blur(3px); text-shadow: 0 1px 6px rgba(0,0,0,0.5);
+        position: fixed;
+        left: 50%;
+        top: 62%;
+        transform: translate(-50%, -50%);
+        z-index: 6;
+        padding: 10px 18px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(28, 24, 18, 0.5);
+        color: var(--ink);
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.6s ease;
+        backdrop-filter: blur(3px);
+        text-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
       }
-      #hint.show { opacity: 0.9; }
+      #hint.show {
+        opacity: 0.9;
+      }
       #overlay {
-        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
-        justify-content: center; padding: 20px; background: rgba(20, 17, 12, 0.82);
-        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(20, 17, 12, 0.82);
+        backdrop-filter: blur(6px);
+        transition: opacity 0.3s ease;
       }
-      #overlay.hidden { opacity: 0; pointer-events: none; }
+      #overlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
       .overlay-card {
-        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
-        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+        max-width: 460px;
+        padding: 22px 24px;
+        text-align: center;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
       }
-      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
-      .overlay-card p { margin: 0; font-size: 11px; line-height: 1.6; }
+      .overlay-card h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.16em;
+        color: var(--ink);
+      }
+      .overlay-card p {
+        margin: 0;
+        font-size: 11px;
+        line-height: 1.6;
+      }
       @media (max-width: 640px) {
         .panel {
-          top: auto; right: max(10px, env(safe-area-inset-right));
-          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
-          width: auto; max-height: 54vh; padding: 12px;
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 54vh;
+          padding: 12px;
         }
-        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+        .panel.collapsed {
+          transform: translateY(calc(100% + 18px));
+          opacity: 0;
+        }
       }
       @media (min-width: 641px) {
-        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+        .panel.collapsed {
+          transform: translateX(calc(-100% - 22px));
+          opacity: 0;
+        }
       }
     </style>
   </head>
 
   <body>
-    <canvas id="gl" aria-label="WebGL2 pointer-driven uchimizu (water on hot pavement)"></canvas>
+    <canvas
+      id="gl"
+      aria-label="WebGL2 pointer-driven uchimizu (water on hot pavement)"
+    ></canvas>
 
-    <button id="togglePanel" type="button" class="top-btn hidden"
-      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button
+      id="togglePanel"
+      type="button"
+      class="top-btn hidden"
+      aria-label="コントローラーを開く"
+      aria-expanded="true"
+    >
+      ☰
+    </button>
 
     <section id="panel" class="panel" aria-label="Uchimizu controls"></section>
 
@@ -281,23 +457,75 @@
 
         const uiRows = [
           ["water", "水量", "一回の注入で撒かれる濡れ密度と初速", 0, 1, 0.01],
-          ["evap", "蒸発の速さ", "濡れ密度の時間減衰率(大きいほど早く乾く)", 0, 1, 0.01],
+          [
+            "evap",
+            "蒸発の速さ",
+            "濡れ密度の時間減衰率(大きいほど早く乾く)",
+            0,
+            1,
+            0.01,
+          ],
           ["spread", "広がり", "濡れ密度の拡散係数と移流の効き", 0, 1, 0.01],
-          ["haze", "陽炎の強さ", "乾き域の domain warp 屈折振幅(下→上で増加)", 0, 1, 0.01],
+          [
+            "haze",
+            "陽炎の強さ",
+            "乾き域の domain warp 屈折振幅(下→上で増加)",
+            0,
+            1,
+            0.01,
+          ],
           ["vapor", "湯気", "蒸発→湯気密度への変換量と浮力", 0, 1, 0.01],
-          ["heat", "路面の暑さ", "乾き色の色温度(白茶〜赤みの照り)", 0, 1, 0.01],
-          ["cool", "濡れの涼", "濡れ色の彩度低下と青みへの沈み込み", 0, 1, 0.01],
+          [
+            "heat",
+            "路面の暑さ",
+            "乾き色の色温度(白茶〜赤みの照り)",
+            0,
+            1,
+            0.01,
+          ],
+          [
+            "cool",
+            "濡れの涼",
+            "濡れ色の彩度低下と青みへの沈み込み",
+            0,
+            1,
+            0.01,
+          ],
           ["sheen", "濡れの照り", "水面ハイライトの強さ", 0, 1, 0.01],
         ];
 
         // プリセット(標本 = uDebug 4 で温度色見本の承認を得る前提)
         const PRESETS = {
-          炎天のアスファルト: { water: 0.55, evap: 0.72, spread: 0.45, haze: 0.82,
-            vapor: 0.58, heat: 0.85, cool: 0.42, sheen: 0.4 },
-          夕暮れの打ち水: { water: 0.66, evap: 0.4, spread: 0.55, haze: 0.42,
-            vapor: 0.5, heat: 0.5, cool: 0.62, sheen: 0.52 },
-          石畳の涼: { water: 0.72, evap: 0.3, spread: 0.62, haze: 0.3,
-            vapor: 0.44, heat: 0.4, cool: 0.76, sheen: 0.6 },
+          炎天のアスファルト: {
+            water: 0.55,
+            evap: 0.72,
+            spread: 0.45,
+            haze: 0.82,
+            vapor: 0.58,
+            heat: 0.85,
+            cool: 0.42,
+            sheen: 0.4,
+          },
+          夕暮れの打ち水: {
+            water: 0.66,
+            evap: 0.4,
+            spread: 0.55,
+            haze: 0.42,
+            vapor: 0.5,
+            heat: 0.5,
+            cool: 0.62,
+            sheen: 0.52,
+          },
+          石畳の涼: {
+            water: 0.72,
+            evap: 0.3,
+            spread: 0.62,
+            haze: 0.3,
+            vapor: 0.44,
+            heat: 0.4,
+            cool: 0.76,
+            sheen: 0.6,
+          },
         };
 
         panel.innerHTML = `
@@ -379,16 +607,23 @@
           if (out) out.textContent = formatValue(value);
         }
 
-        document.getElementById("debugView").addEventListener("change", (event) => {
-          state.debugView = Number(event.currentTarget.value);
-        });
-        document.getElementById("presetSel").addEventListener("change", (event) => {
-          const preset = PRESETS[event.currentTarget.value];
-          if (preset) Object.keys(preset).forEach((k) => setSlider(k, preset[k]));
-        });
-        document.getElementById("pauseAnim").addEventListener("change", (event) => {
-          state.pauseAnim = event.currentTarget.checked;
-        });
+        document
+          .getElementById("debugView")
+          .addEventListener("change", (event) => {
+            state.debugView = Number(event.currentTarget.value);
+          });
+        document
+          .getElementById("presetSel")
+          .addEventListener("change", (event) => {
+            const preset = PRESETS[event.currentTarget.value];
+            if (preset)
+              Object.keys(preset).forEach((k) => setSlider(k, preset[k]));
+          });
+        document
+          .getElementById("pauseAnim")
+          .addEventListener("change", (event) => {
+            state.pauseAnim = event.currentTarget.checked;
+          });
         document.getElementById("resetLook").addEventListener("click", () => {
           Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
           document.getElementById("presetSel").value = "";
@@ -402,8 +637,9 @@
         }
         togglePanel.addEventListener("click", () => setPanelCollapsed(false));
         closePanel.addEventListener("click", () => setPanelCollapsed(true));
-        document.getElementById("hideUi").addEventListener("click", () =>
-          setPanelCollapsed(true));
+        document
+          .getElementById("hideUi")
+          .addEventListener("click", () => setPanelCollapsed(true));
         const isMobile = window.matchMedia("(max-width: 640px)").matches;
         setPanelCollapsed(isMobile);
 
@@ -984,19 +1220,18 @@
           // gel head every prior round (§A1/§A7). Overhead view → the flow is a
           // gentle isotropic drift, not water-cam's strong downward run.
           float waterHeight(vec2 uv, float t) {
-            // LOW-FREQUENCY, broad swell only. The base scale is dropped (9→4.2)
-            // and the high-frequency 3rd octave (pp*3.6) is REMOVED entirely: that
-            // fine octave, combined with the old pow(ndh,220) crest glint, was the
-            // source of the countless sub-pixel white sparkle dashes (feedback #1).
-            // Two smooth octaves give a wide, gently undulating surface whose normal
-            // varies slowly — so reflections become broad soft streaks, not a spray
-            // of glints. fbm is isotropic (no striped comb either).
-            vec2 pp = uv * vec2(uAspect, 1.0) * 4.2;
-            vec2 flow = vec2(0.10 * sin(t * 0.35 + pp.y * 1.1),
-                             0.10 * cos(t * 0.30 + pp.x * 0.9));
-            float h = fbm3(pp + flow);
-            h += 0.45 * fbm3(pp * 2.0 + flow * 1.4 + 17.0);
-            return h / 1.45;
+            vec2 pp = uv * vec2(uAspect, 1.0);
+            vec2 flow = vec2(0.08 * sin(t * 0.35), 0.08 * cos(t * 0.30));
+
+            // Broad irregular swell plus a restrained capillary scale.
+            float h = fbm3(pp * 4.0 + flow);
+            h += 0.38 * fbm3(pp * 8.4 + flow * 1.6 + 17.0);
+
+            // Crossing travelling waves give the film a coherent direction and
+            // visible motion without introducing sub-pixel sparkle.
+            h += 0.10 * sin(dot(pp, vec2(8.0, 5.5)) - t * 1.9);
+            h += 0.07 * sin(dot(pp, vec2(-5.0, 9.0)) - t * 1.45);
+            return h / 1.62;
           }
 
           void main() {
@@ -1063,21 +1298,22 @@
             // ripple FBM only runs inside puddles). The normal refracts the road
             // BELOW the water and drives the specular. Ripple strength grows with
             // wetness → freshly-watered puddles ripple, drying ones go calm.
-            float wetGate = smoothstep(0.02, 0.22, wet);
+            float wetGate = smoothstep(0.018, 0.24, wet);
+            float filmDepth = smoothstep(0.08, 0.46, wet);
             vec2 rn = vec2(0.0);
             float rHeight = 0.0;
             if (wetGate > 0.001) {
               float rt = uTime * 1.25;
-              float e = 0.004;
+              float e = max(2.0 / uRes.y, 0.003);
               float h0 = waterHeight(vUv, rt);
               float hx = waterHeight(vUv + vec2(e, 0.0), rt);
               float hy = waterHeight(vUv + vec2(0.0, e), rt);
-              rn = clamp(vec2(h0 - hx, h0 - hy) / e * 0.14, -1.0, 1.0);
+              rn = clamp(vec2(h0 - hx, h0 - hy) / e * 0.115, -0.72, 0.72);
+              // A drying microscopic film is rough but almost flat; coherent
+              // refraction appears only where enough water has pooled.
+              rn *= mix(0.32, 1.0, filmDepth);
               rHeight = h0;
-              // refraction: bend the road under the surface. Small → a gentle
-              // liquid wobble, not a lens; gated by wetGate so only the film
-              // distorts, and the dry road stays crisp.
-              rUv += rn * (0.115 + 0.065 * uSheen) * wetGate;
+              rUv += rn * (0.052 + 0.048 * uSheen) * wetGate;
             }
 
             // baked dry asphalt sampled at the (haze + refraction) warped coord.
@@ -1103,59 +1339,76 @@
             // refracted road keeps showing through: the film is TRANSPARENT, we
             // are looking at wet-darkened asphalt through moving water, not an
             // opaque blue layer. The wet median stays darker than dry (§A7).
-            vec3 col = oklabMix(dryC, uWetCol, wetAmt * 0.48);
+            // Water suppresses the diffuse back-scattering of dry aggregate.
+            // Keep the refracted asphalt visible: water itself contributes almost
+            // no blue diffuse colour; its colour comes mainly from reflection.
+            vec3 wetDiffuse = dryC * mix(
+              vec3(0.52, 0.55, 0.58),
+              vec3(0.43, 0.48, 0.54),
+              uCool
+            );
+            wetDiffuse = oklabMix(wetDiffuse, uWetCol, 0.10 * uCool);
+            vec3 col = mix(dryC, wetDiffuse, wetAmt * 0.88);
 
-            // 濡れの縁 — a FLAT edge-darkening band from the (smoothed) wet-density
-            // gradient. Kept as the only outline cue (invariant 1), but the cap is
-            // lowered so the dense drag-terminus is not ringed by a strong dark
-            // halo that domed it into a 3D blob — a plain darker rim, not a bevel.
+            // Dark capillary contact line. It follows the density ramp without
+            // feeding that gradient into the surface normal, avoiding a raised
+            // plastic bevel while retaining the characteristic wet edge.
             float edge = length(g);
-            col *= 1.0 - clamp(edge * 6.0, 0.0, 0.42) * smoothstep(0.006, 0.10, wetS);
+            float contact = smoothstep(0.015, 0.09, wetS)
+                          * (1.0 - smoothstep(0.13, 0.30, wetS));
+            float edgeInk = clamp(edge * 5.0, 0.0, 0.34);
+            col *= 1.0 - (0.10 * contact + edgeInk) * wetGate;
 
-            // 水面の照り(1/3) — BROAD SMOOTH SKY REFLECTION (the主役). A wet
-            // puddle is dark but MIRRORS the bright cool sky; that dark-sink /
-            // bright-reflection contrast is what reads as living water (feedback
-            // #3). The reflection is a wide, low-contrast sheet biased toward the
-            // top (grazing view catches more sky), gently modulated by the LOW-
-            // frequency ripple normal so it undulates as broad wavy bands — never
-            // a spray of points. It carries no sharp lobe, so it cannot form the
-            // dashed sparkle (feedback #1). Kept cool (b > r) and clamped so it
-            // never whites out (§A5; final clamp ≤0.92).
-            vec3 Nf = normalize(vec3(rn, 1.0));
-            float fres = pow(1.0 - clamp(Nf.z, 0.0, 1.0), 4.0);
-            float sky = 0.34 + 0.66 * smoothstep(-0.10, 1.0, vUv.y);
-            // broad, signed undulation of how much sky each wide facet catches
-            float rippleSky = clamp(0.5 + 1.6 * rn.y, 0.0, 1.0);
-            vec3 skyCol = vec3(0.60, 0.73, 0.92);
-            float refl = sky * (0.55 + 0.45 * rippleSky);
-            col += clamp((0.26 + 0.50 * fres) * uSheen * wetAmt * refl,
-                         0.0, 0.72) * skyCol;
-
-            // 水面の照り(2/3) — SOFT BROAD SPECULAR (Blinn, low exponent). A few
-            // large, soft streaks where the gently-tilted ripples face the light.
-            // The exponent is dropped 64/220 → 10, and the pow(ndh,220) crest
-            // GLINT is REMOVED: those two, on a high-freq normal, made the tiny
-            // white sparkle dashes (feedback #1). A low exponent on a low-freq
-            // normal gives a wide, calm sheen band instead. wetAmt-gated so the
-            // dry road never sparkles; capped so it cannot white out (§A5).
+            // Physically-inspired water reflection. A slightly oblique view
+            // direction makes the upper road read as a receding plane. Schlick
+            // Fresnel controls reflection instead of simply adding blue light.
             vec3 N = normalize(vec3(rn, 1.0));
-            vec3 Ld = normalize(vec3(-0.30, 0.50, 0.90));
-            vec3 Hd = normalize(Ld + vec3(0.0, 0.0, 1.0));
-            float ndh = max(dot(N, Hd), 0.0);
-            float spec = pow(ndh, 10.0);
-            col += uSheen * spec * 0.36 * wetAmt * sky * vec3(0.90, 0.96, 1.06);
+            vec3 V = normalize(vec3(0.0, -0.38, 1.0));
+            float ndv = max(dot(N, V), 0.0);
+            float fresnel = 0.025 + 0.975 * pow(1.0 - ndv, 5.0);
 
-            // --- meniscus / Fresnel rim: a bright thin band on the wet ramp —
-            //     the "puddle edge" cue. Keyed off the wet RAMP (not a gradient
-            //     normal), so it is a bright edge, not a raised bevel. ---
-            float rim = smoothstep(0.02, 0.16, wetS)
-                        * (1.0 - smoothstep(0.16, 0.42, wetS));
-            col += uSheen * 0.20 * rim * vec3(0.75, 0.88, 1.0);
+            // Procedural sky environment: pale horizon, deeper zenith and one
+            // broad cloud band. Ripple normals move the lookup so the reflected
+            // environment slides over the asphalt rather than tinting it blue.
+            float skyY = clamp(
+              vUv.y + rn.y * 0.38 + (rHeight - 0.5) * 0.05,
+              0.0,
+              1.0
+            );
+            vec3 horizon = vec3(0.78, 0.82, 0.84);
+            vec3 zenith = vec3(0.30, 0.47, 0.68);
+            vec3 env = mix(horizon, zenith, smoothstep(0.05, 1.0, skyY));
+            float cloud = smoothstep(
+              0.63,
+              0.82,
+              fbm3(vec2(p.x * 0.58 + rn.x, skyY * 1.8 + uTime * 0.018))
+            );
+            env = mix(env, vec3(0.88, 0.90, 0.91), cloud * 0.34);
 
-            // faint desaturated cool cast on the wet film — keeps "water is here"
-            // readable (blue > red, so it stays visible) without the bright blue
-            // plastic tint that made the film look like a solid gel.
-            col = mix(col, mix(col, vec3(0.34, 0.44, 0.54), 0.5), 0.08 * wetAmt);
+            // Thin wet asphalt is rough; pooled water is smoother and reflects
+            // more coherently. Blend (rather than add) to conserve contrast.
+            float reflectance = wetAmt * uSheen
+              * mix(0.075, 0.22, filmDepth)
+              * (0.72 + 2.4 * fresnel);
+            col = mix(col, env, clamp(reflectance, 0.0, 0.52));
+
+            // Dual-lobe sun reflection: a broad lobe belongs to rough wet stone,
+            // while a restrained tighter lobe appears only in deeper water.
+            vec3 Ld = normalize(vec3(-0.36, 0.48, 0.80));
+            vec3 H = normalize(Ld + V);
+            float ndh = max(dot(N, H), 0.0);
+            float roughLobe = pow(ndh, 12.0) * (1.0 - 0.45 * filmDepth);
+            float waterLobe = pow(ndh, 52.0) * filmDepth;
+            float sunSpec = (0.15 * roughLobe + 0.28 * waterLobe)
+              * wetAmt * uSheen;
+            col += sunSpec * vec3(1.0, 0.97, 0.88);
+
+            // A very subtle light-facing meniscus breaks the silhouette without
+            // turning the complete boundary into a luminous plastic outline.
+            vec2 gg = g / max(length(g), 1e-5);
+            float rimFacing = max(dot(gg, normalize(vec2(-0.36, 0.48))), 0.0);
+            col += contact * rimFacing * uSheen * 0.055
+              * vec3(0.86, 0.91, 0.94);
 
             // 逃げ水 / 照り返し — a shimmering bright glare band near the top of
             // the dry road. It is sampled through the SAME warp (rUv) as the
@@ -1194,7 +1447,9 @@
           gl.shaderSource(shader, source);
           gl.compileShader(shader);
           if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+            throw new Error(
+              `Shader compile failed: ${gl.getShaderInfoLog(shader)}`,
+            );
           }
           return shader;
         }
@@ -1204,7 +1459,9 @@
           gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
           gl.linkProgram(program);
           if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+            throw new Error(
+              `Program link failed: ${gl.getProgramInfoLog(program)}`,
+            );
           }
           return program;
         }
@@ -1230,27 +1487,73 @@
           composite: createProgram(fullscreenVS, compositeFS),
         };
 
-        const SPLAT_U = ["uSplatCount", "uSplatRad", "uSplatPos", "uSplatVel", "uSplatAmt"];
+        const SPLAT_U = [
+          "uSplatCount",
+          "uSplatRad",
+          "uSplatPos",
+          "uSplatVel",
+          "uSplatAmt",
+        ];
         const locations = {
-          advectVel: getLocations(programs.advectVel, ["uVel", "uDt", "uDissipate"]),
+          advectVel: getLocations(programs.advectVel, [
+            "uVel",
+            "uDt",
+            "uDissipate",
+          ]),
           forces: getLocations(programs.forces, [
-            "uVel", "uDye", "uTexel", "uAspect", "uDt", "uBuoy", "uVort",
-            "uAmbient", "uVisc", "uTime", ...SPLAT_U,
+            "uVel",
+            "uDye",
+            "uTexel",
+            "uAspect",
+            "uDt",
+            "uBuoy",
+            "uVort",
+            "uAmbient",
+            "uVisc",
+            "uTime",
+            ...SPLAT_U,
           ]),
           divergence: getLocations(programs.divergence, ["uVel", "uTexel"]),
           jacobi: getLocations(programs.jacobi, ["uPres", "uDiv", "uTexel"]),
           gradSub: getLocations(programs.gradSub, ["uVel", "uPres", "uTexel"]),
-          smoothVel: getLocations(programs.smoothVel, ["uVel", "uTexel", "uVisc"]),
+          smoothVel: getLocations(programs.smoothVel, [
+            "uVel",
+            "uTexel",
+            "uVisc",
+          ]),
           advectDye: getLocations(programs.advectDye, [
-            "uVel", "uDye", "uTexel", "uAspect", "uDt", "uSpread", "uEvap",
-            "uVaporGain", "uWetCap", ...SPLAT_U,
+            "uVel",
+            "uDye",
+            "uTexel",
+            "uAspect",
+            "uDt",
+            "uSpread",
+            "uEvap",
+            "uVaporGain",
+            "uWetCap",
+            ...SPLAT_U,
           ]),
           reduce: getLocations(programs.reduce, ["uDye", "uTexel"]),
-          copyDye: getLocations(programs.copyDye, ["uSrc", "uAspect", "uOldAspect"]),
+          copyDye: getLocations(programs.copyDye, [
+            "uSrc",
+            "uAspect",
+            "uOldAspect",
+          ]),
           road: getLocations(programs.road, ["uAspect", "uHeat"]),
           composite: getLocations(programs.composite, [
-            "uDye", "uVel", "uRes", "uSimTexel", "uAspect", "uTime",
-            "uHaze", "uHeat", "uCool", "uSheen", "uDebug", "uRoad", "uWetCol",
+            "uDye",
+            "uVel",
+            "uRes",
+            "uSimTexel",
+            "uAspect",
+            "uTime",
+            "uHaze",
+            "uHeat",
+            "uCool",
+            "uSheen",
+            "uDebug",
+            "uRoad",
+            "uWetCol",
           ]),
         };
 
@@ -1280,11 +1583,29 @@
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            internal,
+            width,
+            height,
+            0,
+            format,
+            type,
+            null,
+          );
           const fbo = gl.createFramebuffer();
           gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-          const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0,
+          );
+          const ok =
+            gl.checkFramebufferStatus(gl.FRAMEBUFFER) ===
+            gl.FRAMEBUFFER_COMPLETE;
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
           if (!ok) throw new Error("RENDER TARGET INCOMPLETE");
           return { tex, fbo, width, height };
@@ -1306,8 +1627,12 @@
         }
         function renderPass(target, program, setup) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
-          gl.viewport(0, 0, target ? target.width : canvas.width,
-            target ? target.height : canvas.height);
+          gl.viewport(
+            0,
+            0,
+            target ? target.width : canvas.width,
+            target ? target.height : canvas.height,
+          );
           gl.useProgram(program);
           setup();
           gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -1324,43 +1649,59 @@
            Fields, targets, resize
         ================================================================== */
 
-        const SIM_MAX = 256;   // sim long-side cap (half-res, but bounded)
+        const SIM_MAX = 256; // sim long-side cap (half-res, but bounded)
         const JACOBI = FLOAT_OK ? 16 : 18;
         const STEP = 1 / 60;
         const MAX_SUBSTEPS = 4;
         const REDUCE_N = 32;
 
         const RGBA8_FMT = [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE];
-        let simW = 2, simH = 2;
+        let simW = 2,
+          simH = 2;
         let aspect = 1;
         let velA, velB, dyeA, dyeB, presA, presB, divT, reduceT, roadT;
-        let velPing = false, dyePing = false;
+        let velPing = false,
+          dyePing = false;
         let targetsReady = false;
-        let simTexelX = 0.5, simTexelY = 0.5;
+        let simTexelX = 0.5,
+          simTexelY = 0.5;
         let roadBakedHeat = -1;
         let wetCol = [0.1, 0.14, 0.2];
 
-        function curVel() { return velPing ? velB : velA; }
-        function curDye() { return dyePing ? dyeB : dyeA; }
+        function curVel() {
+          return velPing ? velB : velA;
+        }
+        function curDye() {
+          return dyePing ? dyeB : dyeA;
+        }
 
         // JS oklab (matches the GLSL transform) — the wet endpoint colour is
         // interpolated on the CPU once per frame and passed as a uniform, so
         // the composite pays no per-pixel oklab for the temperature ramp except
         // the single dry→wet mix.
         function srgb2lin(c) {
-          return c.map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+          return c.map((v) =>
+            v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4),
+          );
         }
         function lin2srgb(c) {
           return c.map((v) => {
             v = Math.min(1, Math.max(0, v));
-            return v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+            return v <= 0.0031308
+              ? v * 12.92
+              : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
           });
         }
         function lin2oklab(c) {
-          const l = 0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2];
-          const m = 0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2];
-          const s = 0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2];
-          const l_ = Math.cbrt(l), m_ = Math.cbrt(m), s_ = Math.cbrt(s);
+          const l =
+            0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2];
+          const m =
+            0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2];
+          const s =
+            0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2];
+          const l_ = Math.cbrt(l),
+            m_ = Math.cbrt(m),
+            s_ = Math.cbrt(s);
           return [
             0.2104542553 * l_ + 0.793617785 * m_ - 0.0040720468 * s_,
             1.9779984951 * l_ - 2.428592205 * m_ + 0.4505937099 * s_,
@@ -1371,7 +1712,9 @@
           const l_ = lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2];
           const m_ = lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2];
           const s_ = lab[0] - 0.0894841775 * lab[1] - 1.291485548 * lab[2];
-          const l = l_ ** 3, m = m_ ** 3, s = s_ ** 3;
+          const l = l_ ** 3,
+            m = m_ ** 3,
+            s = s_ ** 3;
           return [
             4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
             -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
@@ -1384,7 +1727,11 @@
           return lin2srgb(oklab2lin(la.map((v, i) => v + (lb[i] - v) * t)));
         }
         function updateWetCol() {
-          wetCol = oklabMixJS([0.2, 0.23, 0.27], [0.06, 0.105, 0.16], state.cool);
+          wetCol = oklabMixJS(
+            [0.2, 0.23, 0.27],
+            [0.06, 0.105, 0.16],
+            state.cool,
+          );
         }
 
         function bakeRoad() {
@@ -1431,7 +1778,8 @@
           const oldA = canvas.width / Math.max(canvas.height, 1);
           const hadState = targetsReady && preRoll === 0;
           const oldDye = hadState ? curDye() : null;
-          const oldSimW = simW, oldSimH = simH;
+          const oldSimW = simW,
+            oldSimH = simH;
 
           canvas.width = w;
           canvas.height = h;
@@ -1446,8 +1794,10 @@
             sw = Math.max(2, Math.round(sw * k));
             sh = Math.max(2, Math.round(sh * k));
           }
-          simW = sw; simH = sh;
-          simTexelX = 1 / sw; simTexelY = 1 / sh;
+          simW = sw;
+          simH = sh;
+          simTexelX = 1 / sw;
+          simTexelY = 1 / sh;
 
           let preservedDye = null;
           if (hadState && oldDye) {
@@ -1464,9 +1814,12 @@
           }
 
           if (targetsReady) {
-            destroyTarget(velA); destroyTarget(velB);
-            destroyTarget(dyeA); destroyTarget(dyeB);
-            destroyTarget(presA); destroyTarget(presB);
+            destroyTarget(velA);
+            destroyTarget(velB);
+            destroyTarget(dyeA);
+            destroyTarget(dyeB);
+            destroyTarget(presA);
+            destroyTarget(presB);
             destroyTarget(divT);
           }
           allocSim(sw, sh);
@@ -1490,7 +1843,8 @@
           roadT = createTarget(canvas.width, canvas.height, RGBA8_FMT);
           bakeRoad();
           targetsReady = true;
-          void oldSimW; void oldSimH;
+          void oldSimW;
+          void oldSimH;
         }
 
         /* ==================================================================
@@ -1501,11 +1855,11 @@
         const splatPos = new Float32Array(MAX_SPLATS * 2);
         const splatVel = new Float32Array(MAX_SPLATS * 2);
         const splatAmt = new Float32Array(MAX_SPLATS);
-        const pending = [];   // splats accumulated this frame
+        const pending = []; // splats accumulated this frame
 
-        const VMAX = 6.0;     // velocity clamp (CFL, UV/sec)
+        const VMAX = 6.0; // velocity clamp (CFL, UV/sec)
         let pointerActive = false;
-        let lastPos = null;   // last pointer UV
+        let lastPos = null; // last pointer UV
         let lastInputT = -1e9; // sim-time of last real input (for the hint)
         let hintShown = false;
 
@@ -1523,13 +1877,16 @@
         }
 
         function addStroke(uv, dtSec) {
-          const wa = 0.40 + 0.34 * state.water;      // target wet level (max-blend)
-          const va = 2.0 + 2.6 * state.water;        // velocity impulse scale
+          const wa = 0.4 + 0.34 * state.water; // target wet level (max-blend)
+          const va = 2.0 + 2.6 * state.water; // velocity impulse scale
           if (lastPos) {
             let vx = (uv[0] - lastPos[0]) / Math.max(dtSec, 1e-3);
             let vy = (uv[1] - lastPos[1]) / Math.max(dtSec, 1e-3);
             const m = Math.hypot(vx, vy);
-            if (m > VMAX) { vx = (vx / m) * VMAX; vy = (vy / m) * VMAX; }
+            if (m > VMAX) {
+              vx = (vx / m) * VMAX;
+              vy = (vy / m) * VMAX;
+            }
             // interpolate along the segment so fast drags stay continuous
             const dist = Math.hypot(uv[0] - lastPos[0], uv[1] - lastPos[1]);
             const steps = Math.min(10, Math.max(1, Math.round(dist / 0.02)));
@@ -1560,10 +1917,15 @@
           addStroke(uv, STEP);
           lastInputT = simTime;
         });
-        function endPointer() { pointerActive = false; lastPos = null; }
+        function endPointer() {
+          pointerActive = false;
+          lastPos = null;
+        }
         canvas.addEventListener("pointerup", endPointer);
         canvas.addEventListener("pointercancel", endPointer);
-        canvas.addEventListener("pointerleave", () => { if (pointerActive) lastPos = null; });
+        canvas.addEventListener("pointerleave", () => {
+          if (pointerActive) lastPos = null;
+        });
 
         // deterministic fake watering: a drag across the centre (y=0.5), then a
         // diagonal, then idle so the field dries and the haze returns. Crosses
@@ -1571,7 +1933,7 @@
         function fakeStrokes(t) {
           const P = 7.0;
           const ph = t % P;
-          const wa = 0.40 + 0.34 * state.water;
+          const wa = 0.4 + 0.34 * state.water;
           const va = 2.0 + 2.6 * state.water;
           if (ph < 2.4) {
             const u = ph / 2.4;
@@ -1582,7 +1944,11 @@
             const u = (ph - 3.0) / 1.4;
             const x = 0.5 + 0.28 * Math.cos(u * 3.1416);
             const y = 0.28 + 0.42 * u;
-            pushSplat([x, y], [-0.5 * Math.sin(u * 3.1416) * va, 0.7 * va], 0.9 * wa);
+            pushSplat(
+              [x, y],
+              [-0.5 * Math.sin(u * 3.1416) * va, 0.7 * va],
+              0.9 * wa,
+            );
           }
           // (ph in [4.4, 7): idle → dries → heat haze returns)
         }
@@ -1606,12 +1972,14 @@
           const n = Math.min(MAX_SPLATS, pending.length);
           for (let i = 0; i < n; i++) {
             const s = pending[pending.length - n + i]; // most recent
-            splatPos[i * 2] = s.x; splatPos[i * 2 + 1] = s.y;
-            splatVel[i * 2] = s.vx; splatVel[i * 2 + 1] = s.vy;
+            splatPos[i * 2] = s.x;
+            splatPos[i * 2 + 1] = s.y;
+            splatVel[i * 2] = s.vx;
+            splatVel[i * 2 + 1] = s.vy;
             splatAmt[i] = s.amt;
           }
           gl.uniform1i(u.uSplatCount, n);
-          gl.uniform1f(u.uSplatRad, 0.050);
+          gl.uniform1f(u.uSplatRad, 0.05);
           gl.uniform2fv(u.uSplatPos, splatPos);
           gl.uniform2fv(u.uSplatVel, splatVel);
           gl.uniform1fv(u.uSplatAmt, splatAmt);
@@ -1657,7 +2025,8 @@
           });
 
           // S4 Jacobi pressure iterations (ping-pong presA/presB)
-          let presRead = presA, presWrite = presB;
+          let presRead = presA,
+            presWrite = presB;
           // clear pressure to 0 (encoded) each solve for stability
           if (!FLOAT_OK) {
             gl.bindFramebuffer(gl.FRAMEBUFFER, presRead.fbo);
@@ -1677,7 +2046,9 @@
               gl.uniform1i(u.uDiv, 1);
               gl.uniform2f(u.uTexel, texel[0], texel[1]);
             });
-            const tmp = presRead; presRead = presWrite; presWrite = tmp;
+            const tmp = presRead;
+            presRead = presWrite;
+            presWrite = tmp;
           }
 
           // S5 gradient subtract
@@ -1712,8 +2083,8 @@
             gl.uniform2f(u.uTexel, texel[0], texel[1]);
             gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uDt, dt);
-            gl.uniform1f(u.uSpread, 0.05 + 0.30 * state.spread);
-            gl.uniform1f(u.uEvap, 0.10 + 1.0 * state.evap);
+            gl.uniform1f(u.uSpread, 0.05 + 0.3 * state.spread);
+            gl.uniform1f(u.uEvap, 0.1 + 1.0 * state.evap);
             gl.uniform1f(u.uVaporGain, 1.1 + 2.6 * state.vapor);
             gl.uniform1f(u.uWetCap, 0.62);
             setSplatUniforms(u);
@@ -1756,7 +2127,15 @@
             gl.uniform2f(u.uTexel, simTexelX, simTexelY);
           });
           gl.bindFramebuffer(gl.FRAMEBUFFER, reduceT.fbo);
-          gl.readPixels(0, 0, REDUCE_N, REDUCE_N, gl.RGBA, gl.UNSIGNED_BYTE, reducePx);
+          gl.readPixels(
+            0,
+            0,
+            REDUCE_N,
+            REDUCE_N,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            reducePx,
+          );
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
           let sum = 0;
           for (let i = 0; i < reducePx.length; i += 4) sum += reducePx[i];
@@ -1770,8 +2149,8 @@
         const PRE_STEPS = FREEZE ? 300 : 0;
         const PRE_CHUNK = 40;
         let preRoll = PRE_STEPS;
-        let simTime = 0;       // physics clock (advances while the sim runs)
-        let ambientTime = 0;   // shimmer/curl phase (frozen when paused/frozen)
+        let simTime = 0; // physics clock (advances while the sim runs)
+        let ambientTime = 0; // shimmer/curl phase (frozen when paused/frozen)
         let acc = 0;
         let lastNow = performance.now();
         let fpsLast = performance.now();
@@ -1786,13 +2165,16 @@
             simStep(dt, ambientOn);
             simTime += dt;
             if (ambientOn) ambientTime += dt;
-            pending.length = 0;   // consumed
+            pending.length = 0; // consumed
           }
         }
 
         function frame(now) {
           resize();
-          const rawDt = Math.min(MAX_SUBSTEPS / 60, Math.max(0, (now - lastNow) / 1000));
+          const rawDt = Math.min(
+            MAX_SUBSTEPS / 60,
+            Math.max(0, (now - lastNow) / 1000),
+          );
           lastNow = now;
 
           if (preRoll > 0) {
@@ -1821,7 +2203,7 @@
           compositePass();
 
           // coverage readout every 20 frames (cheap; small target)
-          if ((frameCount % 20) === 0) measureCoverage();
+          if (frameCount % 20 === 0) measureCoverage();
           frameCount++;
 
           if (!readyStamped && preRoll === 0) {
@@ -1841,10 +2223,16 @@
             const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
             fpsLast = wallNow;
             fpsFrames = 0;
-            const modeLabel = FAKESOURCE ? "fake" : (pointerActive ? "pointer●" : "pointer");
+            const modeLabel = FAKESOURCE
+              ? "fake"
+              : pointerActive
+                ? "pointer●"
+                : "pointer";
             readout.textContent = `FPS ${fps.toFixed(0)} / 描画 ${canvas.width}×${
-              canvas.height}(場 ${simW}×${simH}) / 濡れ率 ${
-              Math.round(coverage * 100)}% / 入力 ${modeLabel}`;
+              canvas.height
+            }(場 ${simW}×${simH}) / 濡れ率 ${Math.round(
+              coverage * 100,
+            )}% / 入力 ${modeLabel}`;
           }
           requestAnimationFrame(frame);
         }
@@ -1863,12 +2251,17 @@
         } catch (error) {
           const msg = error && error.message ? error.message : "";
           if (/RENDER TARGET INCOMPLETE/.test(msg)) {
-            setOverlay("RENDER TARGET UNAVAILABLE",
+            setOverlay(
+              "RENDER TARGET UNAVAILABLE",
               "流体場のレンダーターゲットを確保できませんでした。別のブラウザ/GPU でお試しください。",
-              true);
+              true,
+            );
           } else {
-            setOverlay("WEBGL SETUP ERROR",
-              msg || "レンダラーを初期化できませんでした。", true);
+            setOverlay(
+              "WEBGL SETUP ERROR",
+              msg || "レンダラーを初期化できませんでした。",
+              true,
+            );
           }
           console.error(error);
         }
