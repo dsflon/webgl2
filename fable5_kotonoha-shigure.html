@@ -1892,7 +1892,11 @@
               if (b.settle > 0.08) breakWordBody(b);
               continue;
             }
-            if (b.settle > SETTLE_T) {
+            // while the device is meaningfully TILTED, never freeze — a jammed
+            // pile would re-solidify (speed≈0) before tilted gravity could make
+            // it flow. Keeping it live lets the whole pile slide/collapse toward
+            // the low side, and it re-settles once the phone is level again.
+            if (b.settle > SETTLE_T && Math.abs(gDir.x) < 0.12) {
               // come to rest: raise the pile height and FREEZE to a static
               // collider, but keep it as a SHARP body in `bodies` — it stays
               // grabbable and leaves NO ink behind until it is buried below.
@@ -2777,26 +2781,44 @@
 
         // ---- device motion: tilt → gravity direction, shake → scatter ----
         // (silent fallback if unsupported/denied — never errors on input.)
+        // Attach as EARLY as possible: on Android / desktop sensors no permission
+        // is needed, so listen from startup (tilt works without any tap). Only
+        // iOS 13+ gates motion behind requestPermission(), which must run inside
+        // a user gesture — we fire that on the first tap anywhere (canvas OR the
+        // opening overlay buttons), so a single tap unlocks tilt-to-collapse.
         let deviceAsked = false;
+        let motionAttached = false;
         let lastAccMag = 0;
+        function attachMotion() {
+          if (motionAttached) return;
+          motionAttached = true;
+          window.addEventListener("deviceorientation", onOrient, { passive: true });
+          window.addEventListener("devicemotion", onMotion, { passive: true });
+        }
+        function motionNeedsPermission() {
+          const DM = window.DeviceMotionEvent, DO = window.DeviceOrientationEvent;
+          return (DM && typeof DM.requestPermission === "function")
+            || (DO && typeof DO.requestPermission === "function");
+        }
+        function initMotion() {
+          // no-permission platforms: listen immediately (no gesture required)
+          if (!motionNeedsPermission()) attachMotion();
+        }
         function maybeAskDeviceMotion() {
           if (deviceAsked) return;
           deviceAsked = true;
           const DM = window.DeviceMotionEvent, DO = window.DeviceOrientationEvent;
-          const attach = () => {
-            window.addEventListener("deviceorientation", onOrient, { passive: true });
-            window.addEventListener("devicemotion", onMotion, { passive: true });
-          };
           try {
             if (DM && typeof DM.requestPermission === "function") {
-              DM.requestPermission().then((s) => { if (s === "granted") attach(); }).catch(() => {});
+              DM.requestPermission().then((s) => { if (s === "granted") attachMotion(); }).catch(() => {});
             } else if (DO && typeof DO.requestPermission === "function") {
-              DO.requestPermission().then((s) => { if (s === "granted") attach(); }).catch(() => {});
+              DO.requestPermission().then((s) => { if (s === "granted") attachMotion(); }).catch(() => {});
             } else {
-              attach();
+              attachMotion();
             }
           } catch (e) { /* silent */ }
         }
+        initMotion();
         function onOrient(ev) {
           if (ev.gamma == null) return;              // left-right tilt (deg)
           const a = Math.max(-1, Math.min(1, ev.gamma / 45)) * 0.9;  // clamp ≈52°
@@ -2935,9 +2957,11 @@
         });
 
         // ---- overlay wiring (mic invite / error paths) ----
-        micStartBtn.addEventListener("click", () => { startMic(); });
-        micSkipBtn.addEventListener("click", () => setOverlay("hidden", "", "", null));
-        document.getElementById("micBtn").addEventListener("click", () => { startMic(); });
+        // these taps are the FIRST user gesture on mobile → also use them to
+        // unlock iOS motion sensors so tilt-to-collapse works right away.
+        micStartBtn.addEventListener("click", () => { maybeAskDeviceMotion(); startMic(); });
+        micSkipBtn.addEventListener("click", () => { maybeAskDeviceMotion(); setOverlay("hidden", "", "", null); });
+        document.getElementById("micBtn").addEventListener("click", () => { maybeAskDeviceMotion(); startMic(); });
         if (FAKESOURCE) {
           document.getElementById("micBtn").style.display = "none";
         } else {
