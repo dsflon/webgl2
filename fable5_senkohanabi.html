@@ -1,0 +1,1896 @@
+<!doctype html>
+<!--
+  fable5_senkohanabi.html — WebGL2「線香花火(Senko Hanabi — Sparkler)」— ポインタ入力
+
+  概要:
+  一本の線香花火。先端に橙〜黄白の溶けた火球(牡丹)がぶら下がり、そこから無数の
+  火花が四方へ放射する。火花は飛翔の途中で分岐して松葉のような自己相似の枝を作る。
+  牡丹→松葉→柳/散り菊→散り の4位相を時間でたどり、最後に火球がポトリと落ちて
+  消え、間をおいてまた点火する — この儚いループそのものが主役である。夜闇に火花だけが
+  白熱し、動いた光は短い残光の尾を引く。指(ポインタ/ドラッグ)で火球を「持つ位置」を
+  操り、静かに持つほど松葉が長持ち、素早く動かす/振ると火球が乱れて早く散る。端末の
+  傾き(DeviceOrientation)は副入力で、なくても(PC/未許可/非対応)ポインタのみで完全に
+  成立する。カメラ・マイクは使わず、夜闇と火花はすべてジェネラティブに合成する。
+  <meta name="art-input" content="none"> 宣言(カメラ規約の免除プロファイル)。
+
+  実行方法:
+    python3 -m http.server 8888 → http://localhost:8888/fable5_senkohanabi.html
+    (指/マウスで持つ位置を操作。数秒触らないと淡いヒントが出る。無操作でも自然に燃える)
+    ?fakesource=1 … 実ポインタ/傾きなしで、決定的スクリプトで火球をゆっくり動かしつつ
+                    4位相を一定周期で回す(発生→分岐→散り→再点火)。--motion 前提で常に動く。
+    ?freeze=1     … 時間駆動(粒更新・位相・残光)を停止し決定的な静止フレームを出す。
+                    fixed-dt(1/60)の preroll で松葉を育ててから dt=0 で保持。乱数は粒index/
+                    pos/age 由来(hash に時間を混ぜない)ので毎回同じ絵になる。
+    デバッグ表示: 0=最終合成 / 1=パーティクル生(残光なし・素の火花) / 2=残光蓄積レイヤ /
+                  3=速度・寿命・世代の可視化 / 4=標本(火の色温度グラデーション見本)
+
+  様式解析の要約(視覚的不変量。優先度 1 > 2 > 3 > 5 > 4 > 6):
+    1. 火花が火球から放射し飛翔中に分岐して松葉(マーク) — GPUパーティクルの pos/vel/寿命/
+       世代を状態テクスチャ ping-pong で更新。死んだスロットが親を pull して子として復活する
+       方式で分岐 spawn(世代上限)。速度方向に伸ばした短いストリークで描画(gl_PointSize 不使用)。
+    2. 牡丹→松葉→柳/散り菊→散り の4位相(時間) — 位相を時間エンベロープで駆動、発生率/初速/
+       分岐率/寿命/重力を位相係数で ema 変調。散りで火球が落下→消灯→クールダウン→再点火ループ。
+    3. 残光の尾・夜闇で有界(場) — フィードバック蓄積レイヤ(前フレームを ema 減衰=ping-pong)に
+       field を加算し暗く沈める。散逸>加算・上限 clamp・トーンマップで whiteout させない(§A5)。
+    5. ポインタ=火球の持ち位置・静かさで松葉長持ち(知覚) — 持ち位置へ追従、ポインタ速度を ema
+       平滑し hysteresis 付き閾値で散りへ早送り。無入力時は内部時計が同ループを回す。傾きは副。
+    4. 寿命→色温度・火球芯が最輝(色/物質) — 寿命(0→1)を oklab で黄白→橙→赤へ補間し加算。
+       火球芯は sdf 距離で最輝コア。周縁は edge darkening で夜闇に溶かす。
+    6. 明滅と生きたゆらぎ(マーク/物質) — 明滅は cell-hash を粒の age に乗算(時間シード不使用)。
+       火花の蛇行は curl noise を速度場へ微量加算(粒ごとシード)。
+
+  パイプライン図:
+    STATE = PART_W×PART_H(software 80²/desktop 160²)RGBA16F×2(MRT)NEAREST ping-pong
+            texA=(pos.xy, vel.xy) texB=(ageF, life/8, gen/8, seed)  float非対応時 RGBA8+encode
+    field/accum = paint 解像度(長辺≤1000, DPR≤2)RGBA16F(float非対応時 RGBA8)
+    [CPU] pointer/傾き/fakesource → 火球 hold 位置。速度 ema → hysteresis で散り早送り。
+          4位相クロック → 位相係数(emit/speed/branch/gen/life/gravity/ball/heat)。火球 pos 積分。
+    [P1 update] STATE_src →(spawn/branch/curl/gravity/寿命dt減算)→ STATE_dst   (ping-pong)
+    [P2 draw]   STATE_dst をインスタンス化ストリークで field へ加算(ONE,ONE)、色=oklab温度×明滅
+    [P2b ball]  火球クアッドを field へ加算(sdf 芯=最輝白熱コア)
+    [P3 accum]  accum_prev*decayFrame + field*gain, clamp[0,cap] → accum_dst   (feedback 残光)
+    [composite] トーンマップ(accum) + 夜闇 + edge darkening + uDebug 0..4 → 画面(preserveDrawingBuffer)
+    [resize]    field/accum のみ再確保。STATE はキャンバス非依存で保持。
+
+  スライダーの説明(全て単一 state に集約 / DEFAULTS と RESET LOOK):
+    spark     火花の量   発生率と実効の活性粒数
+    branch    分岐       分岐率と世代上限(松葉の密度)
+    life      火花の寿命 火花が消えるまでの長さ
+    speed     勢い       初速(松葉の飛ぶ距離)
+    afterglow 残光       フィードバック蓄積の減衰(尾の長さ)
+    heat      火の温度   色温度(黄白寄り↔赤寄り)
+    sway      揺らぎ     curl noise の蛇行と明滅の強さ
+    calm      静けさの効き ポインタの動きが散りを早める感度(小さいほど鈍感)
+
+  依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00。外部ライブラリ/アセット無し)。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="art-input" content="none" />
+    <title>線香花火 — Senko Hanabi (WebGL2 pointer)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05060a;
+        --ink: #f6ede0;
+        --muted: rgba(246, 237, 224, 0.66);
+        --panel: rgba(12, 12, 18, 0.86);
+        --line: rgba(246, 237, 224, 0.18);
+        --accent: #ffae5c;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: radial-gradient(120% 100% at 50% 15%, #0a0b12, #030308 70%);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #030308;
+        touch-action: none;
+      }
+      .top-btn {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        z-index: 11;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: var(--panel);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left));
+        width: 38px;
+        padding: 8px 0;
+        font-size: 15px;
+        line-height: 1;
+        text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute;
+        top: 9px;
+        right: 9px;
+        z-index: 2;
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        background: rgba(246, 237, 224, 0.06);
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(246, 237, 224, 0.14); }
+      .panel {
+        position: fixed;
+        top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(360px, calc(100vw - 28px));
+        max-height: calc(100vh - 76px);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px;
+        padding-right: 30px;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 0 0 10px;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1;
+        max-width: 210px;
+        padding: 5px 6px;
+        color: var(--ink);
+        background: rgba(246, 237, 224, 0.06);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        font: inherit;
+        font-size: 10.5px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider";
+        gap: 2px 8px;
+        padding: 7px 0 2px;
+        border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block;
+        font-size: 9.5px;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+      .row output {
+        grid-area: out;
+        justify-self: end;
+        font-size: 10.5px;
+        color: var(--accent);
+      }
+      .row input[type="range"] {
+        grid-area: slider;
+        width: 100%;
+        accent-color: var(--accent);
+      }
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0 2px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1;
+        min-width: 92px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(246, 237, 224, 0.06);
+        font: inherit;
+        font-size: 10.5px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+      .status {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+        font-size: 9.5px;
+        line-height: 1.7;
+        letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block;
+        margin-top: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 9px;
+        color: var(--muted);
+      }
+      #hint {
+        position: fixed;
+        left: 50%;
+        top: 66%;
+        transform: translate(-50%, -50%);
+        z-index: 6;
+        padding: 10px 18px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(8, 8, 14, 0.5);
+        color: var(--ink);
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.6s ease;
+        backdrop-filter: blur(3px);
+        text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+      }
+      #hint.show { opacity: 0.9; }
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(3, 3, 8, 0.85);
+        backdrop-filter: blur(6px);
+        transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px;
+        padding: 22px 24px;
+        text-align: center;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+      .overlay-card h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.16em;
+        color: var(--ink);
+      }
+      .overlay-card p { margin: 0; font-size: 11px; line-height: 1.6; }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 54vh;
+          padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 pointer-driven sparkler (senko hanabi)"></canvas>
+
+    <button
+      id="togglePanel"
+      type="button"
+      class="top-btn hidden"
+      aria-label="コントローラーを開く"
+      aria-expanded="true"
+    >
+      ☰
+    </button>
+
+    <section id="panel" class="panel" aria-label="Senko Hanabi controls"></section>
+
+    <div id="hint" aria-hidden="true">タップ / ドラッグで持つ</div>
+
+    <div id="overlay" class="hidden" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle"></h2>
+        <p id="overlayText"></p>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const hintEl = document.getElementById("hint");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?freeze=1 — deterministic still: a fixed-dt (1/60) pre-roll grows the
+        // matsuba, then time holds (dt=0) and only the composite re-runs from the
+        // frozen accum. Hashes are seeded by particle index / pos / age only
+        // (repo §8-9) so the still is reproducible and flicker-free.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakesource=1 — synthetic input: a deterministic scripted path moves the
+        // fireball slowly while the internal 4-phase clock cycles the whole
+        // pipeline (spawn → branch → scatter → re-ignite). Screen always moves
+        // (sparks) for the --motion check.
+        const FAKESOURCE = QUERY.get("fakesource") === "1";
+
+        const DEBUG_MODES = [
+          "最終合成",
+          "パーティクル生(残光なし)",
+          "残光蓄積レイヤ",
+          "速度・寿命・世代",
+          "標本(火の色温度見本)",
+        ];
+
+        const DEFAULTS = {
+          spark: 0.6,
+          branch: 0.55,
+          life: 0.5,
+          speed: 0.5,
+          afterglow: 0.5,
+          heat: 0.55,
+          sway: 0.4,
+          calm: 0.5,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          // reduced-motion: stop spark spawning and hold a still frame by default
+          // (order §7 「火花の発生を止め静止させる」).
+          pauseAnim: reducedMotion,
+        };
+
+        const uiRows = [
+          ["spark", "火花の量", "発生率と実効の活性粒数", 0, 1, 0.01],
+          ["branch", "分岐", "分岐率と世代上限(松葉の密度)", 0, 1, 0.01],
+          ["life", "火花の寿命", "火花が消えるまでの長さ", 0, 1, 0.01],
+          ["speed", "勢い", "初速(松葉の飛ぶ距離)", 0, 1, 0.01],
+          ["afterglow", "残光", "フィードバック蓄積の減衰(尾の長さ)", 0, 1, 0.01],
+          ["heat", "火の温度", "色温度(黄白寄り↔赤寄り)", 0, 1, 0.01],
+          ["sway", "揺らぎ", "curl noise の蛇行と明滅の強さ", 0, 1, 0.01],
+          ["calm", "静けさの効き", "動きが散りを早める感度(小さいほど鈍感)", 0, 1, 0.01],
+        ];
+
+        // Presets (標本 = uDebug 4 の火の色温度見本で承認を得る前提)
+        const PRESETS = {
+          牡丹: {
+            spark: 0.5, branch: 0.35, life: 0.6, speed: 0.35,
+            afterglow: 0.55, heat: 0.72, sway: 0.3, calm: 0.5,
+          },
+          松葉: {
+            spark: 0.72, branch: 0.78, life: 0.55, speed: 0.6,
+            afterglow: 0.5, heat: 0.6, sway: 0.45, calm: 0.5,
+          },
+          散り菊: {
+            spark: 0.45, branch: 0.3, life: 0.7, speed: 0.72,
+            afterglow: 0.62, heat: 0.4, sway: 0.55, calm: 0.5,
+          },
+        };
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>線香花火 — Senko Hanabi</h1>
+          <p>
+            指で火球を<b>持つ位置</b>を操ります。<b>静かに持つほど松葉が長持ち</b>、
+            素早く動かす/振ると火球が乱れて<b>早く散り</b>ます。牡丹→松葉→柳/散り菊→散りの
+            4位相をたどり、火球が落ちて消え、また点火します。<b>触らない待機のループが主役です。</b>
+          </p>
+          <div class="select-row">
+            <span>プリセット</span>
+            <select id="presetSel" aria-label="プリセット">
+              <option value="">— 選択 —</option>
+              ${Object.keys(PRESETS)
+                .map((k) => `<option value="${k}">${k}</option>`)
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>火花を止める(静止)</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+            <button id="hideUi" type="button">HIDE UI</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 描画 -- / 位相 -- / 入力 --</div>
+            <span class="badge" id="glBadge">WebGL2 · GPU Particles · feedback · oklab · pointer</span>
+          </div>
+          </div>
+        `;
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (e) => {
+          state.debugView = Number(e.currentTarget.value);
+        });
+        document.getElementById("presetSel").addEventListener("change", (e) => {
+          const preset = PRESETS[e.currentTarget.value];
+          if (preset) Object.keys(preset).forEach((k) => setSlider(k, preset[k]));
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (e) => {
+          state.pauseAnim = e.currentTarget.checked;
+          if (!state.pauseAnim) lastNow = performance.now();
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          document.getElementById("presetSel").value = "";
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        document.getElementById("hideUi").addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-senkohanabi-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function setOverlay(title, text, show) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          overlay.classList.toggle("hidden", !show);
+        }
+
+        /* ==================================================================
+           WebGL2 setup
+        ================================================================== */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "WEBGL2 UNAVAILABLE",
+            "この作品は WebGL2 を必要とします。ハードウェアアクセラレーションが有効な最新のブラウザでお試しください。",
+            true,
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // float render targets (particle state + HDR field/accum). Fallback to
+        // RGBA8 with an encode for signed velocity when EXT_color_buffer_float is
+        // missing (repo §8-3). Position packs into [0,1] with a margin, too.
+        const FLOAT_OK = !!gl.getExtension("EXT_color_buffer_float");
+        gl.getExtension("OES_texture_float_linear"); // harmless if absent
+
+        // Renderer probe → software (SwiftShader) uses fewer particles.
+        let isSoftware = false;
+        try {
+          const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+          const rend = dbg
+            ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL))
+            : "";
+          isSoftware = /swiftshader|software|llvmpipe|angle \(google/i.test(rend);
+        } catch (e) {
+          void e;
+        }
+        // PART side² particles in a square state texture.
+        const PART_SIDE = isSoftware ? 80 : 160;
+        const PART_W = PART_SIDE;
+        const PART_H = PART_SIDE;
+        const PART_N = PART_W * PART_H;
+
+        /* ------------------------------------------------------------------
+           Shared GLSL — fullscreen VS, codec, noise, oklab, fire ramp
+        ------------------------------------------------------------------ */
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // texA packs position (.xy) + velocity (.zw). In float mode both are
+        // stored directly. In the RGBA8 fallback position is remapped from
+        // [-0.5,1.5] and velocity from [-VR,VR] into [0,1]. texB (age/life/gen/
+        // seed) is [0,1] in BOTH modes (life & gen pre-normalized on the CPU/GLSL).
+        const CHUNK_CODEC = FLOAT_OK
+          ? `
+            vec2 decPos(vec4 A){ return A.xy; }
+            vec2 decVel(vec4 A){ return A.zw; }
+            vec4 packAV(vec2 p, vec2 v){ return vec4(p, v); }
+          `
+          : `
+            const float PRANGE = 2.0;
+            const float POFF = 0.5;
+            const float VR = 4.0;
+            vec2 decPos(vec4 A){ return A.xy * PRANGE - POFF; }
+            vec2 decVel(vec4 A){ return A.zw * (2.0 * VR) - VR; }
+            vec4 packAV(vec2 p, vec2 v){
+              return vec4((p + POFF) / PRANGE, clamp(v / (2.0 * VR) + 0.5, 0.0, 1.0));
+            }
+          `;
+
+        // pcg-flavoured hashes. Seeds are index / position / age — NEVER wall
+        // time (repo §8-9), so ?freeze=1 is deterministic and idle never flickers.
+        const CHUNK_NOISE = `
+          float h11(float p){
+            p = fract(p * 0.1031);
+            p *= p + 33.33;
+            p *= p + p;
+            return fract(p);
+          }
+          float hash12(vec2 p){
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p){
+            vec2 i = floor(p);
+            vec2 f = p - i;
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm3(vec2 p){
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 3; i++){
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc;
+          }
+          vec2 curlNoise(vec2 p){
+            float e = 0.03;
+            float n1 = fbm3(p + vec2(0.0, e));
+            float n2 = fbm3(p - vec2(0.0, e));
+            float n3 = fbm3(p + vec2(e, 0.0));
+            float n4 = fbm3(p - vec2(e, 0.0));
+            return vec2(n1 - n2, -(n3 - n4)) / (2.0 * e);
+          }
+        `;
+
+        const CHUNK_OKLAB = `
+          vec3 srgb2lin(vec3 c){
+            return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+          }
+          vec3 lin2srgb(vec3 c){
+            c = clamp(c, 0.0, 1.0);
+            return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+          }
+          vec3 lin2oklab(vec3 c){
+            float l = 0.4122214708*c.r + 0.5363325363*c.g + 0.0514459929*c.b;
+            float m = 0.2119034982*c.r + 0.6806995451*c.g + 0.1073969566*c.b;
+            float s = 0.0883024619*c.r + 0.2817188376*c.g + 0.6299787005*c.b;
+            float l_ = pow(max(l,0.0), 1.0/3.0);
+            float m_ = pow(max(m,0.0), 1.0/3.0);
+            float s_ = pow(max(s,0.0), 1.0/3.0);
+            return vec3(
+              0.2104542553*l_ + 0.7936177850*m_ - 0.0040720468*s_,
+              1.9779984951*l_ - 2.4285922050*m_ + 0.4505937099*s_,
+              0.0259040371*l_ + 0.7827717662*m_ - 0.8086757660*s_);
+          }
+          vec3 oklab2srgb(vec3 lab){
+            float l_ = lab.x + 0.3963377774*lab.y + 0.2158037573*lab.z;
+            float m_ = lab.x - 0.1055613458*lab.y - 0.0638541728*lab.z;
+            float s_ = lab.x - 0.0894841775*lab.y - 1.2914855480*lab.z;
+            float l = l_*l_*l_;
+            float m = m_*m_*m_;
+            float s = s_*s_*s_;
+            vec3 lin = vec3(
+              4.0767416621*l - 3.3077115913*m + 0.2309699292*s,
+              -1.2684380046*l + 2.6097574011*m - 0.3413193965*s,
+              -0.0041960863*l - 0.7034186147*m + 1.7076147010*s);
+            return lin2srgb(lin);
+          }
+          vec3 oklabMix(vec3 a, vec3 b, float t){
+            return oklab2srgb(mix(lin2oklab(srgb2lin(a)), lin2oklab(srgb2lin(b)), t));
+          }
+          // 火の色温度: 寿命 a(0..1, 0=生まれたて) を温度に。heat が高いほど白熱が長い。
+          // 黄白 → 橙 → 深紅 の2区間を oklab 補間。周縁で夜闇に冷える。
+          vec3 fireColor(float a, float heat){
+            float ta = pow(clamp(a, 0.0, 1.0), mix(1.55, 0.62, heat));
+            vec3 hot = vec3(1.00, 0.96, 0.80);
+            vec3 mid = vec3(1.00, 0.52, 0.16);
+            vec3 cld = vec3(0.72, 0.13, 0.04);
+            return ta < 0.5
+              ? oklabMix(hot, mid, ta / 0.5)
+              : oklabMix(mid, cld, (ta - 0.5) / 0.5);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P0 — particle INIT. Every slot starts DEAD (ageF ≥ 1); the spawn
+           logic in the update pass fills the pool over the first fraction of a
+           second from the fireball. Deterministic (index-seeded).
+        ------------------------------------------------------------------ */
+        const partInitFS = `#version 300 es
+          precision highp float;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform float uTexW;
+          uniform vec2 uBallPos;
+          ${CHUNK_NOISE}
+          ${CHUNK_CODEC}
+          void main(){
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexW + float(tc.x);
+            float seed = h11(idx * 0.017 + 0.123);
+            outA = packAV(uBallPos, vec2(0.0));
+            outB = vec4(1.0, 0.35, 0.0, seed);   // ageF=1 (dead), life, gen 0, seed
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P1 — particle UPDATE (MRT, ping-pong). Alive particles integrate
+           (curl-noise 蛇行 + gravity droop + drag). Dead slots respawn:
+             (a) BRANCH child — pick a random parent; if it is alive, mid-flight
+                 (age window) and below the generation cap, become a child at the
+                 parent's position with a rotated, scaled velocity (松葉の枝分かれ).
+             (b) ROOT spark — else, with the emission probability, ignite a fresh
+                 radial spark from the fireball (generation 0).
+           Both read the SOURCE textures (previous frame) → no read/write hazard.
+        ------------------------------------------------------------------ */
+        const partUpdateFS = `#version 300 es
+          precision highp float;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform int uTexW;
+          uniform int uTexH;
+          uniform float uTexWf;
+          uniform float uDt;
+          uniform vec2 uBallPos;
+          uniform float uAspect;
+          uniform float uFrameSeed;
+          uniform float uRootRate;    // per dead-slot per second
+          uniform float uBranchRate;  // per dead-slot per second
+          uniform float uInitSpeed;
+          uniform float uMaxGen;
+          uniform float uLife;        // seconds (root lifespan for this phase)
+          uniform float uGravity;
+          uniform float uDrag;
+          uniform float uSway;
+          uniform float uBranchAngle;
+          uniform float uBallActive;  // 1 while the bead glows (emits), 0 during cooldown
+          ${CHUNK_NOISE}
+          ${CHUNK_CODEC}
+
+          vec2 rot2(vec2 v, float a){
+            float c = cos(a), s = sin(a);
+            return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
+          }
+
+          void main(){
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexWf + float(tc.x);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            vec2 pos = decPos(A);
+            vec2 vel = decVel(A);
+            float ageF = B.x;
+            float life = B.y * 8.0;
+            float gen  = floor(B.z * 8.0 + 0.5);
+            float seed = B.w;
+
+            const float VMAX = 3.5;
+
+            if (ageF < 1.0) {
+              // ---- ALIVE: integrate ----
+              ageF += uDt / max(life, 0.05);
+              // curl-noise 蛇行 (position-seeded, freeze-safe)
+              vec2 cn = curlNoise(pos * 4.4 + seed * 19.0);
+              vel += cn * (0.02 + 0.20 * uSway) * uDt;
+              // gravity droop + air drag
+              vel.y -= uGravity * uDt;
+              vel *= exp(-uDt * uDrag);
+              vel = clamp(vel, vec2(-VMAX), vec2(VMAX));
+              pos += vel * uDt;
+              bool off = pos.x < -0.3 || pos.x > 1.3 || pos.y < -0.4 || pos.y > 1.3;
+              if (off) ageF = 1.0;
+              outA = packAV(pos, vel);
+              outB = vec4(min(ageF, 1.0), life / 8.0, gen / 8.0, seed);
+              return;
+            }
+
+            // ---- DEAD: try to respawn ----
+            float s1 = h11(seed + uFrameSeed * 1.7 + idx * 0.00131);
+            float s2 = h11(s1 + 4.7);
+            float s3 = h11(s2 + 8.3);
+            float s4 = h11(s3 + 2.1);
+            seed = s4;
+
+            // (a) branch attempt — dt-scaled so branch density is frame-rate
+            //     independent. Only if a randomly chosen parent is branchable.
+            bool didSpawn = false;
+            if (s1 < clamp(uBranchRate * uDt, 0.0, 0.95)) {
+              int pcount = uTexW * uTexH;
+              int pi = int(s2 * float(pcount));
+              pi = clamp(pi, 0, pcount - 1);
+              ivec2 ptc = ivec2(pi % uTexW, pi / uTexW);
+              vec4 PA = texelFetch(uStateA, ptc, 0);
+              vec4 PB = texelFetch(uStateB, ptc, 0);
+              float pAge = PB.x;
+              float pGen = floor(PB.z * 8.0 + 0.5);
+              vec2 pVel = decVel(PA);
+              vec2 pPos = decPos(PA);
+              bool branchable = pAge > 0.15 && pAge < 0.72
+                              && pGen < uMaxGen - 0.5
+                              && length(pVel) > 0.02;
+              if (branchable) {
+                float ang = (s3 - 0.5) * 2.0 * uBranchAngle;
+                float scl = mix(0.55, 0.9, s4);
+                vel = rot2(pVel, ang) * scl;
+                pos = pPos;
+                gen = pGen + 1.0;
+                life = uLife * mix(0.5, 0.72, s3);
+                ageF = 0.0;
+                didSpawn = true;
+              }
+            }
+
+            // (b) root spark from the fireball
+            if (!didSpawn && uBallActive > 0.5
+                && s2 < clamp(uRootRate * uDt, 0.0, 0.95)) {
+              float ang = s3 * 6.28318530718;
+              float sp = uInitSpeed * mix(0.55, 1.15, s4);
+              // radial, aspect-corrected so emission is circular on screen
+              vec2 dir = vec2(cos(ang) / uAspect, sin(ang));
+              vel = dir * sp;
+              vel.y += 0.04 * uInitSpeed; // faint upward bias at ignition
+              pos = uBallPos + vec2((s1 - 0.5) / uAspect, s4 - 0.5) * 0.012;
+              gen = 0.0;
+              life = uLife * mix(0.8, 1.1, s1);
+              ageF = 0.0;
+              didSpawn = true;
+            }
+
+            if (!didSpawn) {
+              // stay dead; park offscreen-ish at the bead, evolve seed
+              ageF = 1.0;
+              pos = uBallPos;
+              vel = vec2(0.0);
+            }
+
+            outA = packAV(pos, vel);
+            outB = vec4(min(ageF, 1.0), life / 8.0, gen / 8.0, seed);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P2 — particle DRAW. Instanced quad per particle (gl_InstanceID →
+           texelFetch of state; gl_VertexID → quad corner). The quad is stretched
+           along the velocity into a short STREAK (bright head, fading tail),
+           length ∝ speed — never a round bokeh dot (§B1 星化回避). Colour is the
+           oklab fire ramp keyed by age; scintillation flickers brightness via a
+           cell-hash of (seed, quantized age) — no wall time (freeze-safe).
+        ------------------------------------------------------------------ */
+        const partDrawVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform float uTexW;
+          uniform vec2 uRes;
+          uniform float uBaseLen;
+          uniform float uLenScale;
+          uniform float uWidth;
+          uniform float uHeat;
+          uniform float uSway;
+          uniform int uDebug;
+          out vec2 vLocal;      // x = across [-1,1], y = along [0 tail .. 1 head]
+          out vec3 vCol;
+          out float vBright;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          ${CHUNK_CODEC}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
+          void main(){
+            int i = gl_InstanceID;
+            int tw = int(uTexW);
+            ivec2 tc = ivec2(i % tw, i / tw);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            float ageF = B.x;
+            float gen = floor(B.z * 8.0 + 0.5);
+            float seed = B.w;
+
+            if (ageF >= 1.0) {   // dead → cull (degenerate offscreen triangle)
+              gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+              return;
+            }
+
+            vec2 pos = decPos(A);
+            vec2 vel = decVel(A);
+            float speed = length(vel);
+
+            // scintillation: cell-hash of seed + quantized age (freeze-safe flicker)
+            float cell = h11(seed * 37.0 + floor(ageF * 26.0) * 1.7);
+            float scin = mix(1.0 - 0.7 * uSway, 1.0, cell);
+            // brightness: bright & white-hot at birth, fades with age
+            float bright = pow(clamp(1.0 - ageF, 0.0, 1.0), 0.55);
+            // deeper generations are finer / a touch dimmer
+            float genF = pow(0.82, gen);
+
+            vec3 col = fireColor(ageF, uHeat);
+            if (uDebug == 3) {
+              // velocity(R) / life-left(G) / generation(B) visualisation
+              col = vec3(clamp(speed * 1.6, 0.0, 1.0), clamp(1.0 - ageF, 0.0, 1.0), gen / 3.0);
+              scin = 1.0; bright = 1.0; genF = 1.0;
+            }
+            vCol = col;
+            vBright = bright * scin * genF;
+
+            // streak geometry in pixel space
+            vec2 vp = vel * uRes;
+            vec2 dir = speed > 1e-5 ? normalize(vp) : vec2(0.0, 1.0);
+            vec2 perp = vec2(-dir.y, dir.x);
+            float lenPx = (uBaseLen + speed * uLenScale) * mix(0.7, 1.0, genF);
+            float halfW = uWidth * mix(0.7, 1.0, genF);
+
+            vec2 corner = QUAD[gl_VertexID];
+            float across = corner.x;
+            float along = corner.y * 0.5 + 0.5;   // 0 tail .. 1 head
+            vLocal = vec2(across, along);
+
+            vec2 posPx = pos * uRes;
+            vec2 off = perp * (across * halfW) + dir * ((along - 1.0) * lenPx);
+            vec2 clip = (posPx + off) / uRes * 2.0 - 1.0;
+            gl_Position = vec4(clip, 0.0, 1.0);
+          }
+        `;
+
+        const partDrawFS = `#version 300 es
+          precision highp float;
+          in vec2 vLocal;
+          in vec3 vCol;
+          in float vBright;
+          out vec4 fragColor;
+          void main(){
+            float across = vLocal.x;
+            float along = vLocal.y;
+            // thin soft cross-section; rounded head, tapered tail
+            float prof = 1.0 - abs(across);
+            float body = smoothstep(0.0, 0.45, prof);
+            float headRound = smoothstep(0.0, 0.12, along) *
+                              (0.55 + 0.45 * smoothstep(1.02, 0.7, along));
+            float taper = mix(0.12, 1.0, pow(along, 1.35));
+            float inten = body * taper * headRound * vBright;
+            if (inten < 0.004) discard;
+            // additive (blend ONE,ONE): premultiplied glow
+            fragColor = vec4(vCol * inten, inten);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P2b — fireball (火球). One additive quad at the hold position. sdf
+           distance builds a brightest white-hot molten CORE (§ invariant 4) with
+           a warm halo. Fed into the field so a falling bead (散り) trails too.
+        ------------------------------------------------------------------ */
+        const ballVS = `#version 300 es
+          precision highp float;
+          uniform vec2 uRes;
+          uniform vec2 uBallPos;
+          uniform float uBallR;   // radius in px
+          out vec2 vP;
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
+          void main(){
+            vec2 corner = QUAD[gl_VertexID];
+            vP = corner;
+            vec2 posPx = uBallPos * uRes + corner * uBallR;
+            vec2 clip = posPx / uRes * 2.0 - 1.0;
+            gl_Position = vec4(clip, 0.0, 1.0);
+          }
+        `;
+        const ballFS = `#version 300 es
+          precision highp float;
+          in vec2 vP;
+          out vec4 fragColor;
+          uniform float uBright;
+          uniform float uHeat;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          void main(){
+            float d = length(vP);
+            if (d > 1.0) discard;
+            float core = smoothstep(0.52, 0.0, d);
+            float halo = exp(-d * d * 3.2);
+            // molten bead: shimmering hot core (position-seeded, no time)
+            float shim = 0.85 + 0.15 * vnoise(vP * 7.0 + 3.1);
+            vec3 coreCol = mix(vec3(1.0, 0.93, 0.72), vec3(1.0, 0.98, 0.9), uHeat);
+            vec3 haloCol = fireColor(0.35, uHeat);
+            vec3 col = coreCol * (core * 1.0 * shim) + haloCol * (halo * 0.38);
+            float inten = (core * 1.0 + halo * 0.34) * uBright;
+            col *= uBright;
+            if (inten < 0.004) discard;
+            fragColor = vec4(col, inten);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P3 — feedback ACCUMULATION (残光, ping-pong). The trail is bounded:
+           accum = accum_prev * decayFrame + field * addGain, clamped to cap.
+           decayFrame < 1 guarantees dissipation > addition, and the clamp caps
+           the sum (§A5 whiteout guard). dt-scaled so the tail length is frame-
+           rate independent.
+        ------------------------------------------------------------------ */
+        const accumFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uAccum;
+          uniform sampler2D uField;
+          uniform float uDecayFrame;
+          uniform float uAddGain;
+          uniform float uCap;
+          void main(){
+            vec3 prev = texture(uAccum, vUv).rgb;
+            vec3 f = texture(uField, vUv).rgb;
+            vec3 outc = prev * uDecayFrame + f * uAddGain;
+            outc = min(outc, vec3(uCap));
+            fragColor = vec4(outc, 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           composite — the on-screen look pass (+ uDebug views). Tonemap the
+           bounded accum on a night ground, edge-darkening vignette.
+        ------------------------------------------------------------------ */
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uAccum;
+          uniform sampler2D uField;
+          uniform vec2 uRes;
+          uniform float uAspect;
+          uniform float uExposure;
+          uniform float uHeat;
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+
+          vec3 tonemap(vec3 x){ return vec3(1.0) - exp(-x * uExposure); }
+
+          void main(){
+            if (uDebug == 4) {
+              // 標本: 火の色温度グラデーション + 単発ストリーク見本
+              vec3 c;
+              if (vUv.y > 0.62) {
+                float t = clamp((vUv.x - 0.05) / 0.9, 0.0, 1.0);
+                c = fireColor(t, uHeat);            // 黄白(左)→橙→深紅(右)
+              } else if (vUv.y > 0.32) {
+                // ストリーク見本: 頭が明・尾が減衰、速度方向に伸びた光の筋
+                vec2 gp = vec2(vUv.x, (vUv.y - 0.47) / 0.13);
+                float along = clamp(vUv.x, 0.0, 1.0);
+                float prof = 1.0 - abs(gp.y);
+                float body = smoothstep(0.0, 0.5, prof);
+                float taper = mix(0.1, 1.0, pow(along, 1.3));
+                float inten = body * taper;
+                c = fireColor(1.0 - along, uHeat) * inten * 1.4;
+              } else {
+                // 火球芯の見本
+                vec2 d = (vUv - vec2(0.5, 0.16)) * vec2(uAspect, 1.0);
+                float dd = length(d) / 0.14;
+                float core = smoothstep(1.0, 0.0, dd);
+                c = mix(vec3(1.0, 0.93, 0.72), vec3(1.0, 0.98, 0.9), uHeat) * core;
+              }
+              fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+              return;
+            }
+
+            vec3 src = (uDebug == 1 || uDebug == 3)
+              ? texture(uField, vUv).rgb
+              : texture(uAccum, vUv).rgb;
+
+            if (uDebug == 3) {   // raw velocity/life/gen — no tonemap
+              fragColor = vec4(clamp(src, 0.0, 1.0), 1.0);
+              return;
+            }
+            if (uDebug == 2) {   // accum layer, mildly tonemapped
+              fragColor = vec4(tonemap(src), 1.0);
+              return;
+            }
+
+            vec3 col = tonemap(src);
+
+            // faint night ground so black is not dead flat (deep indigo, still ~black)
+            float upBias = 1.0 - 0.4 * vUv.y;
+            col += vec3(0.012, 0.015, 0.03) * upBias;
+            // a whisper of static star noise, extremely faint (position-seeded)
+            float st = step(0.9992, hash12(floor(vUv * uRes / 2.0)));
+            col += vec3(0.05) * st;
+
+            // edge darkening — dissolve the periphery into the night
+            float rr = length((vUv - 0.5) * vec2(uAspect, 1.0)) /
+                       (0.5 * length(vec2(uAspect, 1.0)));
+            col *= 1.0 - 0.62 * smoothstep(0.45, 1.05, rr);
+
+            col = clamp(col, 0.0, 1.0);
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           reduceActive — approximate active-particle count for the readout.
+           Samples the age channel on a small grid; alive = ageF < ~1.
+        ------------------------------------------------------------------ */
+        const reduceFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uStateB;
+          uniform vec2 uTexel;
+          void main(){
+            float acc = 0.0;
+            for (int j = -1; j <= 1; j++){
+              for (int i = -1; i <= 1; i++){
+                float a = texture(uStateB, vUv + vec2(float(i), float(j)) * uTexel * 4.0).x;
+                acc += step(a, 0.999);
+              }
+            }
+            fragColor = vec4(vec3(acc / 9.0), 1.0);
+          }
+        `;
+
+        /* ==================================================================
+           Program + target plumbing
+        ================================================================== */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          pInit: createProgram(fullscreenVS, partInitFS),
+          pUpdate: createProgram(fullscreenVS, partUpdateFS),
+          pDraw: createProgram(partDrawVS, partDrawFS),
+          ball: createProgram(ballVS, ballFS),
+          accum: createProgram(fullscreenVS, accumFS),
+          composite: createProgram(fullscreenVS, compositeFS),
+          reduce: createProgram(fullscreenVS, reduceFS),
+        };
+
+        const locations = {
+          pInit: getLocations(programs.pInit, ["uTexW", "uBallPos"]),
+          pUpdate: getLocations(programs.pUpdate, [
+            "uStateA", "uStateB", "uTexW", "uTexH", "uTexWf", "uDt", "uBallPos",
+            "uAspect", "uFrameSeed", "uRootRate", "uBranchRate", "uInitSpeed",
+            "uMaxGen", "uLife", "uGravity", "uDrag", "uSway", "uBranchAngle",
+            "uBallActive",
+          ]),
+          pDraw: getLocations(programs.pDraw, [
+            "uStateA", "uStateB", "uTexW", "uRes", "uBaseLen", "uLenScale",
+            "uWidth", "uHeat", "uSway", "uDebug",
+          ]),
+          ball: getLocations(programs.ball, [
+            "uRes", "uBallPos", "uBallR", "uBright", "uHeat",
+          ]),
+          accum: getLocations(programs.accum, [
+            "uAccum", "uField", "uDecayFrame", "uAddGain", "uCap",
+          ]),
+          composite: getLocations(programs.composite, [
+            "uAccum", "uField", "uRes", "uAspect", "uExposure", "uHeat", "uDebug",
+          ]),
+          reduce: getLocations(programs.reduce, ["uStateB", "uTexel"]),
+        };
+
+        // internal formats. State needs 2 attachments (MRT). HDR field/accum use
+        // float when available; RGBA8 fallback clamps additive to [0,1] (§8-3,
+        // acceptable degraded HDR — the clamp also doubles as a whiteout guard).
+        const STATE_INT = FLOAT_OK ? gl.RGBA16F : gl.RGBA8;
+        const STATE_TYPE = FLOAT_OK ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+        const HDR_INT = FLOAT_OK ? gl.RGBA16F : gl.RGBA8;
+        const HDR_TYPE = FLOAT_OK ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+        const RGBA8_FMT = [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE];
+
+        function createTex(w, h, internal, type, filter) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, gl.RGBA, type, null);
+          return tex;
+        }
+        function createTarget(w, h, internal, type, filter) {
+          const tex = createTex(w, h, internal, type, filter);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (!ok) throw new Error("RENDER TARGET INCOMPLETE");
+          return { tex, fbo, width: w, height: h };
+        }
+        // Ping-pong-able particle STATE set: two textures on one MRT framebuffer.
+        function createParticleSet(w, h) {
+          const texA = createTex(w, h, STATE_INT, STATE_TYPE, gl.NEAREST);
+          const texB = createTex(w, h, STATE_INT, STATE_TYPE, gl.NEAREST);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, texB, 0);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+          const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (!ok) throw new Error("RENDER TARGET INCOMPLETE");
+          return { texA, texB, fbo, width: w, height: h };
+        }
+        function destroyTarget(t) {
+          if (!t) return;
+          if (t.tex) gl.deleteTexture(t.tex);
+          if (t.texA) gl.deleteTexture(t.texA);
+          if (t.texB) gl.deleteTexture(t.texB);
+          gl.deleteFramebuffer(t.fbo);
+        }
+        function clearFbo(fbo, w, h) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.viewport(0, 0, w, h);
+          gl.clearColor(0, 0, 0, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderTo(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          gl.bindVertexArray(vao);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+          gl.bindVertexArray(null);
+        }
+
+        // True GPU sync (CRAFT §C4): gl.finish() is unreliable on software GL, so
+        // a 1×1 readPixels round-trip drains the queue.
+        const syncPx = new Uint8Array(4);
+        function glSync() {
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+        }
+
+        const vao = gl.createVertexArray();
+
+        // Particle state ping-pong (canvas-independent; allocated once).
+        const partSets = [
+          createParticleSet(PART_W, PART_H),
+          createParticleSet(PART_W, PART_H),
+        ];
+        let partPing = false;
+        let particleInited = false;
+
+        /* ==================================================================
+           Field / accum targets, resize
+        ================================================================== */
+
+        const PAINT_MAX = 1000;
+        const REDUCE_N = 24;
+        let paintW = 2, paintH = 2, aspect = 1;
+        let fieldT, accumA, accumB, reduceT;
+        let accumPing = false;
+        let targetsReady = false;
+        let reallocated = false;
+
+        function curAccum() { return accumPing ? accumB : accumA; }
+        function otherAccum() { return accumPing ? accumA : accumB; }
+
+        function allocFieldAccum(w, h) {
+          fieldT = createTarget(w, h, HDR_INT, HDR_TYPE, gl.LINEAR);
+          accumA = createTarget(w, h, HDR_INT, HDR_TYPE, gl.LINEAR);
+          accumB = createTarget(w, h, HDR_INT, HDR_TYPE, gl.LINEAR);
+          clearFbo(fieldT.fbo, w, h);
+          clearFbo(accumA.fbo, w, h);
+          clearFbo(accumB.fbo, w, h);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          accumPing = false;
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const w = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const h = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width === w && canvas.height === h && targetsReady) return;
+          canvas.width = w;
+          canvas.height = h;
+          aspect = w / h;
+
+          let pw = w, ph = h;
+          const longSide = Math.max(pw, ph);
+          if (longSide > PAINT_MAX) {
+            const k = PAINT_MAX / longSide;
+            pw = Math.max(2, Math.round(pw * k));
+            ph = Math.max(2, Math.round(ph * k));
+          }
+          paintW = pw;
+          paintH = ph;
+
+          if (targetsReady) {
+            destroyTarget(fieldT);
+            destroyTarget(accumA);
+            destroyTarget(accumB);
+          }
+          allocFieldAccum(pw, ph);
+          if (!reduceT) reduceT = createTarget(REDUCE_N, REDUCE_N, gl.RGBA8, gl.UNSIGNED_BYTE, gl.NEAREST);
+          targetsReady = true;
+          reallocated = true;
+        }
+
+        /* ==================================================================
+           Input — pointer / tilt + fakesource
+        ================================================================== */
+
+        let pointerActive = false;
+        let pointerUv = [0.5, 0.62];
+        let lastPointerUv = null;
+        let pointerSpeed = 0;       // instantaneous (uv/sec)
+        let pointerSpeedEma = 0;    // ema-smoothed (invariant 5)
+        let lastInputT = -1e9;
+        let hintShown = false;
+
+        // tilt (secondary; works only if permission granted & events arrive)
+        let tiltActive = false;
+        let tiltX = 0, tiltY = 0;   // eased, in [-1,1]-ish
+
+        function clientToUv(clientX, clientY) {
+          const rect = canvas.getBoundingClientRect();
+          const x = (clientX - rect.left) / Math.max(rect.width, 1);
+          const y = 1 - (clientY - rect.top) / Math.max(rect.height, 1);
+          return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
+        }
+
+        canvas.addEventListener("pointerdown", (e) => {
+          pointerActive = true;
+          pointerUv = clientToUv(e.clientX, e.clientY);
+          lastPointerUv = pointerUv.slice();
+          lastInputT = simTime;
+          hideHint();
+          maybeRequestTilt();
+          canvas.setPointerCapture?.(e.pointerId);
+        });
+        canvas.addEventListener("pointermove", (e) => {
+          const uv = clientToUv(e.clientX, e.clientY);
+          if (pointerActive && lastPointerUv) {
+            const d = Math.hypot(uv[0] - lastPointerUv[0], uv[1] - lastPointerUv[1]);
+            pointerSpeed = d / (1 / 60);
+          }
+          pointerUv = uv;
+          lastPointerUv = uv.slice();
+          if (pointerActive) lastInputT = simTime;
+        });
+        function endPointer() {
+          pointerActive = false;
+          lastPointerUv = null;
+          pointerSpeed = 0;
+        }
+        canvas.addEventListener("pointerup", endPointer);
+        canvas.addEventListener("pointercancel", endPointer);
+
+        // DeviceOrientation (secondary). iOS needs an explicit tap to request
+        // permission; anywhere else it simply attaches. No tilt → no effect.
+        let tiltRequested = false;
+        function onDeviceOrientation(ev) {
+          if (ev.gamma == null && ev.beta == null) return;
+          tiltActive = true;
+          // gamma: left/right [-90,90], beta: front/back [-180,180]
+          const gx = Math.max(-1, Math.min(1, (ev.gamma || 0) / 35));
+          const gy = Math.max(-1, Math.min(1, ((ev.beta || 0) - 45) / 35));
+          tiltX = gx;
+          tiltY = gy;
+          lastInputT = simTime;
+        }
+        function maybeRequestTilt() {
+          if (tiltRequested || FAKESOURCE) return;
+          tiltRequested = true;
+          const DOE = window.DeviceOrientationEvent;
+          if (DOE && typeof DOE.requestPermission === "function") {
+            DOE.requestPermission().then((res) => {
+              if (res === "granted")
+                window.addEventListener("deviceorientation", onDeviceOrientation, true);
+            }).catch(() => {});
+          } else if (DOE) {
+            window.addEventListener("deviceorientation", onDeviceOrientation, true);
+          }
+        }
+        if (!FAKESOURCE && window.DeviceOrientationEvent &&
+            typeof window.DeviceOrientationEvent.requestPermission !== "function") {
+          window.addEventListener("deviceorientation", onDeviceOrientation, true);
+        }
+
+        function showHint() {
+          if (hintShown || FAKESOURCE) return;
+          hintShown = true;
+          const mobile = window.matchMedia("(max-width: 640px)").matches;
+          hintEl.textContent = mobile ? "そっと傾けて / ドラッグで持つ" : "タップ / ドラッグで持つ";
+          hintEl.classList.add("show");
+        }
+        function hideHint() {
+          if (!hintShown) return;
+          hintShown = false;
+          hintEl.classList.remove("show");
+        }
+
+        /* ==================================================================
+           4-phase clock + fireball CPU state
+        ================================================================== */
+
+        // segment boundaries (seconds within a cycle)
+        const T_PEONY = 2.2;    // 点火→牡丹
+        const T_MATSUBA = 10.0; // 松葉(主役・長い)
+        const T_WILLOW = 13.0;  // 柳/散り菊
+        const T_SCATTER = 14.6; // 散り(火球落下→消灯)
+        const T_COOL = 16.8;    // クールダウン(暗) → 再点火
+        const T_CYCLE = T_COOL;
+
+        // phase target coefficient sets (before spark/branch/etc. slider scaling)
+        // { emit, speed, branch, gen, life, gravity, ball }
+        const PHASE = {
+          peony:   { emit: 0.55, speed: 0.55, branch: 0.30, gen: 1.6, life: 0.95, gravity: 0.10, ball: 1.0 },
+          matsuba: { emit: 1.00, speed: 1.00, branch: 1.00, gen: 3.0, life: 1.00, gravity: 0.16, ball: 1.0 },
+          willow:  { emit: 0.55, speed: 0.80, branch: 0.45, gen: 2.2, life: 1.25, gravity: 0.42, ball: 0.85 },
+          scatter: { emit: 0.14, speed: 0.55, branch: 0.12, gen: 1.4, life: 1.05, gravity: 0.70, ball: 0.5 },
+          cool:    { emit: 0.0,  speed: 0.4,  branch: 0.0,  gen: 1.0, life: 0.8,  gravity: 0.5,  ball: 0.0 },
+        };
+
+        // eased ("actual") coefficients toward the phase target
+        const coeff = { emit: 0, speed: 0.5, branch: 0, gen: 1, life: 0.9, gravity: 0.1, ball: 0 };
+
+        let phaseTime = 0;          // position within the cycle
+        let disturbed = false;      // hysteresis latch for "moved too fast → scatter"
+        let ballBase = [0.5, 0.62]; // eased hold position
+        let ballFall = 0;           // downward drop offset (scatter)
+        let ballPos = [0.5, 0.62];
+        let ballBright = 0;
+
+        function phaseTargets(t) {
+          // returns [target coeff obj, phaseName, localProgress]
+          if (t < T_PEONY) return [PHASE.peony, "牡丹", t / T_PEONY];
+          if (t < T_MATSUBA) return [PHASE.matsuba, "松葉", (t - T_PEONY) / (T_MATSUBA - T_PEONY)];
+          if (t < T_WILLOW) return [PHASE.willow, "柳・散り菊", (t - T_MATSUBA) / (T_WILLOW - T_MATSUBA)];
+          if (t < T_SCATTER) return [PHASE.scatter, "散り", (t - T_WILLOW) / (T_SCATTER - T_WILLOW)];
+          return [PHASE.cool, "待機", (t - T_SCATTER) / (T_COOL - T_SCATTER)];
+        }
+
+        let phaseName = "牡丹";
+
+        function fakeBallPath(t) {
+          // slow lissajous so all 4 phases are visible during the warm window
+          const a = t * 0.19;
+          return [
+            0.5 + 0.16 * Math.sin(a) * Math.cos(a * 0.5),
+            0.6 + 0.12 * Math.sin(a * 0.7 + 1.0),
+          ];
+        }
+
+        function updateInputAndPhase(dt) {
+          // ema-smooth pointer speed (invariant 5)
+          pointerSpeedEma += (pointerSpeed - pointerSpeedEma) * Math.min(1, dt * 8.0);
+          if (!pointerActive) pointerSpeed *= Math.exp(-dt * 6.0);
+
+          // hysteresis: sensitivity rises with the calm slider (§ "小さいほど鈍感")
+          const hi = 1.15 - 0.85 * state.calm;   // high threshold (uv/sec)
+          const lo = hi * 0.45;
+          if (pointerSpeedEma > hi) disturbed = true;
+          else if (pointerSpeedEma < lo) disturbed = false;
+
+          // hold target position
+          let target;
+          if (FAKESOURCE) {
+            target = fakeBallPath(simTime);
+          } else if (pointerActive) {
+            target = pointerUv.slice();
+          } else if (tiltActive) {
+            target = [0.5 + tiltX * 0.28, 0.62 - tiltY * 0.22];
+          } else {
+            // idle: gentle breathing drift (alive without input)
+            target = [
+              0.5 + 0.02 * Math.sin(simTime * 0.5),
+              0.63 + 0.015 * Math.sin(simTime * 0.37 + 1.3),
+            ];
+          }
+          const ke = pointerActive ? 0.35 : 0.06;
+          ballBase[0] += (target[0] - ballBase[0]) * Math.min(1, dt * 60 * ke);
+          ballBase[1] += (target[1] - ballBase[1]) * Math.min(1, dt * 60 * ke);
+
+          // advance the phase clock; disturbance fast-forwards toward 散り
+          let adv = dt;
+          if (disturbed) {
+            const cur = phaseTime % T_CYCLE;
+            if (cur < T_WILLOW) adv += dt * (2.5 + 6.0 * state.calm);
+          }
+          phaseTime += adv;
+          if (phaseTime >= T_CYCLE) phaseTime -= T_CYCLE;
+
+          const [tgt, name, prog] = phaseTargets(phaseTime);
+          phaseName = name;
+
+          // ema toward the phase target (smooth transitions, invariant 2)
+          const k = Math.min(1, dt * 3.0);
+          coeff.emit += (tgt.emit - coeff.emit) * k;
+          coeff.speed += (tgt.speed - coeff.speed) * k;
+          coeff.branch += (tgt.branch - coeff.branch) * k;
+          coeff.gen += (tgt.gen - coeff.gen) * k;
+          coeff.life += (tgt.life - coeff.life) * k;
+          coeff.gravity += (tgt.gravity - coeff.gravity) * k;
+          coeff.ball += (tgt.ball - coeff.ball) * k;
+
+          // fireball fall in scatter, dark in cooldown, reset on re-ignition
+          if (phaseTime >= T_WILLOW && phaseTime < T_COOL) {
+            const p = (phaseTime - T_WILLOW) / (T_COOL - T_WILLOW);
+            ballFall = 0.34 * p * p;
+          } else {
+            ballFall += (0 - ballFall) * Math.min(1, dt * 4.0);
+          }
+          ballPos = [ballBase[0], ballBase[1] - ballFall];
+          ballBright = coeff.ball;
+          void prog;
+        }
+
+        /* ==================================================================
+           Simulation step
+        ================================================================== */
+
+        let stepSeed = 0.137;
+
+        function simStep(dt) {
+          stepSeed = (stepSeed * 1.618 + 0.313) % 1.0;
+
+          // phase → per-particle uniforms, scaled by the look sliders
+          const rootRate = coeff.emit * (0.06 + 0.55 * state.spark);
+          const branchRate = coeff.branch * (0.15 + 1.05 * state.branch);
+          const initSpeed = coeff.speed * (0.28 + 0.5 * state.speed);
+          const maxGen = Math.max(1, Math.round(1 + coeff.gen * (0.4 + 0.9 * state.branch)));
+          const life = coeff.life * (1.0 + 1.8 * state.life); // seconds
+          const gravity = coeff.gravity * 1.1;
+          const ballActive = ballBright > 0.06 ? 1.0 : 0.0;
+
+          const src = partPing ? partSets[1] : partSets[0];
+          const dst = partPing ? partSets[0] : partSets[1];
+          renderTo(dst, programs.pUpdate, () => {
+            const u = locations.pUpdate;
+            bindTexture(0, src.texA);
+            bindTexture(1, src.texB);
+            gl.uniform1i(u.uStateA, 0);
+            gl.uniform1i(u.uStateB, 1);
+            gl.uniform1i(u.uTexW, PART_W);
+            gl.uniform1i(u.uTexH, PART_H);
+            gl.uniform1f(u.uTexWf, PART_W);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform2f(u.uBallPos, ballPos[0], ballPos[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uFrameSeed, stepSeed);
+            gl.uniform1f(u.uRootRate, rootRate);
+            gl.uniform1f(u.uBranchRate, branchRate);
+            gl.uniform1f(u.uInitSpeed, initSpeed);
+            gl.uniform1f(u.uMaxGen, maxGen);
+            gl.uniform1f(u.uLife, life);
+            gl.uniform1f(u.uGravity, gravity);
+            gl.uniform1f(u.uDrag, 0.85);
+            gl.uniform1f(u.uSway, state.sway);
+            gl.uniform1f(u.uBranchAngle, 0.5 + 0.5 * state.branch);
+            gl.uniform1f(u.uBallActive, ballActive);
+          });
+          partPing = !partPing;
+        }
+
+        // Draw the particle field (streaks + fireball) additively, then fold it
+        // into the bounded feedback accumulation (残光).
+        function renderFieldAndAccum(dt) {
+          const drawn = partPing ? partSets[1] : partSets[0]; // last written
+
+          // P2 — particle streaks into the HDR field
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fieldT.fbo);
+          gl.viewport(0, 0, fieldT.width, fieldT.height);
+          gl.clearColor(0, 0, 0, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.ONE, gl.ONE);
+          gl.useProgram(programs.pDraw);
+          gl.bindVertexArray(vao);
+          bindTexture(0, drawn.texA);
+          bindTexture(1, drawn.texB);
+          gl.uniform1i(locations.pDraw.uStateA, 0);
+          gl.uniform1i(locations.pDraw.uStateB, 1);
+          gl.uniform1f(locations.pDraw.uTexW, PART_W);
+          gl.uniform2f(locations.pDraw.uRes, fieldT.width, fieldT.height);
+          gl.uniform1f(locations.pDraw.uBaseLen, 3.0);
+          gl.uniform1f(locations.pDraw.uLenScale, fieldT.height * 0.09);
+          gl.uniform1f(locations.pDraw.uWidth, 1.7);
+          gl.uniform1f(locations.pDraw.uHeat, state.heat);
+          gl.uniform1f(locations.pDraw.uSway, state.sway);
+          gl.uniform1i(locations.pDraw.uDebug, state.debugView);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, PART_N);
+
+          // P2b — fireball bead into the same field
+          if (ballBright > 0.02 && state.debugView !== 3) {
+            gl.useProgram(programs.ball);
+            const rPx = fieldT.height * (0.008 + 0.008 * state.spark);
+            gl.uniform2f(locations.ball.uRes, fieldT.width, fieldT.height);
+            gl.uniform2f(locations.ball.uBallPos, ballPos[0], ballPos[1]);
+            gl.uniform1f(locations.ball.uBallR, rPx * 2.0);
+            gl.uniform1f(locations.ball.uBright, ballBright);
+            gl.uniform1f(locations.ball.uHeat, state.heat);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+          }
+          gl.bindVertexArray(null);
+          gl.disable(gl.BLEND);
+
+          // P3 — feedback accumulation (残光). dt-scaled decay; hard cap (§A5).
+          const trailK = 1.6 + (1 - state.afterglow) * 9.0; // 1/sec (smaller = longer)
+          const decayFrame = Math.exp(-dt * trailK);
+          const cap = FLOAT_OK ? 1.7 : 1.0;
+          renderTo(otherAccum(), programs.accum, () => {
+            const u = locations.accum;
+            bindTexture(0, curAccum().tex);
+            bindTexture(1, fieldT.tex);
+            gl.uniform1i(u.uAccum, 0);
+            gl.uniform1i(u.uField, 1);
+            gl.uniform1f(u.uDecayFrame, decayFrame);
+            gl.uniform1f(u.uAddGain, 1.0);
+            gl.uniform1f(u.uCap, cap);
+          });
+          accumPing = !accumPing;
+        }
+
+        function compositePass() {
+          renderTo(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, curAccum().tex);
+            bindTexture(1, fieldT.tex);
+            gl.uniform1i(u.uAccum, 0);
+            gl.uniform1i(u.uField, 1);
+            gl.uniform2f(u.uRes, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uExposure, 1.05);
+            gl.uniform1f(u.uHeat, state.heat);
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+        }
+
+        // active-count readback (periodic; small target — repo §13)
+        const reducePx = new Uint8Array(REDUCE_N * REDUCE_N * 4);
+        let activeCount = 0;
+        function measureActive() {
+          const drawn = partPing ? partSets[1] : partSets[0];
+          renderTo(reduceT, programs.reduce, () => {
+            const u = locations.reduce;
+            bindTexture(0, drawn.texB);
+            gl.uniform1i(u.uStateB, 0);
+            gl.uniform2f(u.uTexel, 1 / PART_W, 1 / PART_H);
+          });
+          gl.bindFramebuffer(gl.FRAMEBUFFER, reduceT.fbo);
+          gl.readPixels(0, 0, REDUCE_N, REDUCE_N, gl.RGBA, gl.UNSIGNED_BYTE, reducePx);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          let sum = 0;
+          for (let i = 0; i < reducePx.length; i += 4) sum += reducePx[i];
+          const frac = sum / (REDUCE_N * REDUCE_N) / 255;
+          activeCount = Math.round(frac * PART_N);
+        }
+
+        function initParticles() {
+          renderTo(partSets[0], programs.pInit, () => {
+            const u = locations.pInit;
+            gl.uniform1f(u.uTexW, PART_W);
+            gl.uniform2f(u.uBallPos, ballPos[0], ballPos[1]);
+          });
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          particleInited = true;
+          partPing = false; // next update reads partSets[0]
+        }
+
+        /* ==================================================================
+           Frame loop
+        ================================================================== */
+
+        const STEP = 1 / 60;
+        const MAX_SUBSTEPS = 4;
+        const PRE_STEPS = (FREEZE || state.pauseAnim) ? 480 : 0;
+        const PRE_CHUNK = 30;
+        let preRoll = PRE_STEPS;
+        let simTime = 0;
+        let acc = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let frameCount = 0;
+        let readyStamped = false;
+        const readout = document.getElementById("readout");
+
+        function runSubsteps(nSteps, dt) {
+          for (let i = 0; i < nSteps; i++) {
+            updateInputAndPhase(dt);
+            simStep(dt);
+            renderFieldAndAccum(dt);
+            simTime += dt;
+          }
+        }
+
+        const REBUILD_STEPS = 150;
+
+        function frame(now) {
+          resize();
+          if (!particleInited) initParticles();
+
+          const rawDt = Math.min(MAX_SUBSTEPS / 60, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+
+          // STILL = frozen or paused (reduced-motion): grow once, then hold and
+          // only re-composite from the frozen accum (no flicker, deterministic).
+          const still = FREEZE || state.pauseAnim;
+
+          // On resize the field/accum are reallocated (cleared). In STILL mode the
+          // sim is held, so the cleared trail would never repopulate — rebuild it
+          // synchronously this frame (particles persist; only the trail regrows)
+          // so the still stays alive after resize/tab-return.
+          if (reallocated) {
+            reallocated = false;
+            if (still && readyStamped) {
+              for (let i = 0; i < REBUILD_STEPS; i++) {
+                updateInputAndPhase(STEP);
+                simStep(STEP);
+                renderFieldAndAccum(STEP);
+                simTime += STEP;
+              }
+              glSync();
+            }
+          }
+
+          if (preRoll > 0) {
+            const steps = Math.min(PRE_CHUNK, preRoll);
+            runSubsteps(steps, STEP);
+            preRoll -= steps;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            glSync();
+            if (preRoll > 0) {
+              requestAnimationFrame(frame);
+              return;
+            }
+          } else if (!still) {
+            acc += rawDt;
+            let n = 0;
+            while (acc >= STEP && n < MAX_SUBSTEPS) {
+              runSubsteps(1, STEP);
+              acc -= STEP;
+              n++;
+            }
+            if (n === MAX_SUBSTEPS) acc = 0;
+          }
+
+          compositePass();
+
+          if (frameCount % 20 === 0) measureActive();
+          frameCount++;
+
+          if (!readyStamped && preRoll === 0) {
+            glSync();
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          if (!FAKESOURCE && !FREEZE && readyStamped) {
+            if (!pointerActive && !tiltActive && simTime - lastInputT > 4.0) showHint();
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            const modeLabel = FAKESOURCE
+              ? "fake"
+              : tiltActive
+                ? "tilt"
+                : pointerActive
+                  ? "pointer●"
+                  : "pointer";
+            readout.textContent =
+              `FPS ${fps.toFixed(0)} / 描画 ${canvas.width}×${canvas.height}` +
+              ` / 位相 ${phaseName}・活性 ${activeCount.toLocaleString()} / 入力 ${modeLabel}`;
+          }
+          requestAnimationFrame(frame);
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+
+        try {
+          resize();
+          if (!FLOAT_OK) {
+            document.getElementById("glBadge").textContent =
+              "WebGL2 · GPU Particles · feedback · oklab · pointer · RGBA8";
+          }
+          requestAnimationFrame(frame);
+        } catch (error) {
+          const msg = error && error.message ? error.message : "";
+          if (/RENDER TARGET INCOMPLETE/.test(msg)) {
+            setOverlay(
+              "RENDER TARGET UNAVAILABLE",
+              "パーティクル状態のレンダーターゲットを確保できませんでした。別のブラウザ/GPU でお試しください。",
+              true,
+            );
+          } else {
+            setOverlay("WEBGL SETUP ERROR", msg || "レンダラーを初期化できませんでした。", true);
+          }
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
