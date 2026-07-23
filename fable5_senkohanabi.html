@@ -821,9 +821,16 @@
             if (ageF < 1.0) {
               // ---- ALIVE: integrate ----
               ageF += uDt / max(life, 0.05);
-              // curl-noise 蛇行 (position-seeded, freeze-safe)
-              vec2 cn = curlNoise(pos * 4.4 + seed * 19.0);
-              vel += cn * (0.02 + 0.20 * uSway) * uDt;
+              // curl-noise 蛇行 (position-seeded, freeze-safe). Deeper branch
+              // generations sample a HIGHER spatial frequency and get a STRONGER
+              // deflection → they zigzag / kink instead of flying straight, so
+              // the fork reads as a jagged self-similar 松葉 that pops (パチッ),
+              // not a smooth radial droop. gen 0 (root sparks) is unchanged.
+              float gk = min(gen, 3.0);
+              float cnFreq = 4.4 + gk * 2.6;
+              float cnAmp  = 1.0 + gk * 0.9;
+              vec2 cn = curlNoise(pos * cnFreq + seed * 19.0);
+              vel += cn * (0.02 + 0.20 * uSway) * cnAmp * uDt;
               // gravity droop + air drag
               vel.y -= uGravity * uDt;
               vel *= exp(-uDt * uDrag);
@@ -857,16 +864,20 @@
               float pGen = floor(PB.z * 8.0 + 0.5);
               vec2 pVel = decVel(PA);
               vec2 pPos = decPos(PA);
-              bool branchable = pAge > 0.12 && pAge < 0.78
+              // wide age window + low speed floor so children can spawn along
+              // most of a spark's flight AND so slower, deeper children still
+              // qualify as parents → the fork cascade sustains past gen 1.
+              bool branchable = pAge > 0.08 && pAge < 0.86
                               && pGen < uMaxGen - 0.5
-                              && length(pVel) > 0.02;
+                              && length(pVel) > 0.012;
               if (branchable) {
                 // clear one-sided deflection with a MINIMUM angle so the fork
                 // reads as a broken branch, not a continuation (松葉の枝分かれ).
                 float sgn = s4 < 0.5 ? -1.0 : 1.0;
                 float ang = sgn * uBranchAngle * mix(0.5, 1.0, s3);
-                // child is distinctly shorter & slower → self-similar taper.
-                float scl = mix(0.4, 0.66, s3);
+                // child is shorter & slower → self-similar taper, but keeps
+                // enough speed to itself become a branchable parent (gen 2/3).
+                float scl = mix(0.5, 0.74, s3);
                 vel = rot2(pVel, ang) * scl;
                 pos = pPos;
                 gen = pGen + 1.0;
@@ -1631,7 +1642,10 @@
 
           // phase → per-particle uniforms, scaled by the look sliders
           const rootRate = coeff.emit * (0.06 + 0.55 * state.spark);
-          const branchRate = coeff.branch * (0.2 + 1.7 * state.branch);
+          // higher branch rate so mid-flight forking dominates over fresh radial
+          // roots → many sparks split (and split again) instead of one straight
+          //放射. Bounded: branches reuse dead pool slots, they do not add slots.
+          const branchRate = coeff.branch * (0.7 + 3.6 * state.branch);
           // intimate scale: sparks spread a short distance from the held bead,
           // then gravity drags them down — not a screen-filling burst.
           const initSpeed = coeff.speed * (0.13 + 0.34 * state.speed);
