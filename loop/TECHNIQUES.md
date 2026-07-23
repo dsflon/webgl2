@@ -42,7 +42,7 @@
 | エンジン | 得意なテーマの本質 | 実績(作品) | CRAFT の該当リスク |
 |---|---|---|---|
 | **Stable Fluids(流体場)** | 煙・霧・水・オーラ・にじみ(連続体の流れ) | gas-head / smoke-portrait / water-cam / suibokuga / overflowing_aura 系 / uchimizu(水膜と蒸発・湯気) | §A1 石膏化 / §A5 whiteout / **§A4: 空中を舞う個体には使わない** / **§A7: 液体の照りはゲル塊↔死んだ染みで振動** |
-| **GPU パーティクル**(状態 ping-pong+インスタンス描画) | 花びら・雪・群れ・粒の集散(個体が舞う) | flower-being / iwashi_ball / ds / ds_voice / live_portrait | §B1 星化(スプライトに形を彫る) / §B3 発生失敗 |
+| **GPU パーティクル**(状態 ping-pong+インスタンス描画) | 花びら・雪・群れ・粒の集散(個体が舞う)・火花の分岐 | flower-being / iwashi_ball / ds / ds_voice / live_portrait / senkohanabi(線香花火の松葉) | §B1 星化(スプライトに形を彫る) / §B3 発生失敗 / §B4 中心対称バースト=打ち上げ花火に見える |
 | **Voronoi / セル分割** | モザイク・タイル・結晶・ステンドグラス | mosaic | セルサイズと目地の設計が命(mosaic の brief 参照) |
 | **グリフ / タイポグラフィ** | 文字・記号・意味の重ね合わせ | typo-cam / ascii | 可読性と絵画性のバランス |
 | **線描 / ストローク**(パス・エッジ追跡) | 線画・輪郭・手描き感 | oneline / scribble / van-gogh(筆致) | 線の密度制御(疎=貧相、密=塗り潰し) |
