@@ -1,5 +1,20 @@
 [
   {
+    "slug": "fable5_senkohanabi",
+    "file": "fable5_senkohanabi.html",
+    "title": "線香花火",
+    "date": "2026-07-23",
+    "desc": "夜闇に手元の火球からこぼれる火花。牡丹→松葉→柳→散り の四位相をたどり、やがてポトリと落ちて消え、また点る。指で持つ位置を操り、静かに持つほど松葉が長く続く。GPUパーティクルの枝分かれと残光で描く。",
+    "model": "",
+    "tags": [
+      "WebGL2",
+      "Pointer",
+      "Particles"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_senkohanabi.jpg"
+  },
+  {
     "slug": "fable5_uchimizu",
     "file": "fable5_uchimizu.html",
     "title": "打ち水",
