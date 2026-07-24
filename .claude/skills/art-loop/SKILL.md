@@ -113,8 +113,12 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
   (CRAFT §C2 — 実測で確認済みの限界)。
 - 不合格 → checks の fail 内容をエラーリストとして Maker(repair)へ。
 - 合格 → `status runtime_ok`。スクショ一式(final + uDebug 主要モード + 縮小版 +
-  等倍クロップ。**final は非 freeze で絵が育ってから**= 8〜15 秒 warm)を
+  等倍クロップ。**final は絵が育った状態で** — `?prewarm=12` フックで決定的に
+  早送りして撮る。実時間 warm(8〜15秒×swiftshader スロー=数分)は使わない)を
   `loop/state/<slug>/shots/` に揃える。
+- **スクショの画面サイズを段階化する**(swiftshader はフィルレート律速で面積に
+  ほぼ線形): 修正ラウンド中の反復目視は **480×300 程度の小画面**で撮り(3〜4倍速)、
+  Checker 用・PR 用の一式だけフルサイズ(900×640 前後)で撮り直す。
 
 ### S4 aesthetic(美的レビュー — V2)
 
@@ -128,10 +132,11 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
   差し込んだもの。**Maker の文脈・ソースコードを渡さない。**
   出力を `node loop/runner/verify_review.mjs <review.json> --brief <brief.json>` で機械検証
   (スキーマ不適合・verdict 矛盾は Checker に差し戻す。これは attempts を消費しない)。
-- **合格の定義 = 2回連続 pass**(DESIGN §4): verdict=pass が出たら、**同一成果物のまま**
-  独立した Checker をもう1回起動する(文脈の再利用禁止)。2回目も pass なら
-  `status aesthetic_ok`。2回目が fail ならその fix_instructions で修正ループへ
-  (成果物が変わるので連続カウントはリセット)。
+- **合格の定義 = 同一成果物への独立2 pass**(DESIGN §4)。**2体の Checker は並列起動
+  してよい**(保証は「同一成果物・文脈非共有・独立2実行」であり時系列順ではない —
+  直列だとゲート待ちが2倍になる)。両方 pass なら `status aesthetic_ok`。
+  どちらかが fail ならその fix_instructions で修正ループへ(成果物が変わるので
+  カウントはリセット。両方 fail なら指摘を突き合わせ共通の根因を優先)。
 - fail 時の修正ループ(CRAFT §D2/§D4 — 実セッションで品質が跳ねた手順の制度化):
   1. **証拠化**: オーケストレータは fix_instructions の症状を**自分のスクショで再現**
      してから指示を出す(final・該当 uDebug・必要なら縮小フィギュア相当の変種)。

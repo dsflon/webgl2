@@ -92,6 +92,14 @@ export function verifyOrder(source, opts = {}) {
       "制作規約 §4「検証フック」を規約ブロックに含めてください(Phase 0 で追補済みの現行規約)",
     );
   }
+  if (!opts.legacy && !/prewarm/.test(source)) {
+    err(
+      "constraints.hooks",
+      "order.prewarm",
+      "早送りフック(?prewarm=<秒>)の要求が制約条件にありません",
+      "検証フックに ?prewarm を含めてください(2026-07-24 メタループ追補: 蓄積系の warm スクショを実時間待ちなしで撮るための決定的早送り。freeze の preroll 機構を非freeze にも公開する)",
+    );
+  }
 
   const lower = source.toLowerCase();
   const vocabHits = VOCAB.filter((v) => lower.includes(v));

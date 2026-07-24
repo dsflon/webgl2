@@ -45,10 +45,13 @@ Phase 1〜2 の成果物(不変量の復唱・設計比較・パス構成図)は
 - **1 まとまりの見た目変更ごとに、スクショを撮って自分の目で見る。**
   「変更 → verify → スクショ → 目視 → 診断 → 次の変更」を1単位とし、
   複数の見た目変更をまとめて盲目的に適用しない。
-- 撮るもの: final(?fakesource=1 非 freeze、絵が育つ作品は 8〜15 秒 warm)+
-  主要 uDebug ビュー。手段は `loop/runner/` の playwright-core
+- 撮るもの: final(?fakesource=1、絵が育つ作品は **?prewarm=12 で決定的に早送り**して
+  撮る — 実時間 warm は swiftshader で数分かかるので使わない)+ 主要 uDebug ビュー。
+  手段は `loop/runner/` の playwright-core
   (executablePath /opt/pw-browsers/chromium、args --use-gl=angle
   --use-angle=swiftshader --enable-unsafe-swiftshader、fakeCameraInit を addInitScript)。
+- **反復中の目視スクショは小画面(480×300 程度)で撮る**(swiftshader はフィルレート
+  律速=3〜4倍速い)。最終報告用の一式だけフルサイズで撮り直す。
 - 目視では**第一印象**(この画像は何に見えるか)を必ず言語化し、brief の参照画像
   (`loop/state/{SLUG}/refs/` にあれば)と比べる。別物に見えるなら不変量が通っていても
   作り直しの対象(CRAFT §D3)。
