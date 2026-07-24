@@ -844,18 +844,30 @@
             }
 
             // ---- DEAD: try to respawn ----
-            float s1 = h11(seed + uFrameSeed * 1.7 + idx * 0.00131);
-            float s2 = h11(s1 + 4.7);
-            float s3 = h11(s2 + 8.3);
-            float s4 = h11(s3 + 2.1);
-            seed = s4;
+            // INDEPENDENT hashes (distinct prime multipliers of seed/frameSeed/
+            // idx), NOT a chain. This is critical for SPARSE emission: the accept
+            // gate and the emission ANGLE must be decorrelated, otherwise — when
+            // the accept probability is tiny — every accepted slot shares almost
+            // the same gate value and (in a chained hash) the same derived angle,
+            // so all sparks fly the SAME way. Independent hashes keep the surviving
+            // directions uniformly radial. Still deterministic (freeze-safe):
+            // uFrameSeed is a deterministic step counter, never wall time.
+            float rRootGate   = h11(seed * 3.17 + uFrameSeed * 7.31 + idx * 0.00071 + 0.7);
+            float rBranchGate = h11(seed * 5.71 + uFrameSeed * 2.93 + idx * 0.00113 + 3.1);
+            float rParent     = h11(seed * 11.3 + uFrameSeed * 1.73 + idx * 0.00051 + 6.4);
+            float rAng        = h11(seed * 17.9 + uFrameSeed * 4.13 + idx * 0.00037 + 9.2);
+            float rSpeed      = h11(seed * 23.3 + uFrameSeed * 5.29 + idx * 0.00029 + 2.8);
+            float rScl        = h11(seed * 29.7 + uFrameSeed * 3.37 + idx * 0.00019 + 1.3);
+            float rLife       = h11(seed * 31.1 + uFrameSeed * 6.11 + idx * 0.00023 + 5.5);
+            float rJit        = h11(seed * 13.7 + uFrameSeed * 2.17 + idx * 0.00043 + 8.1);
+            seed = h11(seed * 1.61 + uFrameSeed * 0.917 + 0.313);
 
             // (a) branch attempt — dt-scaled so branch density is frame-rate
             //     independent. Only if a randomly chosen parent is branchable.
             bool didSpawn = false;
-            if (s1 < clamp(uBranchRate * uDt, 0.0, 0.95)) {
+            if (rBranchGate < clamp(uBranchRate * uDt, 0.0, 0.95)) {
               int pcount = uTexW * uTexH;
-              int pi = int(s2 * float(pcount));
+              int pi = int(rParent * float(pcount));
               pi = clamp(pi, 0, pcount - 1);
               ivec2 ptc = ivec2(pi % uTexW, pi / uTexW);
               vec4 PA = texelFetch(uStateA, ptc, 0);
@@ -864,24 +876,28 @@
               float pGen = floor(PB.z * 8.0 + 0.5);
               vec2 pVel = decVel(PA);
               vec2 pPos = decPos(PA);
-              // wide age window + low speed floor so children can spawn along
-              // most of a spark's flight AND so slower, deeper children still
-              // qualify as parents → the fork cascade sustains past gen 1.
-              bool branchable = pAge > 0.08 && pAge < 0.86
+              // LATE age window so forks cluster near the flying tip → each
+              // spark ends in a burst of fine needles (松葉/星型の穂先), not a
+              // fork at the root. Deeper children still qualify as parents so the
+              // star sub-divides (self-similar).
+              bool branchable = pAge > 0.30 && pAge < 0.94
                               && pGen < uMaxGen - 0.5
-                              && length(pVel) > 0.012;
+                              && length(pVel) > 0.010;
               if (branchable) {
-                // clear one-sided deflection with a MINIMUM angle so the fork
-                // reads as a broken branch, not a continuation (松葉の枝分かれ).
-                float sgn = s4 < 0.5 ? -1.0 : 1.0;
-                float ang = sgn * uBranchAngle * mix(0.5, 1.0, s3);
-                // child is shorter & slower → self-similar taper, but keeps
-                // enough speed to itself become a branchable parent (gen 2/3).
-                float scl = mix(0.5, 0.74, s3);
+                // WIDE symmetric spread around the parent heading with a
+                // guaranteed minimum deflection → several needles fan out from
+                // the tip like an asterisk (星型), not a smooth continuation.
+                // Deeper generations fan a touch tighter.
+                float genTight = mix(1.0, 0.7, min(pGen, 3.0) / 3.0);
+                float ang = (rAng - 0.5) * 2.0 * uBranchAngle * genTight;
+                ang += (rAng < 0.5 ? -1.0 : 1.0) * uBranchAngle * 0.28 * genTight;
+                // child is SHORT & slow → a fine self-similar needle, but keeps
+                // enough speed to itself fork once or twice (gen 2/3).
+                float scl = mix(0.34, 0.56, rScl);
                 vel = rot2(pVel, ang) * scl;
                 pos = pPos;
                 gen = pGen + 1.0;
-                life = uLife * mix(0.42, 0.62, s3);
+                life = uLife * mix(0.26, 0.42, rLife);
                 ageF = 0.0;
                 didSpawn = true;
               }
@@ -889,20 +905,22 @@
 
             // (b) root spark from the fireball
             if (!didSpawn && uBallActive > 0.5
-                && s2 < clamp(uRootRate * uDt, 0.0, 0.95)) {
-              float ang = s3 * 6.28318530718;
-              float sp = uInitSpeed * mix(0.55, 1.15, s4);
-              // aspect-corrected radial, then made ASYMMETRIC: the cone is tilted
-              // down and the upward reach is clipped, so the top is short and the
-              // sparks droop into a willow below the bead (手持ち・非対称の垂れ) —
-              // this is the main cure for the 打ち上げ花火の菊 gestalt.
+                && rRootGate < clamp(uRootRate * uDt, 0.0, 0.95)) {
+              float ang = rAng * 6.28318530718;
+              float sp = uInitSpeed * mix(0.55, 1.15, rSpeed);
+              // near-radial in ALL directions (up / side / down), matching the
+              // peak radial photo. Only a GENTLE down bias; gravity then droops
+              // the sparks over their flight. The 打ち上げ花火の菊 gestalt (§B4)
+              // is avoided instead by SPARSE count + SMALL scale + a clear compact
+              // bead + mid-flight forking — not by clipping the radiation.
               vec2 dir = vec2(cos(ang) / uAspect, sin(ang));
-              dir.y -= 0.4;
-              if (dir.y > 0.0) dir.y *= 0.4;
+              dir.y -= 0.08;
+              float dl = max(length(dir), 1e-4);
+              dir /= dl;
               vel = dir * sp;
-              pos = uBallPos + vec2((s1 - 0.5) / uAspect, s4 - 0.5) * 0.012;
+              pos = uBallPos + vec2((rJit - 0.5) / uAspect, rScl - 0.5) * 0.012;
               gen = 0.0;
-              life = uLife * mix(0.8, 1.1, s1);
+              life = uLife * mix(0.8, 1.1, rLife);
               ageF = 0.0;
               didSpawn = true;
             }
@@ -1061,19 +1079,34 @@
           out vec4 fragColor;
           uniform float uBright;
           uniform float uHeat;
+          uniform float uFrameSeed;   // deterministic STEP counter (never wall time)
           ${CHUNK_NOISE}
           ${CHUNK_OKLAB}
           void main(){
             float d = length(vP);
             if (d > 1.0) discard;
-            float core = smoothstep(0.52, 0.0, d);
-            float halo = exp(-d * d * 3.2);
-            // molten bead: shimmering hot core (position-seeded, no time)
-            float shim = 0.85 + 0.15 * vnoise(vP * 7.0 + 3.1);
-            vec3 coreCol = mix(vec3(1.0, 0.93, 0.72), vec3(1.0, 0.98, 0.9), uHeat);
-            vec3 haloCol = fireColor(0.35, uHeat);
-            vec3 col = coreCol * (core * 1.0 * shim) + haloCol * (halo * 0.38);
-            float inten = (core * 1.0 + halo * 0.34) * uBright;
+            // COMPACT round white-hot bead: a tight bright disc with a small,
+            // fast-falling halo → reads as a defined molten ball, NOT a broad
+            // whiteout column (§A5). The blooming glow comes from the feedback
+            // accum, so the source itself stays small and round. Core is a touch
+            // wider/brighter than before so the bead sits clearly above the night
+            // floor (§4 火球芯が最輝) without whiteout.
+            float core = smoothstep(0.44, 0.0, d);
+            float halo = exp(-d * d * 5.2);
+            // molten bead: spatial shimmer (position-seeded) × a LIVING pulse. The
+            // core ちりちり明滅s and gently 脈動s EVERY sim step so the fireball
+            // breathes even when zero sparks are in flight — the screen is never
+            // completely still (生きた molten ball). uFrameSeed is a deterministic
+            // step counter (NEVER wall time), so ?freeze=1 holds the bead perfectly
+            // still and idle stays flicker-free/deterministic.
+            float shim = 0.9 + 0.1 * vnoise(vP * 7.0 + 3.1);
+            float flick = h11(uFrameSeed * 91.7 + 3.3);          // 0..1, jumps per step
+            float breathe = 0.5 + 0.5 * sin(uFrameSeed * 6.2831853);
+            float puls = 0.90 + 0.13 * flick + 0.06 * breathe;   // low-amplitude 明滅+脈動
+            vec3 coreCol = mix(vec3(1.0, 0.94, 0.78), vec3(1.0, 0.99, 0.92), uHeat);
+            vec3 haloCol = fireColor(0.4, uHeat);
+            vec3 col = coreCol * (core * shim * puls) + haloCol * (halo * 0.24 * puls);
+            float inten = (core * puls + halo * 0.22) * uBright;
             col *= uBright;
             if (inten < 0.004) discard;
             fragColor = vec4(col, inten);
@@ -1260,7 +1293,7 @@
             "uWidth", "uHeat", "uSway", "uDebug",
           ]),
           ball: getLocations(programs.ball, [
-            "uRes", "uBallPos", "uBallR", "uBright", "uHeat",
+            "uRes", "uBallPos", "uBallR", "uBright", "uHeat", "uFrameSeed",
           ]),
           accum: getLocations(programs.accum, [
             "uAccum", "uField", "uDecayFrame", "uAddGain", "uCap",
@@ -1421,7 +1454,7 @@
         ================================================================== */
 
         let pointerActive = false;
-        let pointerUv = [0.5, 0.72];
+        let pointerUv = [0.5, 0.60];
         let lastPointerUv = null;
         let pointerSpeed = 0;       // instantaneous (uv/sec)
         let pointerSpeedEma = 0;    // ema-smoothed (invariant 5)
@@ -1528,9 +1561,9 @@
         // DOWN into willow strands (非対称の垂れ) rather than a symmetric radial
         // chrysanthemum. branch is high through 松葉 so the fork tree reads.
         const PHASE = {
-          peony:   { emit: 0.55, speed: 0.50, branch: 0.45, gen: 1.8, life: 0.95, gravity: 0.34, ball: 1.0 },
-          matsuba: { emit: 1.00, speed: 0.92, branch: 1.20, gen: 3.4, life: 1.00, gravity: 0.60, ball: 1.0 },
-          willow:  { emit: 0.55, speed: 0.72, branch: 0.55, gen: 2.4, life: 1.25, gravity: 1.05, ball: 0.85 },
+          peony:   { emit: 0.40, speed: 0.55, branch: 0.40, gen: 1.8, life: 0.95, gravity: 0.08, ball: 1.0 },
+          matsuba: { emit: 1.00, speed: 0.95, branch: 1.20, gen: 3.4, life: 1.00, gravity: 0.24, ball: 1.0 },
+          willow:  { emit: 0.55, speed: 0.72, branch: 0.55, gen: 2.4, life: 1.25, gravity: 0.70, ball: 0.85 },
           scatter: { emit: 0.14, speed: 0.50, branch: 0.14, gen: 1.4, life: 1.05, gravity: 1.30, ball: 0.5 },
           cool:    { emit: 0.0,  speed: 0.4,  branch: 0.0,  gen: 1.0, life: 0.8,  gravity: 0.9,  ball: 0.0 },
         };
@@ -1540,9 +1573,13 @@
 
         let phaseTime = 0;          // position within the cycle
         let disturbed = false;      // hysteresis latch for "moved too fast → scatter"
-        let ballBase = [0.5, 0.72]; // eased hold position (held high)
+        // eased hold position. The bead sits near the vertical CENTER (upper
+        // third) so its radial spray fills the frame around and below it, matching
+        // the reference photos (bead明確・放射 that reaches the center of frame) —
+        // not perched at the very top with the willow dying out mid-frame.
+        let ballBase = [0.5, 0.60];
         let ballFall = 0;           // downward drop offset (scatter)
-        let ballPos = [0.5, 0.72];
+        let ballPos = [0.5, 0.60];
         let ballBright = 0;
 
         function phaseTargets(t) {
@@ -1556,13 +1593,25 @@
 
         let phaseName = "牡丹";
 
+        // gradual-increase envelope (0..1) + intermittent crackle multiplier.
+        // Both are pure functions of the (deterministic) sim/phase clock so they
+        // stay freeze-safe (the pre-roll advances the clock, then it holds).
+        let emitGrowth = 0.14;   // 点火→ぱらぱら→増えて松葉 の漸増
+        let emitBurst = 0.16;    // パチパチの間欠バースト
+
+        function smooth01(x) {
+          x = x < 0 ? 0 : x > 1 ? 1 : x;
+          return x * x * (3 - 2 * x);
+        }
+
         function fakeBallPath(t) {
-          // slow, small lissajous held high — an intimate handheld sparkler, not
-          // a burst roaming the whole canvas. The willow hangs below the bead.
+          // slow, small lissajous near the vertical center — an intimate handheld
+          // sparkler whose radial spray fills the frame, not a burst roaming the
+          // whole canvas. The willow hangs below the bead.
           const a = t * 0.19;
           return [
-            0.5 + 0.1 * Math.sin(a) * Math.cos(a * 0.5),
-            0.72 + 0.06 * Math.sin(a * 0.7 + 1.0),
+            0.5 + 0.045 * Math.sin(a) * Math.cos(a * 0.5),
+            0.60 + 0.03 * Math.sin(a * 0.7 + 1.0),
           ];
         }
 
@@ -1584,13 +1633,14 @@
           } else if (pointerActive) {
             target = pointerUv.slice();
           } else if (tiltActive) {
-            target = [0.5 + tiltX * 0.24, 0.72 - tiltY * 0.18];
+            target = [0.5 + tiltX * 0.24, 0.60 - tiltY * 0.18];
           } else {
-            // idle: gentle breathing drift (alive without input). Held high so
-            // the sparks droop into a willow BELOW the bead (手持ちの線香花火).
+            // idle: gentle breathing drift (alive without input). Bead near the
+            // vertical center so the radial spray fills the frame and the willow
+            // droops BELOW the bead (手持ちの線香花火).
             target = [
               0.5 + 0.018 * Math.sin(simTime * 0.5),
-              0.73 + 0.013 * Math.sin(simTime * 0.37 + 1.3),
+              0.61 + 0.013 * Math.sin(simTime * 0.37 + 1.3),
             ];
           }
           const ke = pointerActive ? 0.35 : 0.06;
@@ -1619,6 +1669,25 @@
           coeff.gravity += (tgt.gravity - coeff.gravity) * k;
           coeff.ball += (tgt.ball - coeff.ball) * k;
 
+          // 時間の物語 (per cycle): faint at ignition → gradually swells toward the
+          // matsuba peak. (coeff.emit itself falls away in willow/scatter, so the
+          // product rises then subsides — 点火→ぱらぱら→増えて松葉→散り.)
+          // ignition floor lifted (0.14→0.20) so the first ~2s already show the
+          // bead + a few sparks (点火の立ち上がりを少し早める) — not密に, just alive.
+          emitGrowth = 0.20 + 0.80 * smooth01(phaseTime / (T_MATSUBA * 0.7));
+          // パチパチ: three incommensurate pulses, half-waved and sharpened → the
+          // spark emission comes in irregular bursts with gaps. The trough FLOOR
+          // is lifted (0.16→0.7) so emission never fully dries between crackles —
+          // a faint spark trickle always keeps flowing through the willow so the
+          // screen is never completely static (バースト谷のトリクル). The crackle
+          // PEAK is UNCHANGED (floor + range ≈ 1.86) so the はかなさ/疎さ is kept.
+          const cr =
+            (Math.sin(simTime * 4.7) +
+              Math.sin(simTime * 8.9 + 1.3) +
+              Math.sin(simTime * 2.3 + 2.1)) /
+            3.0;
+          emitBurst = 0.7 + 1.16 * Math.pow(Math.max(0, cr), 1.7);
+
           // fireball fall in scatter, dark in cooldown, reset on re-ignition
           if (phaseTime >= T_WILLOW && phaseTime < T_COOL) {
             const p = (phaseTime - T_WILLOW) / (T_COOL - T_WILLOW);
@@ -1640,17 +1709,38 @@
         function simStep(dt) {
           stepSeed = (stepSeed * 1.618 + 0.313) % 1.0;
 
-          // phase → per-particle uniforms, scaled by the look sliders
-          const rootRate = coeff.emit * (0.06 + 0.55 * state.spark);
-          // higher branch rate so mid-flight forking dominates over fresh radial
-          // roots → many sparks split (and split again) instead of one straight
-          //放射. Bounded: branches reuse dead pool slots, they do not add slots.
-          const branchRate = coeff.branch * (0.7 + 3.6 * state.branch);
-          // intimate scale: sparks spread a short distance from the held bead,
-          // then gravity drags them down — not a screen-filling burst.
-          const initSpeed = coeff.speed * (0.13 + 0.34 * state.speed);
+          // phase → per-particle uniforms, scaled by the look sliders.
+          // SPARSE emission (最重要): root spawns are an ABSOLUTE per-second budget
+          // divided by the pool so the count is resolution-independent AND small —
+          // a handful of countable sparks, not a dense fountain. The gradual-
+          // increase envelope (emitGrowth) and the intermittent crackle (emitBurst)
+          // shape it in time (点火→ぱらぱら→増えて松葉→散り).
+          let rootSpawnPerSec =
+            coeff.emit * emitGrowth * emitBurst * (4.0 + 20.0 * state.spark);
+          // post-ignition trickle floor: while the bead is lit, never let the
+          // spark count fall to zero — even in a burst gap or a sinking phase
+          // (willow/scatter) keep a minimum of a few sparks/sec so a live fire
+          // never freezes. Peak count is untouched (this only lifts the trough).
+          if (ballBright > 0.06) {
+            const trickle = (2.0 + 6.0 * state.spark) * emitGrowth; // sparks/sec
+            rootSpawnPerSec = Math.max(rootSpawnPerSec, trickle);
+          }
+          const rootRate = rootSpawnPerSec / PART_N; // per dead-slot per second
+          // branchRate is effectively "children per branchable parent per second"
+          // (each dead slot pulls a random parent), so it is already pool-
+          // independent. Kept LOW so ROOT streaks (radial, all directions) read
+          // as the主役 and each only forks into a small star tip — not a bush.
+          // Grows with the same envelope so early sparks are simpler.
+          const branchRate =
+            coeff.branch * (0.7 + 2.4 * state.branch) * (0.55 + 0.45 * emitGrowth);
+          // intimate scale: sparks shoot RADIALLY out from the held bead (all
+          // directions), reaching far enough to read as a radial star before the
+          // (now gentle) gravity droops them — matches the peak radial photo.
+          const initSpeed = coeff.speed * (0.16 + 0.36 * state.speed);
           const maxGen = Math.max(1, Math.round(1 + coeff.gen * (0.5 + 1.0 * state.branch)));
-          const life = coeff.life * (1.0 + 1.8 * state.life); // seconds
+          // shorter root life → the spark forks into its star tip sooner and does
+          // not smear into one long willow strand.
+          const life = coeff.life * (0.55 + 1.3 * state.life); // seconds
           const gravity = coeff.gravity * 1.0;
           const ballActive = ballBright > 0.06 ? 1.0 : 0.0;
 
@@ -1675,9 +1765,9 @@
             gl.uniform1f(u.uMaxGen, maxGen);
             gl.uniform1f(u.uLife, life);
             gl.uniform1f(u.uGravity, gravity);
-            gl.uniform1f(u.uDrag, 0.85);
+            gl.uniform1f(u.uDrag, 0.55);
             gl.uniform1f(u.uSway, state.sway);
-            gl.uniform1f(u.uBranchAngle, 0.5 + 0.5 * state.branch);
+            gl.uniform1f(u.uBranchAngle, 0.9 + 0.7 * state.branch);
             gl.uniform1f(u.uBallActive, ballActive);
           });
           partPing = !partPing;
@@ -1703,9 +1793,9 @@
           gl.uniform1i(locations.pDraw.uStateB, 1);
           gl.uniform1f(locations.pDraw.uTexW, PART_W);
           gl.uniform2f(locations.pDraw.uRes, fieldT.width, fieldT.height);
-          gl.uniform1f(locations.pDraw.uBaseLen, 3.0);
+          gl.uniform1f(locations.pDraw.uBaseLen, 2.5);
           gl.uniform1f(locations.pDraw.uLenScale, fieldT.height * 0.09);
-          gl.uniform1f(locations.pDraw.uWidth, 1.7);
+          gl.uniform1f(locations.pDraw.uWidth, 1.35);
           gl.uniform1f(locations.pDraw.uHeat, state.heat);
           gl.uniform1f(locations.pDraw.uSway, state.sway);
           gl.uniform1i(locations.pDraw.uDebug, state.debugView);
@@ -1714,12 +1804,17 @@
           // P2b — fireball bead into the same field
           if (ballBright > 0.02 && state.debugView !== 3) {
             gl.useProgram(programs.ball);
-            const rPx = fieldT.height * (0.008 + 0.008 * state.spark);
+            const rPx = fieldT.height * (0.006 + 0.004 * state.spark);
+            // sub-pixel positional micro-jitter (生きた molten ball). Driven by the
+            // deterministic step seed (NOT wall time) so freeze holds it still.
+            const jx = Math.sin(stepSeed * 127.1) * 0.0007;
+            const jy = Math.cos(stepSeed * 311.7) * 0.0007;
             gl.uniform2f(locations.ball.uRes, fieldT.width, fieldT.height);
-            gl.uniform2f(locations.ball.uBallPos, ballPos[0], ballPos[1]);
+            gl.uniform2f(locations.ball.uBallPos, ballPos[0] + jx, ballPos[1] + jy);
             gl.uniform1f(locations.ball.uBallR, rPx * 2.0);
             gl.uniform1f(locations.ball.uBright, ballBright);
             gl.uniform1f(locations.ball.uHeat, state.heat);
+            gl.uniform1f(locations.ball.uFrameSeed, stepSeed);
             gl.drawArrays(gl.TRIANGLES, 0, 6);
           }
           gl.bindVertexArray(null);
