@@ -313,6 +313,27 @@ export async function verifyRuntime(url, opts = {}) {
       );
       await page2.close();
     }
+
+    // ---- warm final shot (?prewarm=<sec> 対応作品) ----
+    // 蓄積系の「絵が育った final」を実時間 warm(swiftshader で数分)なしに撮る。
+    // 作品側の決定的 preroll(freeze と同じ機構)へ prewarm 秒ぶんジャンプする。
+    // 未対応作品ではただの初期フレームになるだけで無害(fail はさせない)。
+    if (shotsDir) {
+      try {
+        const warmUrl =
+          url.replace(/([?&])freeze=1&?/, "$1").replace(/[?&]$/, "") +
+          (url.includes("?") ? "&" : "?") + "prewarm=12";
+        const page3 = await browser.newPage({ viewport: { width: 1100, height: 750 } });
+        await page3.addInitScript(fakeCameraInit);
+        await page3.goto(warmUrl);
+        await page3.waitForFunction(() => window.__artReady === true, null, { timeout });
+        await page3.waitForTimeout(2000);
+        await page3.screenshot({ path: `${shotsDir}/final_warm.png` });
+        await page3.close();
+      } catch {
+        /* 撮れなければ従来の final.png のみ */
+      }
+    }
   } finally {
     await browser.close();
   }

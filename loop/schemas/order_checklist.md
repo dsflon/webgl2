@@ -16,6 +16,7 @@ Phase 4 パイロットで2本目が通ってから厳格化する — IMPLEMENT
 | order.phases | Phase 1 / Phase 2 / Phase 4 への言及がある(フェーズ制) | 制作規約 §2・実物 §5 |
 | order.constraints | 「制約条件」節に「単一の自己完結」「カメラ」「品質基準」を含む(規約ブロック同梱) | 制作規約 §4・実物 §8 |
 | order.hooks | 制約条件に「__artReady」と「freeze」を含む(検証フック同梱) | 制作規約 §4 検証フック(Phase 0 追補) |
+| order.prewarm | 検証フックに「prewarm」を含む(決定的早送り ?prewarm=<秒>) | 2026-07-24 メタループ追補(swiftshader の実時間 warm 対策) |
 | order.technotes | 「予約語」と「ping-pong」への言及がある(技術注意リスト同梱) | 制作規約 §9・実物 §13 |
 | order.sliders | ヘッダに「ラベル」を含む表があり、行数 6〜10 | 制作規約ゲート2・実物 §6.1 |
 | order.verification | 「フェイクカメラ」と「スクリーンショット」への言及がある(検証環境同梱) | 制作規約 §7・実物 §9 |
