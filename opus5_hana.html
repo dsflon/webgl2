@@ -33,7 +33,12 @@
        切れ込み・羽毛状の縁・反り由来の擬似法線による陰影・先端の透過光・放射脈・
        表面のむら・個体差のある色を持ち、傾きで手前/奥の花弁が前後する。喉は奥へ
        ずれる(=最強の立体キュー)。葉は非対称で主脈に沿って折れ、側脈と鋸歯を持つ。
-       散った花びらは tumble で幅が前縮して薄刃↔広面を往復する(紙吹雪回避)。
+       花冠の傾きは sqrt バイアスで 45〜80° に寄せる(a*a は0側=正面に偏るため誤り)。
+       約4割は**背を向けた花**として萼と花弁の外側(緑寄り・鈍い・萼脈)を描く。
+       散った花びらは平板なアーモンドにしない: 主脈を軸に巻いた円筒面として扱い、
+       巻くほど画面上の幅が縮み、陰影は midrib から cos(φ) で落ち、外縁は裏返って
+       **淡い裏面**と折り目の光る線を見せる。シルエットは3種(桜=先端に切れ込み /
+       蓮=尖る / 丸)、爪部は生成り、放射脈あり。tumble で薄刃↔広面を往復する。
        大輪は二重花冠。奥行き(seed)で大きさ・彩度・被写界深度が変わる。
     5. 有界性 — 株と花びらは固定プール(=構造的に有界)。加算でなく前乗算アルファの
        重ね合わせで、発光はブルーム+肩付きトーンマップに通す(白飛びしない)。
@@ -805,11 +810,17 @@
           // frontal rosettes is the single strongest "cheap CG" cue. Derived from
           // the seed so it needs no extra state. Returns (cosTilt, sinTilt, roll):
           // cosTilt 1 = looking straight into the corolla, 0.15 = nearly edge-on.
-          vec3 plantFacing(float seed) {
+          vec4 plantFacing(float seed) {
             float a = h11(seed * 61.3 + 7.7);
-            float tilt = 0.20 + 1.12 * a * a;      // biased toward tilted
+            // NOTE: a*a piles up near ZERO, which is near-frontal — the exact
+            // opposite of what a bed needs. sqrt puts the mass at 45°..80°, so
+            // most blossoms are seen at an angle and only a few face the lens.
+            float tilt = 0.26 + 1.12 * sqrt(a);
             float roll = (h11(seed * 71.9 + 2.2) - 0.5) * PI2;
-            return vec3(max(cos(tilt), 0.15), sin(tilt), roll);
+            // and a good share of a real bed has its BACK to the lens: what you
+            // see there is the calyx and the outsides of the petals, not a face
+            float away = h11(seed * 97.0 + 5.5) < 0.38 ? 1.0 : 0.0;
+            return vec4(max(cos(tilt), 0.13), sin(tilt), roll, away);
           }
           // 0 = far (small, hazy, cool), 1 = near (large, soft-edged)
           float plantDepth(float seed) { return h11(seed * 83.1 + 3.9); }
@@ -1510,7 +1521,7 @@
           out vec3 vCol;
           out float vSeed;
           out float vGlow;
-          out vec3 vFace;    // cosTilt, sinTilt, roll
+          out vec4 vFace;    // cosTilt, sinTilt, roll, backTurned
           out float vDepth;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
@@ -1525,7 +1536,7 @@
             vCol = vec3(0.0);
             vSeed = 0.0;
             vGlow = 0.0;
-            vFace = vec3(1.0, 0.0, 0.0);
+            vFace = vec4(1.0, 0.0, 0.0, 0.0);
             vDepth = 0.5;
             float pid = float(gl_InstanceID);
             ivec2 tc = ivec2(int(mod(pid, uPlantW)), int(floor(pid / uPlantW)));
@@ -1581,7 +1592,10 @@
             float cs = cos(rot), sn = sin(rot);
             vec2 q = vLocal;
             vec2 rq = vec2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
-            vec2 P = c + rq * scale;
+            // a tilted head is carried on the far side of the stem tip, which
+            // is how a real flower hangs off its pedicel
+            vec2 off = vec2(-sin(vFace.z), cos(vFace.z)) * vFace.y * scale * 0.34;
+            vec2 P = c + off + rq * scale;
             gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
           }
         `;
@@ -1593,7 +1607,7 @@
           in vec3 vCol;
           in float vSeed;
           in float vGlow;
-          in vec3 vFace;
+          in vec4 vFace;
           in float vDepth;
           out vec4 fragColor;
           ${CHUNK_NOISE}
@@ -1719,10 +1733,47 @@
                 pcol *= 1.0 - 0.34 * max(-pz, 0.0);               // far half shaded
                 // a translucent rim where the blade thins out to nothing
                 pcol += vCol * smoothstep(0.86, 1.0, u) * 0.22;
+                // the margin of a real blade curls back on itself, and what it
+                // shows there is the PALE UNDERSIDE with a lit line at the fold
+                float mrg = abs(pf) / max(wpro, 1e-3);
+                float backP = smoothstep(0.70, 0.98, mrg) *
+                  smoothstep(0.22, 0.85, u) * (0.30 + 0.70 * curl);
+                pcol = mix(pcol, mix(vCol, vec3(1.0, 0.96, 0.93), 0.58) *
+                  (0.42 + 0.38 * ndl), backP * 0.85);
+                pcol += vec3(1.0, 0.95, 0.92) *
+                  smoothstep(0.10, 0.0, abs(mrg - 0.80)) * curl * 0.22;
                 pcol *= 0.95 - 0.30 * wilt;
                 petalW = cov2;
                 fCol = pcol;
               }
+              // ---- a blossom with its back to us. It keeps the PETAL
+              // SILHOUETTE (so it still reads as a flower, not a leaf) but shows
+              // the petal outsides and the calyx: duller, greener, ribbed by the
+              // sepals, with no throat and no stamen — you cannot see into a
+              // flower that faces away.
+              if (vFace.w > 0.5) {
+                float rb = length(fp);
+                float sep = 0.5 + 0.5 * cos(atan(fp.y, fp.x) * 5.0 + vSeed * 8.0);
+                vec3 outside = mix(mix(LEAF_D, LEAF_L, 0.28 + 0.34 * sep),
+                  vCol * 0.78, 0.30 + 0.34 * smoothstep(0.40, 1.0, rb));
+                // domed: the calyx catches the light at its shoulder
+                outside *= 0.58 + 0.60 * clamp(1.0 - rb, 0.0, 1.0) + 0.18 * sep;
+                float calyx = 1.0 - smoothstep(0.26, 0.50, rb);
+                outside = mix(outside, mix(LEAF_D, LEAF_L, 0.20) *
+                  (0.70 + 0.50 * sep), calyx * 0.82);
+                outside += vec3(0.10, 0.14, 0.09) *
+                  smoothstep(0.06, 0.0, abs(rb - 0.30)) * 0.8;
+                float bCov = clamp(petalW * (0.94 - 0.28 * wilt), 0.0, 1.0);
+                float mixB = smoothstep(0.10, 0.62, bloomT);
+                float cov3 = mix(budCov, bCov, mixB);
+                vec3 col3 = mix(budCol * budCov, outside * bCov, mixB);
+                float ab = clamp(cov3, 0.0, 1.0) *
+                  mix(1.0, 0.72, smoothstep(0.30, 0.0, vDepth));
+                if (ab <= 0.012) discard;
+                fragColor = vec4(col3, ab);
+                return;
+              }
+
               // the throat, pushed toward the far side — on a tilted flower this
               // offset centre is the strongest single 3D cue
               vec2 tp = fp + vec2(0.0, 0.16 * sinT);
@@ -1801,6 +1852,8 @@
           out float vSeed;
           out float vGlow;
           out float vFlat;
+          out float vRoll;
+          out float vBow;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
           ${CHUNK_PALETTE}
@@ -1817,6 +1870,8 @@
             vSeed = 0.0;
             vGlow = 0.0;
             vFlat = 1.0;
+            vRoll = 0.5;
+            vBow = 0.0;
             int i = gl_InstanceID;
             int tw = int(uTexW);
             ivec2 tc = ivec2(i % tw, i / tw);
@@ -1853,8 +1908,14 @@
               // blade to a thin sliver and back. Without this every petal is a
               // flat ellipse and the fall reads as paper confetti.
               float tph = ageF * (5.0 + 12.0 * abs(tr.w)) + B.z * 13.0;
-              vFlat = 0.20 + 0.80 * abs(cos(tph));
-              shape = vec2(q.x * 0.52 * vFlat, q.y * stretch);
+              vFlat = 0.30 + 0.70 * abs(cos(tph));
+              // how tightly this blade is rolled, and how its midrib bows. Both
+              // are properties of the petal; the tumble only changes how much of
+              // the roll is turned toward us.
+              vRoll = (0.30 + 0.70 * h11(B.z * 11.0 + 3.3)) *
+                (0.55 + 0.45 * abs(sin(tph)));
+              vBow = (h11(B.z * 23.0 + 7.1) - 0.5) * 0.55;
+              shape = vec2(q.x * 0.62 * vFlat, q.y * stretch);
             }
             float cs = cos(rot), sn = sin(rot);
             vec2 rq = vec2(shape.x * cs - shape.y * sn, shape.x * sn + shape.y * cs);
@@ -1873,6 +1934,8 @@
           in float vSeed;
           in float vGlow;
           in float vFlat;
+          in float vRoll;
+          in float vBow;
           out vec4 fragColor;
           ${CHUNK_NOISE}
           void main() {
@@ -1892,19 +1955,54 @@
               fragColor = vec4(c * a, a);
               return;
             }
-            // ---- petal: almond, pointed at both ends, with a centre vein
-            float ty = clamp(p.y * 0.5 + 0.5, 0.0, 1.0);
-            float prof = pow(clamp(sin(ty * 3.14159265), 0.0, 1.0), 0.62);
-            float halfw = 0.90 * prof;
-            float dx = abs(p.x) / max(halfw, 1e-3);
-            float body = smoothstep(1.0, 0.40, dx);
-            float vein = smoothstep(0.15, 0.0, abs(p.x)) * prof;
+            // ---- petal: a CURLED SHEET, not a flat almond. The blade is a
+            // cylinder rolled about its own midrib, so (a) its screen width
+            // narrows as it rolls, (b) shading falls off as cos(φ) away from the
+            // midrib, and (c) the outermost band has turned past the silhouette,
+            // showing the PALE UNDERSIDE with a lit line along the fold. Three
+            // silhouettes — cleft sakura, drawn-out lotus point, round — plus a
+            // cream claw and fine veins. A single almond outline in flat colour
+            // is what read as confetti.
+            float u = clamp(p.y * 0.5 + 0.5, 0.0, 1.0);      // 0 claw → 1 tip
+            float shp = h11(vSeed * 7.3 + 1.7);
+            float prof;
+            float cleft = 0.0;
+            if (shp < 0.40) {
+              prof = pow(clamp(sin(pow(u, 0.86) * 3.14159265), 0.0, 1.0), 0.60);
+              cleft = 1.0;                                   // 桜: notched tip
+            } else if (shp < 0.74) {
+              prof = pow(clamp(sin(u * 3.14159265), 0.0, 1.0), 0.98) *
+                (1.0 - 0.22 * u);                            // 蓮: drawn point
+            } else {
+              prof = pow(clamp(sin(pow(u, 0.74) * 3.14159265), 0.0, 1.0), 0.42);
+            }
+            float halfw = 0.94 * prof;
+            float bow = vBow * (u * u - 0.30);               // the midrib bows
+            // the blade rolls harder toward the tip
+            float phimax = 0.28 + 1.55 * vRoll * smoothstep(0.05, 0.85, u);
+            float R = halfw / max(phimax, 0.20);
+            float screenHalf = max(R * sin(min(phimax, 1.40)), 1e-4);
+            float t = clamp(abs(p.x - bow) / screenHalf, 0.0, 1.0);
+            float body = (1.0 - smoothstep(0.88, 1.0, t)) *
+              (1.0 - smoothstep(0.90, 1.0, u));
+            if (cleft > 0.5) {
+              body *= 1.0 - 0.80 * smoothstep(0.78, 1.0, u) * exp(-13.0 * t * t);
+            }
             float a = body * vAlpha * 0.86;
             if (a <= 0.006) discard;
-            // curl: one flank catches the light as the petal tumbles, and an
-            // edge-on petal (vFlat small) is darker because it shows its rim
-            vec3 c = vCol * (0.62 + 0.55 * smoothstep(-0.6, 0.9, p.x) + 0.30 * vein);
-            c *= mix(0.55, 1.0, vFlat);
+            float phi = phimax * (0.55 * t + 0.45 * t * t);
+            float ndv = cos(phi);
+            float back = smoothstep(1.08, 1.34, phi);        // turned over
+            vec3 face = mix(vec3(1.0, 0.97, 0.91), vCol, smoothstep(0.02, 0.52, u));
+            face *= 0.60 + 0.64 * max(ndv, 0.0);
+            float vein = 0.5 + 0.5 * sin(t * 13.0 + u * 2.0 + vSeed * 17.0);
+            face *= 1.0 - 0.10 * vein * smoothstep(0.10, 0.92, u);
+            vec3 under = mix(vCol, vec3(1.0, 0.96, 0.94), 0.62) *
+              (0.40 + 0.32 * abs(ndv));
+            vec3 c = mix(face, under, back);
+            c += vec3(1.0, 0.95, 0.92) *
+              smoothstep(0.09, 0.0, abs(phi - 1.20)) * 0.28;
+            c *= mix(0.66, 1.0, vFlat);
             c *= 0.85 + 0.45 * vGlow;
             fragColor = vec4(c * a, a);
           }
