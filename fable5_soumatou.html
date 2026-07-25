@@ -14,7 +14,9 @@
 
   実行方法:
     python3 -m http.server 8888 → http://localhost:8888/fable5_soumatou.html
-    (無操作で成立。数秒触らないと「触れると灯がゆらぐ」の淡いヒントが出る)
+    (無操作で成立。ドラッグ/タッチムーブで絵筒を直接回せる(離すと慣性で
+     ゆっくり自然回転へ戻る)。触れている間は炎のゆらぎが深まり灯が明るくなる。
+     数秒触らないと淡いヒントが出る)
     ?fakesource=1  … 実ポインタなしで決定的スクリプトが回転と炎のゆらぎを進める
                      (通常の無入力挙動と同じ。--motion 前提で常に影が巡る)
     ?freeze=1      … 時間駆動(回転位相・炎のゆらぎ)を停止し決定的な静止フレームを出す
@@ -361,7 +363,7 @@
 
     <section id="panel" class="panel" aria-label="Soumatou controls"></section>
 
-    <div id="hint" aria-hidden="true">触れると灯がゆらぐ</div>
+    <div id="hint" aria-hidden="true">ドラッグで筒を回す · 触れると灯がゆらぐ</div>
 
     <div id="overlay" class="hidden" role="status" aria-live="polite">
       <div class="overlay-card">
@@ -1462,10 +1464,16 @@
         // pointer (secondary input — the piece is complete without it)
         let pointerActive = false;
         let pointerU = 0.5;
-        let spinEma = 0;
+        let lastPointerU = 0.5;    // previous frame's u — the drag delta drives θ
+        let dragOmega = 0;         // ema of the drag's angular velocity (rad/s)
+        let fling = 0;             // inertia left over after the finger lifts
         let boostEma = 0;
         let lastInputT = -1e9;
         let hintShown = false;
+
+        // how far the drum turns for a full-width drag. Just over a half turn
+        // reads as "my finger is holding the drum", not as a flick control.
+        const DRAG_GAIN = TAU * 0.62;
 
         function clientToU(clientX) {
           const rect = canvas.getBoundingClientRect();
@@ -1474,18 +1482,27 @@
         canvas.addEventListener("pointerdown", (e) => {
           pointerActive = true;
           pointerU = clientToU(e.clientX);
+          lastPointerU = pointerU;   // no jump on the first frame of a drag
+          fling = 0;                 // grabbing the drum kills the old inertia
           lastInputT = simTime;
           hideHint();
           canvas.setPointerCapture?.(e.pointerId);
-        });
+          e.preventDefault();
+        }, { passive: false });
         canvas.addEventListener("pointermove", (e) => {
           if (!pointerActive) return;
           pointerU = clientToU(e.clientX);
           lastInputT = simTime;
-        });
-        function endPointer() { pointerActive = false; }
+          e.preventDefault();
+        }, { passive: false });
+        function endPointer() {
+          if (!pointerActive) return;
+          pointerActive = false;
+          fling = dragOmega;   // let go → the drum keeps coasting, then settles
+        }
         canvas.addEventListener("pointerup", endPointer);
         canvas.addEventListener("pointercancel", endPointer);
+        canvas.addEventListener("pointerleave", endPointer);
 
         function showHint() {
           if (hintShown || FAKESOURCE) return;
@@ -1507,10 +1524,10 @@
           simTime = (simTime + dt) % 3600;   // bounded clock (§8-14)
 
           if (FAKESOURCE) {
-            // deterministic synthetic pointer: nudges the spin and the lamp so
-            // the piece is provably input-driven, while the underlying 巡り is
-            // exactly the same as the idle behaviour.
-            pointerActive = true;
+            // deterministic synthetic DRAG: the scripted pointer sweeps left and
+            // right, so the drag path (θ follows the finger) and the touch flare
+            // are both exercised by the machine checks — not just the idle spin.
+            if (!pointerActive) { pointerActive = true; lastPointerU = 0.5; }
             pointerU = 0.5 + 0.32 * Math.sin(simTime * 0.21);
           }
 
@@ -1520,23 +1537,46 @@
           const f3 = fbm1(simTime * 0.19 + 90.0);
           const f4 = fbm1(simTime * 0.42 + 150.0);
 
-          const spinTarget = pointerActive ? (pointerU - 0.5) * 1.7 : 0;
-          spinEma += (spinTarget - spinEma) * Math.min(1, dt * 2.5);
+          // --- drag: the finger turns the drum directly -------------------
+          // θ follows the drag DISTANCE (not the pointer's absolute position),
+          // so the picture drum tracks the finger like a physical object. On
+          // release the measured angular velocity carries on as inertia and
+          // decays back into the flame-driven idle spin.
+          let dragStep = 0;
+          if (pointerActive) {
+            dragStep = (pointerU - lastPointerU) * DRAG_GAIN;
+            lastPointerU = pointerU;
+            const inst = dt > 1e-4 ? dragStep / dt : 0;
+            dragOmega += (inst - dragOmega) * Math.min(1, dt * 12.0);
+          } else {
+            dragOmega *= Math.exp(-dt * 3.0);
+            fling *= Math.exp(-dt * 1.6);          // coast, then settle
+            if (Math.abs(fling) < 1e-3) fling = 0;
+          }
           const boostTarget = pointerActive ? 1 : 0;
-          boostEma += (boostTarget - boostEma) * Math.min(1, dt * 2.0);
+          boostEma += (boostTarget - boostEma) * Math.min(1, dt * (pointerActive ? 6.0 : 1.6));
+
+          // touching the lantern makes the flame breathe harder — the shadows
+          // visibly swell and sway while the finger is down (feedback: the old
+          // 0.22 lamp nudge was too subtle to notice).
+          const flLive = fl * (1 + 1.6 * boostEma);
 
           const baseOmega = 0.055 + 0.365 * state.speed;
+          // while held, the idle spin yields to the hand (the drum is "grabbed")
           const omegaTarget =
-            baseOmega * (1 + (f1 - 0.5) * 1.1 * fl) * (1 + spinEma);
+            baseOmega * (1 + (f1 - 0.5) * 1.1 * flLive) * (1 - 0.85 * boostEma);
           omegaEma += (omegaTarget - omegaEma) * Math.min(1, dt * 2.2);
-          theta = (theta + omegaEma * dt) % TAU;   // 位相は毎ステップ折り返す
+          theta = (theta + (omegaEma + fling) * dt + dragStep) % TAU;
           if (theta < 0) theta += TAU;
 
-          const gainTarget = (1 + (f2 - 0.5) * 0.55 * fl) * (1 + 0.22 * boostEma);
+          // lamp gain: a clear flare on touch (0.22 → 0.55) on top of the
+          // deeper flicker, so "触れると灯がゆらぐ" is unmistakable.
+          const gainTarget = (1 + (f2 - 0.5) * 0.55 * flLive) * (1 + 0.55 * boostEma);
           gainEma += (gainTarget - gainEma) * Math.min(1, dt * 4.0);
 
-          flameY += ((f3 - 0.5) * 0.11 * fl - flameY) * Math.min(1, dt * 3.0);
-          flameLat += ((f4 - 0.5) * 0.055 * fl - flameLat) * Math.min(1, dt * 3.0);
+          // the flame itself wanders further while touched → the shadows sway
+          flameY += ((f3 - 0.5) * 0.11 * flLive - flameY) * Math.min(1, dt * 3.0);
+          flameLat += ((f4 - 0.5) * 0.055 * flLive - flameLat) * Math.min(1, dt * 3.0);
           eccA = (eccA + (0.20 + (f1 - 0.5) * 0.26) * dt) % TAU;
 
           nFig = Math.round(5 + 13 * state.figures);
