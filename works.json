@@ -1,5 +1,21 @@
 [
   {
+    "slug": "fable5_kiin-seido",
+    "file": "fable5_kiin-seido.html",
+    "title": "気韻生動",
+    "date": "2026-07-25",
+    "desc": "カメラの人物だけが実写のまま生成りの紙に残り、周囲は墨の飛沫・にじみ・かすれた筆致の抽象になる。動くと直前の身体が濃紺の水墨として遅れて追い、軌道が払いの弧になって紙に残る。止まれば墨は吸われて薄れ、余白が戻る。",
+    "model": "",
+    "tags": [
+      "WebGL2",
+      "MediaPipe",
+      "Stable Fluids",
+      "Stroke Splatting"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_kiin-seido.jpg"
+  },
+  {
     "slug": "fable5_senkohanabi",
     "file": "fable5_senkohanabi.html",
     "title": "線香花火",
