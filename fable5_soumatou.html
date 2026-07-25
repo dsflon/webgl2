@@ -1,0 +1,1727 @@
+<!doctype html>
+<!--
+  fable5_soumatou.html — WebGL2「走馬灯(Soumatou — Revolving Lantern)」— 無入力(時間)
+
+  概要:
+  夜闇に盆提灯の走馬灯(回り灯籠)がひとつ浮かんでいる。木枠に張った外側の和紙は
+  内側の灯に温かく透け、中央が明るい琥珀色で周縁へ落ちる。灯の上昇気流でゆっくり
+  回る内側の絵筒に貼られた切り絵(馬・薄・鳥・雲・花枝)が、逆光のシルエットとなって
+  紙面を巡る。行列は片端から現れ、円筒の湾曲で横に潰れながら反対の端へ去り、
+  周期をおいてまた現れる。灯は炎なので光量も回転速度も絶えず微かに揺れ、影は
+  呼吸するように濃さと位置を揺らす。<b>無操作で延々と巡り続ける情景そのものが主役</b>で、
+  ポインタは副入力(触れている間だけ回転が速く/遅くなり灯が強まる)に留まる。
+  カメラ・マイクは使わない。<meta name="art-input" content="none"> 宣言。
+
+  実行方法:
+    python3 -m http.server 8888 → http://localhost:8888/fable5_soumatou.html
+    (無操作で成立。数秒触らないと「触れると灯がゆらぐ」の淡いヒントが出る)
+    ?fakesource=1  … 実ポインタなしで決定的スクリプトが回転と炎のゆらぎを進める
+                     (通常の無入力挙動と同じ。--motion 前提で常に影が巡る)
+    ?freeze=1      … 時間駆動(回転位相・炎のゆらぎ)を停止し決定的な静止フレームを出す
+                     (固定 dt=1/60 の preroll で回転を進めてから dt=0 で保持)
+    ?prewarm=<秒>  … 初回描画の前に指定秒ぶんを固定 dt で決定的に早送りしてから開始する
+                     (freeze の preroll と同じ機構を非 freeze にも公開。検証環境で
+                      「回転が進んだ状態」を実時間を待たずに得るためのフック)
+    デバッグ表示: 0=最終合成 / 1=影のマスクのみ(半影の効き) / 2=紙の透過光のみ(繊維・桟・減衰)
+                  3=切り絵 sdf の配置(絵筒の展開図) / 4=標本(琥珀→暗褐色の色見本＋半影の段階見本)
+
+  様式解析の要約(視覚的不変量。優先度 1 > 2 > 3 > 4 > 5 > 6):
+    1. 純粋なシルエット(マーク) — 切り絵は sdf(馬/薄/鳥/雲/花枝)で彫り、投影は sdf 距離の
+       しきい値を smoothstep 幅で二値化する。複数の影は max で合成(加算しない)ので重なっても
+       濃さが積み上がらず、内部は一様に暗い。影の内部にテクスチャや階調を足さない
+       (紙の繊維は影内で振幅 0.28 倍に落とす)。
+    2. 巡り(時間) — 回転位相 θ を dt スケールで進め mod(θ,2π) で折り返す。光源が筒の軸上に
+       あるため外筒の角度 φ に落ちる影は内筒の同じ角度 φ の切り絵が作る(角度が保存される)。
+       画面横座標は u = R·sinφ なので端で dφ/du が発散し、影は端で横に潰れて現れ/去る。
+       角速度は炎のゆらぎで変調され ema で平滑。
+    3. 距離で変わる半影(知覚/場) — 半影半径の解析解は blur = r_flame·(R_o/r_i − 1)、拡大率は
+       R_o/r_i。すなわち切り絵の軸からの距離 r_i にのみ依存する。r_i を (a) 図形ごとの
+       cell-hash による散らし [0.42,0.68]·R_o と (b) 絵筒の偏心+首振り(curl/fbm でゆっくり
+       歳差)で変える。紙に近い影は鋭く小さく濃い/遠い影はぼけて大きく淡い。
+    4. 和紙の透過光(物質/色) — 透過光 I = (R/L)³·cos^0.72φ(逆二乗×入射角×前方散乱)で
+       中央が明るく周縁へ落ちる。繊維は fbm の微細むら＋長繊維の筋＋節を透過率に乗算。
+       縦桟は等間隔角度の暗帯(u=R·sinφ 写像で端ほど密になる)。周縁は edge darkening。
+    5. 炎のゆらぎ(時間/場) — 炎の乱れは 128×48 の状態テクスチャに保持し、curl noise で上昇
+       移流させ fbm 源へ ema で寄せる(ping-pong)。この場が方位×高さの光量むらと芯の横ずれを
+       与え、CPU 側の fbm+ema が光量・角速度・芯の高さを低振幅変調する。
+    6. 夜闇に浮かぶ灯籠(色) — 背景は暗い夜色に固定し、笠・上下輪・脚は暗い木部シルエット。
+       色は oklab の 暗褐色→琥珀→白熱寄り の3区間ランプ。影は純黒にせず紙の面内散乱の床
+       (局所光量の 7%)を残して暗褐色に留める。
+
+  パイプライン図:
+    FLAME = 128×48 RGBA16F(float 非対応時 RGBA8)LINEAR / WRAP_S=REPEAT / ping-pong ×2
+            .r=光量むら/2 .g=芯の横ずれ*0.5+0.5 .b=芯の高さずれ*0.5+0.5(全て[0,1]符号化)
+    [CPU]   固定 dt=1/60。fbm1(simTime) → 光量 gain / 角速度 ω / 芯の高さ / 偏心方位。
+            すべて ema 平滑。θ += ω·dt; θ = mod(θ, 2π)。simTime も mod 3600 で折り返す。
+            ポインタ押下中のみ ω を ±・灯を強める(副入力・ema で戻る)。可視シルエット数は
+            CPU で |wrap(ψ_k+θ)| < π/2 を数える(readPixels 不要)。
+    [P1 flame]  FLAME_src →(curl noise で上昇移流 + fbm 源へ ema)→ FLAME_dst  (ping-pong)
+                freeze / 静止トグル時は呼ばない(状態が保持され静止フレームが揺れない)
+    [P2 scene]  画面画素 → 灯籠ローカル(u,v) → 外形 sdf(笠/上輪/紙/下輪/脚/宝珠)
+                紙面なら φ=asin(u/R(v)) → 透過光(FLAME を1サンプル) → 図形ループ
+                (角度・高さの二重カリング → 逆投影 → sdf → smoothstep 幅=半影 → max 合成)
+                → 繊維 fbm → 縦桟 → oklab ランプ → 夜色・ハロ・edge darkening → 画面
+                (preserveDrawingBuffer:true / DPR≤2 / 長辺クランプ)
+    [resize]    キャンバスのみ再計算。FLAME はキャンバス非依存で保持。
+
+  スライダーの説明(全て単一 state に集約 / DEFAULTS と RESET LOOK):
+    speed     回る速さ     絵筒の基準角速度(0.055〜0.42 rad/s)
+    figures   切り絵の数   筒の周に並ぶシルエットの密度(5〜18体)
+    penumbra  影のぼけ     距離あたりの半影の広がり(半影半径の倍率)
+    shadow    影の濃さ     影の暗さ(暗褐色の沈み込み。純黒にはならない)
+    lamp      灯の強さ     透過光の明るさと中心の輝き
+    flicker   炎のゆらぎ   光量・角速度・芯の位置の揺らぎ幅
+    washi     和紙の質感   繊維むら・長繊維の筋・節と縦桟の見え
+    amber     灯の色温度   琥珀寄り ↔ 赤橙寄り(oklab ランプの端点)
+
+  依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00。外部ライブラリ/アセット無し)。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="art-input" content="none" />
+    <title>走馬灯 — Soumatou (WebGL2 time-driven)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05050a;
+        --ink: #f3e7d4;
+        --muted: rgba(243, 231, 212, 0.66);
+        --panel: rgba(14, 11, 10, 0.86);
+        --line: rgba(243, 231, 212, 0.18);
+        --accent: #ffb257;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: radial-gradient(120% 100% at 50% 45%, #0b0a10, #030307 72%);
+        font-family:
+          ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo,
+          Consolas, monospace;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #030307;
+        touch-action: none;
+      }
+      .top-btn {
+        position: fixed;
+        top: max(14px, env(safe-area-inset-top));
+        z-index: 11;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: var(--panel);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left));
+        width: 38px;
+        padding: 8px 0;
+        font-size: 15px;
+        line-height: 1;
+        text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute;
+        top: 9px;
+        right: 9px;
+        z-index: 2;
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        background: rgba(243, 231, 212, 0.06);
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(243, 231, 212, 0.14); }
+      .panel {
+        position: fixed;
+        top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left));
+        z-index: 10;
+        width: min(360px, calc(100vw - 28px));
+        max-height: calc(100vh - 76px);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        padding: 13px 14px 14px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px;
+        padding-right: 30px;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 0 0 10px;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1;
+        max-width: 210px;
+        padding: 5px 6px;
+        color: var(--ink);
+        background: rgba(243, 231, 212, 0.06);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        font: inherit;
+        font-size: 10.5px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider";
+        gap: 2px 8px;
+        padding: 7px 0 2px;
+        border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block;
+        font-size: 9.5px;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+      .row output {
+        grid-area: out;
+        justify-self: end;
+        font-size: 10.5px;
+        color: var(--accent);
+      }
+      .row input[type="range"] {
+        grid-area: slider;
+        width: 100%;
+        accent-color: var(--accent);
+      }
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0 2px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1;
+        min-width: 92px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        background: rgba(243, 231, 212, 0.06);
+        font: inherit;
+        font-size: 10.5px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+      .status {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+        font-size: 9.5px;
+        line-height: 1.7;
+        letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block;
+        margin-top: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 9px;
+        color: var(--muted);
+      }
+      #hint {
+        position: fixed;
+        left: 50%;
+        top: 84%;
+        transform: translate(-50%, -50%);
+        z-index: 6;
+        padding: 10px 18px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(8, 6, 6, 0.5);
+        color: var(--ink);
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.6s ease;
+        backdrop-filter: blur(3px);
+        text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+      }
+      #hint.show { opacity: 0.85; }
+      #overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(3, 3, 7, 0.85);
+        backdrop-filter: blur(6px);
+        transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px;
+        padding: 22px 24px;
+        text-align: center;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+      .overlay-card h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        letter-spacing: 0.16em;
+        color: var(--ink);
+      }
+      .overlay-card p { margin: 0; font-size: 11px; line-height: 1.6; }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          width: auto;
+          max-height: 54vh;
+          padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 time-driven revolving lantern (soumatou)"></canvas>
+
+    <button
+      id="togglePanel"
+      type="button"
+      class="top-btn hidden"
+      aria-label="コントローラーを開く"
+      aria-expanded="true"
+    >
+      ☰
+    </button>
+
+    <section id="panel" class="panel" aria-label="Soumatou controls"></section>
+
+    <div id="hint" aria-hidden="true">触れると灯がゆらぐ</div>
+
+    <div id="overlay" class="hidden" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle"></h2>
+        <p id="overlayText"></p>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const hintEl = document.getElementById("hint");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?freeze=1 — deterministic still. A fixed-dt (1/60) pre-roll advances the
+        // rotation phase and settles the flame field, then time holds (dt = 0) and
+        // nothing is re-simulated. All hashes are seeded by index / coordinates
+        // only (repo §8-9), so the still is reproducible and flicker-free.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakesource=1 — synthetic input: a deterministic scripted pointer nudges
+        // the rotation and the lamp. Identical in kind to the idle behaviour (the
+        // piece needs no input at all), so the screen always moves for --motion.
+        const FAKESOURCE = QUERY.get("fakesource") === "1";
+        // ?prewarm=<sec> — run <sec> seconds of the simulation at a fixed dt BEFORE
+        // the first real frame, then continue live. Same deterministic pre-roll
+        // machinery as freeze, exposed for the non-freeze case: the verification
+        // environment is software-rendered, so a real-time warm-up would take
+        // minutes. This is how a "rotation has progressed" screenshot is obtained.
+        const PREWARM = (() => {
+          const raw = parseFloat(QUERY.get("prewarm") || "0");
+          return Number.isFinite(raw) ? Math.min(180, Math.max(0, raw)) : 0;
+        })();
+
+        const DEBUG_MODES = [
+          "最終合成",
+          "影のマスクのみ(半影)",
+          "紙の透過光のみ(繊維・桟)",
+          "切り絵 sdf の配置(展開図)",
+          "標本(色見本・半影の段階)",
+        ];
+
+        const DEFAULTS = {
+          speed: 0.4,
+          figures: 0.5,
+          penumbra: 0.5,
+          shadow: 0.6,
+          lamp: 0.55,
+          flicker: 0.4,
+          washi: 0.5,
+          amber: 0.5,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          // reduced-motion: stop the rotation and the flame flutter by default
+          // (order §7「回転と炎の揺れを止める」トグルを初期 ON)。
+          pauseAnim: reducedMotion,
+        };
+
+        const uiRows = [
+          ["speed", "回る速さ", "絵筒の基準角速度", 0, 1, 0.01],
+          ["figures", "切り絵の数", "筒の周に並ぶシルエットの密度", 0, 1, 0.01],
+          ["penumbra", "影のぼけ", "距離あたりの半影の広がり", 0, 1, 0.01],
+          ["shadow", "影の濃さ", "影の暗さ(暗褐色の沈み込み)", 0, 1, 0.01],
+          ["lamp", "灯の強さ", "透過光の明るさと中心の輝き", 0, 1, 0.01],
+          ["flicker", "炎のゆらぎ", "光量と回転速度の揺らぎ幅", 0, 1, 0.01],
+          ["washi", "和紙の質感", "繊維むらの強さと桟の見え", 0, 1, 0.01],
+          ["amber", "灯の色温度", "琥珀寄り↔赤橙寄り", 0, 1, 0.01],
+        ];
+
+        // Presets (標本 = uDebug 4 の色見本・半影段階見本で承認を得る前提)
+        const PRESETS = {
+          盆提灯: {
+            speed: 0.36, figures: 0.5, penumbra: 0.5, shadow: 0.6,
+            lamp: 0.58, flicker: 0.4, washi: 0.52, amber: 0.45,
+          },
+          夜更けの灯: {
+            speed: 0.22, figures: 0.32, penumbra: 0.68, shadow: 0.5,
+            lamp: 0.38, flicker: 0.55, washi: 0.62, amber: 0.72,
+          },
+          切り絵の行列: {
+            speed: 0.58, figures: 0.86, penumbra: 0.34, shadow: 0.78,
+            lamp: 0.62, flicker: 0.3, washi: 0.4, amber: 0.38,
+          },
+        };
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>走馬灯 — Soumatou</h1>
+          <p>
+            夜闇に浮かぶ回り灯籠。内側の絵筒が炎の上昇気流でゆっくり回り、切り絵の影が
+            外側の和紙に<b>逆光のシルエット</b>として映って紙面を巡ります。
+            <b>紙に近い影は鋭く、遠い影はぼけて淡く大きい</b>(半影)。
+            <b>無操作の巡りが主役</b>で、触れている間だけ回転と灯がわずかに変わります。
+          </p>
+          <div class="select-row">
+            <span>プリセット</span>
+            <select id="presetSel" aria-label="プリセット">
+              <option value="">— 選択 —</option>
+              ${Object.keys(PRESETS)
+                .map((k) => `<option value="${k}">${k}</option>`)
+                .join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>回転と炎の揺れを止める(静止)</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">SAVE PNG</button>
+            <button id="resetLook" type="button">RESET LOOK</button>
+            <button id="hideUi" type="button">HIDE UI</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 描画 -- / 位相 -- / 入力 --</div>
+            <span class="badge" id="glBadge">WebGL2 · sdf shadow · penumbra · oklab · fbm · ping-pong</span>
+          </div>
+          </div>
+        `;
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        // Any UI change must force a redraw even while the sim is held still
+        // (freeze / reduced-motion pause skips frames — CRAFT §C4-(4)).
+        let needsRedraw = true;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+            needsRedraw = true;
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+          needsRedraw = true;
+        }
+
+        document.getElementById("debugView").addEventListener("change", (e) => {
+          state.debugView = Number(e.currentTarget.value);
+          needsRedraw = true;
+        });
+        document.getElementById("presetSel").addEventListener("change", (e) => {
+          const preset = PRESETS[e.currentTarget.value];
+          if (preset) Object.keys(preset).forEach((k) => setSlider(k, preset[k]));
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (e) => {
+          state.pauseAnim = e.currentTarget.checked;
+          needsRedraw = true;
+          if (!state.pauseAnim) lastNow = performance.now();
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          document.getElementById("presetSel").value = "";
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        document.getElementById("hideUi").addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-soumatou-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function setOverlay(title, text, show) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          overlay.classList.toggle("hidden", !show);
+        }
+
+        /* ==================================================================
+           WebGL2 setup
+        ================================================================== */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "WEBGL2 UNAVAILABLE",
+            "この作品は WebGL2 を必要とします。ハードウェアアクセラレーションが有効な最新のブラウザでお試しください。",
+            true,
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // The flame state field is a feedback (ema + advection) target. Half-float
+        // keeps the low-amplitude modulation smooth; RGBA8 is a fully working
+        // fallback because every channel is encoded into [0,1] anyway (repo §8-3).
+        const FLOAT_OK = !!gl.getExtension("EXT_color_buffer_float");
+
+        // Renderer probe → software (SwiftShader) renders at a lower internal
+        // resolution because this piece is fill-rate bound, not geometry bound.
+        let isSoftware = false;
+        try {
+          const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+          const rend = dbg
+            ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL))
+            : "";
+          isSoftware = /swiftshader|software|llvmpipe/i.test(rend);
+        } catch (e) {
+          void e;
+        }
+
+        const FLAME_W = 128;
+        const FLAME_H = 48;
+        const MAX_LONG_SIDE = isSoftware ? 1100 : 1500;
+
+        /* ------------------------------------------------------------------
+           Shared GLSL — fullscreen VS, hashes / value-noise fbm / curl noise,
+           oklab, cut-paper SDFs. Every hash is seeded by index or coordinates
+           only (repo §8-9): time never enters a hash, so ?freeze=1 is a
+           reproducible still and the idle image never flickers. Time only ever
+           TRANSLATES a noise field (a continuous scroll), which is what makes
+           the flame breathe.
+        ------------------------------------------------------------------ */
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        const CHUNK_NOISE = `
+          float h11(float p){
+            p = fract(p * 0.1031);
+            p *= p + 33.33;
+            p *= p + p;
+            return fract(p);
+          }
+          float hash12(vec2 p){
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p){
+            vec2 i = floor(p);
+            vec2 f = p - i;
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm3(vec2 p){
+            float acc = 0.0;
+            float amp = 0.5;
+            mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+            for (int i = 0; i < 3; i++){
+              acc += amp * vnoise(p);
+              p = rot * p * 2.03 + vec2(11.7, 7.3);
+              amp *= 0.5;
+            }
+            return acc * 1.1428571;
+          }
+          vec2 curlNoise(vec2 p){
+            float e = 0.035;
+            float n1 = fbm3(p + vec2(0.0, e));
+            float n2 = fbm3(p - vec2(0.0, e));
+            float n3 = fbm3(p + vec2(e, 0.0));
+            float n4 = fbm3(p - vec2(e, 0.0));
+            return vec2(n1 - n2, -(n3 - n4)) / (2.0 * e);
+          }
+        `;
+
+        // Only the INVERSE transform lives on the GPU: the four ramp stops are
+        // converted sRGB→oklab on the CPU and uploaded as uLab0..uLab3, so the
+        // per-pixel cost is one vec3 mix plus one oklab→sRGB (repo §8-12 keeps
+        // the maths highp).
+        const CHUNK_OKLAB = `
+          vec3 lin2srgb(vec3 c){
+            c = clamp(c, 0.0, 1.0);
+            return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+          }
+          vec3 oklab2srgb(vec3 lab){
+            float l_ = lab.x + 0.3963377774*lab.y + 0.2158037573*lab.z;
+            float m_ = lab.x - 0.1055613458*lab.y - 0.0638541728*lab.z;
+            float s_ = lab.x - 0.0894841775*lab.y - 1.2914855480*lab.z;
+            float l = l_*l_*l_;
+            float m = m_*m_*m_;
+            float s = s_*s_*s_;
+            vec3 lin = vec3(
+              4.0767416621*l - 3.3077115913*m + 0.2309699292*s,
+              -1.2684380046*l + 2.6097574011*m - 0.3413193965*s,
+              -0.0041960863*l - 0.7034186147*m + 1.7076147010*s);
+            return lin2srgb(lin);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Cut-paper SDFs (切り絵). Simple motifs of a 走馬灯: a galloping horse
+           (the 「走馬」 the lantern is named after), susuki grass, a flying bird,
+           a cloud bank and a flowering branch. Everything is built from round
+           cones (variable-radius capsules) so the field is a true distance —
+           the penumbra width below is a smoothstep in THIS metric, so the blur
+           radius is physically meaningful (invariant 3).
+        ------------------------------------------------------------------ */
+        const CHUNK_FIGURES = `
+          float sdRC(vec2 p, vec2 a, vec2 b, float r1, float r2){
+            vec2 ba = b - a;
+            float l2 = max(dot(ba, ba), 1e-6);
+            float t = clamp(dot(p - a, ba) / l2, 0.0, 1.0);
+            return length(p - a - ba * t) - mix(r1, r2, t);
+          }
+          float sdHorse(vec2 p){
+            float d = sdRC(p, vec2(-0.46, 0.02), vec2(0.40, 0.06), 0.32, 0.29);
+            d = min(d, length(p - vec2(-0.44, 0.02)) - 0.33);
+            d = min(d, length(p - vec2( 0.38, 0.04)) - 0.30);
+            d = min(d, sdRC(p, vec2(0.40, 0.18), vec2(0.70, 0.60), 0.20, 0.13));
+            d = min(d, sdRC(p, vec2(0.70, 0.62), vec2(0.99, 0.54), 0.135, 0.072));
+            d = min(d, sdRC(p, vec2(0.71, 0.68), vec2(0.66, 0.88), 0.050, 0.012));
+            d = min(d, sdRC(p, vec2(0.42, 0.26), vec2(0.74, 0.74), 0.090, 0.055));
+            d = min(d, sdRC(p, vec2( 0.30, -0.18), vec2( 0.72, -0.44), 0.105, 0.055));
+            d = min(d, sdRC(p, vec2( 0.72, -0.44), vec2( 1.02, -0.30), 0.055, 0.028));
+            d = min(d, sdRC(p, vec2( 0.20, -0.22), vec2( 0.42, -0.72), 0.100, 0.048));
+            d = min(d, sdRC(p, vec2( 0.42, -0.72), vec2( 0.70, -0.92), 0.048, 0.026));
+            d = min(d, sdRC(p, vec2(-0.40, -0.18), vec2(-0.86, -0.42), 0.115, 0.055));
+            d = min(d, sdRC(p, vec2(-0.86, -0.42), vec2(-1.10, -0.66), 0.055, 0.028));
+            d = min(d, sdRC(p, vec2(-0.34, -0.22), vec2(-0.56, -0.74), 0.105, 0.046));
+            d = min(d, sdRC(p, vec2(-0.56, -0.74), vec2(-0.44, -0.98), 0.046, 0.026));
+            d = min(d, sdRC(p, vec2(-0.60, 0.22), vec2(-0.92, 0.46), 0.100, 0.055));
+            d = min(d, sdRC(p, vec2(-0.92, 0.46), vec2(-1.20, 0.30), 0.055, 0.018));
+            return d;
+          }
+          float sdBird(vec2 p){
+            float d = sdRC(p, vec2(-0.34, -0.04), vec2(0.34, 0.06), 0.13, 0.11);
+            d = min(d, length(p - vec2(0.40, 0.12)) - 0.115);
+            d = min(d, sdRC(p, vec2(0.44, 0.12), vec2(0.74, 0.05), 0.055, 0.014));
+            d = min(d, sdRC(p, vec2( 0.06,  0.06), vec2(-0.30, 0.62), 0.17, 0.05));
+            d = min(d, sdRC(p, vec2(-0.30,  0.62), vec2(-0.64, 0.94), 0.05, 0.012));
+            d = min(d, sdRC(p, vec2( 0.02, -0.02), vec2(-0.20, -0.52), 0.15, 0.045));
+            d = min(d, sdRC(p, vec2(-0.20, -0.52), vec2(-0.50, -0.82), 0.045, 0.012));
+            d = min(d, sdRC(p, vec2(-0.34, 0.00), vec2(-0.72, 0.12), 0.10, 0.045));
+            return d;
+          }
+          float sdGrass(vec2 p){
+            float d = 1e9;
+            for (int i = 0; i < 6; i++){
+              float fi = float(i);
+              float o  = (fi - 2.5) * 0.34;
+              float hg = 1.15 + 0.55 * sin(fi * 2.37 + 0.6);
+              float bd = 0.54 * sin(fi * 1.61 + 1.2);
+              vec2 a = vec2(o, -1.02);
+              vec2 m = vec2(o + bd * 0.30, -1.02 + hg * 0.58);
+              vec2 b = vec2(o + bd,        -1.02 + hg);
+              d = min(d, sdRC(p, a, m, 0.075, 0.044));
+              d = min(d, sdRC(p, m, b, 0.044, 0.011));
+              if (i == 1 || i == 4) {
+                d = min(d, sdRC(p, b, b + vec2(bd * 0.24, 0.28), 0.058, 0.018));
+              }
+            }
+            return d;
+          }
+          float sdCloud(vec2 p){
+            float d = sdRC(p, vec2(-0.78, -0.30), vec2(0.82, -0.30), 0.22, 0.17);
+            d = min(d, length(p - vec2(-0.34, -0.04)) - 0.38);
+            d = min(d, length(p - vec2( 0.16,  0.10)) - 0.44);
+            d = min(d, length(p - vec2( 0.62, -0.08)) - 0.30);
+            d = min(d, length(p - vec2(-0.74, -0.14)) - 0.24);
+            return d;
+          }
+          float sdFlower(vec2 p){
+            float d = sdRC(p, vec2(-0.12, -1.02), vec2(0.02, -0.10), 0.055, 0.038);
+            d = min(d, sdRC(p, vec2(0.02, -0.10), vec2(0.22, 0.50), 0.038, 0.024));
+            d = min(d, sdRC(p, vec2(-0.02, -0.48), vec2(-0.54, -0.22), 0.10, 0.013));
+            d = min(d, sdRC(p, vec2( 0.06, -0.26), vec2( 0.50, -0.02), 0.085, 0.013));
+            vec2 q = p - vec2(0.26, 0.64);
+            float a = atan(q.y, q.x + 1e-5);
+            d = min(d, length(q) - 0.30 * (0.66 + 0.34 * cos(5.0 * a + 0.4)));
+            vec2 q2 = p - vec2(-0.26, 0.22);
+            float a2 = atan(q2.y, q2.x + 1e-5);
+            d = min(d, length(q2) - 0.20 * (0.66 + 0.34 * cos(5.0 * a2 - 1.1)));
+            return d;
+          }
+          float figSdf(int typ, vec2 p){
+            if (typ == 0) return sdHorse(p);
+            if (typ == 1) return sdBird(p);
+            if (typ == 2) return sdGrass(p);
+            if (typ == 3) return sdCloud(p);
+            return sdFlower(p);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P1 — FLAME state field (ping-pong). A 128×48 field over
+           (azimuth × height above the wick). Each step the previous field is
+           advected UPWARD through a curl-noise velocity and eased (ema) toward
+           an fbm source that scrolls in time. This is the piece's only
+           feedback state: it gives the lamp a spatial, breathing unevenness
+           (invariant 5) instead of a single global scalar.
+             .r = luminance mottle / 2      .g = lateral wick offset*0.5+0.5
+             .b = vertical wick offset*0.5+0.5   (all encoded to [0,1] so the
+             RGBA8 fallback behaves identically to RGBA16F — repo §8-3)
+        ------------------------------------------------------------------ */
+        const flameFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrev;
+          uniform float uDt;
+          uniform float uSimT;
+          uniform float uEma;
+          ${CHUNK_NOISE}
+          void main(){
+            vec2 uv = vUv;
+            // curl-noise updraft: the field drifts up and swirls sideways
+            vec2 cn = curlNoise(vec2(uv.x * 5.0, uv.y * 2.6) + vec2(0.0, uSimT * 0.28));
+            vec2 src = uv - vec2(cn.x * 0.0022, 0.34 * uDt + cn.y * 0.0016);
+            src.x = fract(src.x);
+            src.y = clamp(src.y, 0.002, 0.998);
+            vec4 prev = texture(uPrev, src);
+            // fbm source, scrolling downward in the field (fresh turbulence at
+            // the wick). uSimT only TRANSLATES the field — it never seeds a hash.
+            float n0 = fbm3(vec2(uv.x * 6.5, uv.y * 3.4 - uSimT * 0.85));
+            float n1 = fbm3(vec2(uv.x * 3.0 + 17.3, uv.y * 1.9 - uSimT * 0.52));
+            float lum = 0.66 + 0.70 * n0;                 // ≈ 1.0 mean
+            float lat = (n1 - 0.5) * 1.4;
+            float vsh = (fbm3(vec2(uv.x * 2.2 + 41.7, uv.y * 1.4 - uSimT * 0.37)) - 0.5) * 1.4;
+            vec4 tgt = vec4(clamp(lum * 0.5, 0.0, 1.0),
+                            clamp(lat * 0.5 + 0.5, 0.0, 1.0),
+                            clamp(vsh * 0.5 + 0.5, 0.0, 1.0),
+                            1.0);
+            fragColor = mix(prev, tgt, clamp(uDt * uEma, 0.0, 1.0));
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           P2 — the whole lantern, one pass.
+
+           GEOMETRY. Orthographic front view. Outer washi = a cylinder of radius
+           R(v) (a gentle barrel), half-height H_P. The flame sits ON THE AXIS at
+           height hL, so the ray that lands on the outer surface at azimuth φ
+           crossed the inner picture cylinder at the SAME azimuth φ — the shadow
+           mapping is angle-preserving and closed-form (no ray marching). The
+           height maps as y_i = hL + (y_o − hL)·r/R, i.e. a magnification R/r.
+
+           PENUMBRA. For a source of radius r_flame the half-shadow measured in
+           the CUT-OUT's own plane is exactly
+
+                blur = r_flame · (R/r − 1)          magnification = R/r
+
+           i.e. it depends only on how far the cut-out sits from the axis. Two
+           physically real mechanisms make r vary (invariant 3):
+             (a) each figure has its own r_k (cell-hash, 0.42..0.68·R) — real
+                 cut-outs stand off the drum by different amounts, so a single
+                 still frame contains both crisp-small and soft-large shadows;
+             (b) the drum hangs on a pivot and wanders: an eccentricity e whose
+                 direction precesses slowly, so ONE figure breathes soft→sharp→
+                 soft as it travels across the paper.
+
+           SILHOUETTE PURITY. Coverage per figure is a single smoothstep of the
+           SDF; figures are combined with max(), never added, so overlaps do not
+           darken (invariant 1). Nothing is drawn INSIDE a shadow.
+        ------------------------------------------------------------------ */
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+
+          uniform vec2  uRes;
+          uniform float uAspect;
+          uniform float uViewS;      // world half-height of the visible frame
+          uniform float uPxWorld;    // world units per device pixel
+          uniform float uTheta;      // rotation phase of the picture drum
+          uniform float uLampGain;   // ema-smoothed flame luminance
+          uniform float uFlameY;     // ema-smoothed wick height
+          uniform float uFlameLat;   // ema-smoothed lateral wick offset (rad)
+          uniform float uEcc;        // drum eccentricity magnitude
+          uniform float uEccA;       // drum eccentricity direction
+          uniform int   uNFig;
+          uniform float uPenumbra;
+          uniform float uShadow;
+          uniform float uLamp;
+          uniform float uFlicker;
+          uniform float uWashi;
+          uniform int   uDebug;
+          uniform vec3  uLab0;       // oklab ramp stops: 影の暗褐色 → 琥珀 → 白熱寄り
+          uniform vec3  uLab1;
+          uniform vec3  uLab2;
+          uniform vec3  uLab3;
+          uniform sampler2D uFlame;
+
+          const float PI  = 3.14159265359;
+          const float TAU = 6.28318530718;
+          const float R_O = 1.0;
+          const float H_P = 1.30;
+          // Flame core radius relative to the shade radius (a candle core is a
+          // few % of a 300mm lantern). This single constant sets the whole
+          // penumbra scale: too large and every silhouette dissolves into mush
+          // (invariant 1 dies before invariant 3 can read).
+          const float R_FLAME = 0.024;
+          const float NRIB = 10.0;
+          const float RIB_W = 0.028;
+          const int   MAX_FIG = 18;
+
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          ${CHUNK_FIGURES}
+
+          float wrapPi(float a){ return mod(a + PI, TAU) - PI; }
+
+          // 和紙のランプ: 影の暗褐色 → 暗褐色 → 琥珀 → 芯の白熱寄り。oklab 空間で
+          // 補間してから一度だけ sRGB へ戻す。0 側が純黒でないので影は暗い茶に留まる。
+          vec3 washiRamp(float t){
+            t = clamp(t, 0.0, 1.0);
+            vec3 lab;
+            if (t < 0.30)      lab = mix(uLab0, uLab1, t / 0.30);
+            else if (t < 0.78) lab = mix(uLab1, uLab2, (t - 0.30) / 0.48);
+            else               lab = mix(uLab2, uLab3, (t - 0.78) / 0.22);
+            return oklab2srgb(lab);
+          }
+          float toneT(float lit){ return 1.0 - exp(-max(lit, 0.0) * 0.95); }
+
+          float outerR(float v){
+            float t = clamp(abs(v) / H_P, 0.0, 1.0);
+            return R_O * (1.0 - 0.075 * t * t);
+          }
+
+          // Lantern outline as a half-width profile. kind: 0 = washi, 1 = 木部.
+          float lanternHalfW(float v, out float kind){
+            kind = 1.0;
+            if (v >  H_P + 0.30) return -1.0;
+            if (v >  H_P) {                                   // 笠
+              float t = clamp((v - H_P) / 0.30, 0.0, 1.0);
+              return mix(R_O * 1.15, R_O * 0.24, pow(t, 0.80));
+            }
+            if (v >  H_P - 0.062) return R_O * 1.07;          // 上輪
+            if (v > -H_P + 0.062) { kind = 0.0; return outerR(v); }
+            if (v > -H_P)        return R_O * 1.07;           // 下輪
+            if (v > -H_P - 0.30) return R_O * 0.20;           // 脚
+            if (v > -H_P - 0.44) return R_O * 0.74;           // 台
+            return -1.0;
+          }
+
+          // Per-figure parameters. Everything is a cell-hash of the index —
+          // never of time (repo §8-9) — so the procession is stable and the
+          // still frames are reproducible.
+          void figParams(int k, int n, out float psi, out float rk,
+                         out float yc, out float sc, out int typ){
+            float fk = float(k);
+            float hA = h11(fk * 1.0 + 0.37);
+            float hB = h11(fk * 1.0 + 7.13);
+            float hC = h11(fk * 1.0 + 13.91);
+            float hD = h11(fk * 1.0 + 21.77);
+            float hE = h11(fk * 1.0 + 31.31);
+            psi = (fk + 0.5) / float(n) * TAU + (hA - 0.5) * (TAU / float(n)) * 0.62;
+            rk  = mix(0.42, 0.68, hE) * R_O;
+            if (hB < 0.42)      { typ = 0; yc = mix(-0.14,  0.03, hC); sc = mix(0.280, 0.365, hD); }
+            else if (hB < 0.62) { typ = 2; yc = mix(-0.46, -0.36, hC); sc = mix(0.270, 0.360, hD); }
+            else if (hB < 0.78) { typ = 1; yc = mix( 0.18,  0.30, hC); sc = mix(0.205, 0.270, hD); }
+            else if (hB < 0.90) { typ = 4; yc = mix(-0.34, -0.24, hC); sc = mix(0.230, 0.310, hD); }
+            else                { typ = 3; yc = mix( 0.24,  0.36, hC); sc = mix(0.245, 0.330, hD); }
+          }
+
+          void main(){
+            float pen = 0.35 + 1.55 * uPenumbra;
+            float shDepth = min(1.0, mix(0.55, 1.05, uShadow));
+            int nFig = uNFig;
+
+            /* ---- uDebug 4: 標本(承認対象) ---------------------------------- */
+            if (uDebug == 4) {
+              vec3 c = vec3(0.020, 0.021, 0.030);
+              if (vUv.y > 0.70) {
+                if (vUv.y < 0.955) {
+                  float t = clamp((vUv.x - 0.06) / 0.88, 0.0, 1.0);
+                  c = washiRamp(t);
+                  float mark = 0.06 + 0.88 * 0.30;
+                  if (abs(vUv.x - mark) < 0.0028 && vUv.y > 0.72 && vUv.y < 0.775)
+                    c = vec3(0.92, 0.88, 0.80);
+                }
+              } else if (vUv.y > 0.36) {
+                float x5 = clamp((vUv.x - 0.04) / 0.92, 0.0, 1.0) * 4.999;
+                float ci = floor(x5);
+                float lx = (fract(x5) - 0.5) * 0.46;
+                float ly = (vUv.y - 0.53) * 1.5;
+                float rI = mix(0.42, 0.68, ci / 4.0);
+                float mag = R_O / rI;
+                float blurW = R_FLAME * (mag - 1.0) * pen;
+                vec2 qc = vec2(lx, ly) / mag;
+                float d = length(qc) - 0.105;
+                float cov = 1.0 - smoothstep(-blurW, blurW, d);
+                float dens = mix(1.0, 0.76, clamp((blurW - 0.010) / 0.032, 0.0, 1.0));
+                c = washiRamp(toneT(1.25 * mix(1.0, 0.07, cov * dens * shDepth)));
+              } else if (vUv.y > 0.02) {
+                float x5 = clamp((vUv.x - 0.02) / 0.96, 0.0, 1.0) * 4.999;
+                int ci = int(floor(x5));
+                vec2 q = vec2((fract(x5) - 0.5) * 2.35, (vUv.y - 0.19) / 0.155);
+                float d = figSdf(ci, q);
+                float cov = 1.0 - smoothstep(-0.028, 0.028, d);
+                c = washiRamp(toneT(1.25 * mix(1.0, 0.07, cov * shDepth)));
+              }
+              fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+              return;
+            }
+
+            /* ---- uDebug 3: 絵筒の展開図 ------------------------------------ */
+            if (uDebug == 3) {
+              float psiW = (vUv.x - 0.5) * TAU;
+              float yi   = (vUv.y - 0.5) * 1.75;
+              bool  win  = abs(psiW) < PI * 0.5;
+              vec3 c = win ? vec3(0.085, 0.070, 0.052) : vec3(0.028, 0.028, 0.040);
+              for (int k = 0; k < MAX_FIG; k++){
+                if (k >= nFig) break;
+                float psi, rk, yc, sc; int typ;
+                figParams(k, nFig, psi, rk, yc, sc, typ);
+                float Psi = wrapPi(psi + uTheta);
+                float dp  = wrapPi(psiW - Psi);
+                float span = (sc * 1.45) / rk + 0.04;
+                if (abs(dp) > span) continue;
+                if (abs(yi - yc) > sc * 1.45) continue;
+                vec2 p = vec2(dp * rk, yi - yc) / sc;
+                float d = figSdf(typ, p);
+                float f = 1.0 - smoothstep(0.0, 0.035, d);
+                float near = clamp((rk - 0.42) / 0.26, 0.0, 1.0);
+                vec3 fc = mix(vec3(0.42, 0.26, 0.14), vec3(1.0, 0.78, 0.40), near);
+                c = mix(c, fc, f);
+              }
+              // 可視窓の境界(±π/2)と中心線
+              float b1 = min(abs(vUv.x - 0.25), abs(vUv.x - 0.75));
+              if (b1 < 0.0016) c = vec3(0.30, 0.55, 0.70);
+              if (abs(vUv.x - 0.5) < 0.0012) c = vec3(0.28, 0.34, 0.40);
+              fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+              return;
+            }
+
+            /* ---- world coordinates ---------------------------------------- */
+            vec2 w = (vUv - 0.5) * 2.0 * uViewS * vec2(uAspect, 1.0);
+            float u = w.x, v = w.y;
+
+            // 夜闇 + 灯りのハロ(灯籠の外形からの距離で減衰)
+            float ny = clamp(v / uViewS * 0.5 + 0.5, 0.0, 1.0);
+            vec3 col = mix(vec3(0.0075, 0.0085, 0.0155), vec3(0.019, 0.019, 0.030), 1.0 - ny);
+            float boxd = length(max(vec2(abs(u) - R_O * 1.00, abs(v) - H_P * 1.12), vec2(0.0)));
+            float halo = exp(-boxd * 2.9) * 0.42 + exp(-boxd * 0.72) * 0.13;
+            vec3 haloCol = oklab2srgb(mix(uLab2, uLab3, 0.35));
+            col += haloCol * halo * uLampGain * mix(0.10, 0.34, uLamp);
+
+            // 台が載っている面: 灯りの光だまりと、台自身の接地影。灯籠が
+            // 「置かれている」証拠。台の底が平坦に切れて浮いて見えるのを防ぐ。
+            float floorY = -H_P - 0.44;
+            if (v < floorY) {
+              float dy = floorY - v;
+              float ux = min(abs(u) / 1.25, 6.0);
+              float pool = exp(-dy * 3.4) * exp(-ux * ux);
+              float occl = exp(-min(dy / 0.055, 6.0)) *
+                           (1.0 - smoothstep(R_O * 0.60, R_O * 0.80, abs(u)));
+              col += haloCol * pool * (1.0 - occl * 0.9) * uLampGain * mix(0.05, 0.17, uLamp);
+              col *= 1.0 - 0.62 * occl;
+            }
+
+            /* ---- lantern body --------------------------------------------- */
+            float aaW = max(uPxWorld * 1.1, 1e-4);
+            if (abs(u) < R_O * 1.30 && v < H_P + 0.46 && v > -H_P - 0.52) {
+              float kind;
+              float hw = lanternHalfW(v, kind);
+              float inside = hw > 0.0 ? 1.0 - smoothstep(hw - aaW, hw + aaW, abs(u)) : 0.0;
+              // 宝珠(finial)
+              float fin = 1.0 - smoothstep(0.070, 0.070 + aaW * 2.0,
+                                           length(vec2(u, (v - (H_P + 0.345)))));
+              float woodMask = max(inside * kind, fin);
+
+              vec3 surf = vec3(0.0);
+              float surfA = 0.0;
+
+              if (kind < 0.5 && inside > 0.0) {
+                /* ---------------- washi panel --------------------------- */
+                float Rv = outerR(v);
+                float sn = clamp(u / Rv, -1.0, 1.0);
+                float phi = asin(sn);
+                float cosphi = max(sqrt(max(1.0 - sn * sn, 0.0)), 0.02);
+                float hL = uFlameY;
+
+                // 透過光: (R/L)^3 は 逆二乗 × 内面への入射角。cos^0.72 は和紙の
+                // 前方散乱による斜め透過の落ち込み → 中央が明るく周縁へ落ちる。
+                float L = sqrt(Rv * Rv + (v - hL) * (v - hL));
+                float I = pow(Rv / L, 3.0) * pow(cosphi, 0.72);
+
+                // 炎の場(ping-pong 状態)を1サンプル。光量むらと芯のずれ。
+                vec2 fuv = vec2(fract(phi / TAU + 0.5),
+                                clamp((v - hL) / (2.6 * H_P) + 0.5, 0.02, 0.98));
+                vec4 fl = texture(uFlame, fuv);
+                float flum = fl.r * 2.0;
+                I *= mix(1.0, flum, 0.34 * uFlicker);
+                I += 0.26 * exp(-(v - hL) * (v - hL) * 5.5) * pow(cosphi, 2.2) * flum;
+                I *= uLampGain * mix(0.55, 1.70, uLamp);
+
+                /* ------------- shadow of the cut-outs ------------------- */
+                float shadow = 0.0;
+                // 芯の横ずれ: 光源が軸から外れると射線がわずかに傾く(一次近似)。
+                float latShift = uFlameLat + (fl.g * 2.0 - 1.0) * 0.012 * uFlicker;
+                // 1画素が覆う「筒の周方向の弧長」/ 半径。u = R·sinφ 写像は端で
+                // dφ/du が発散するので、この値は縁で急激に大きくなる。
+                float arcK = uPxWorld / (cosphi * Rv);
+                for (int k = 0; k < MAX_FIG; k++){
+                  if (k >= nFig) break;
+                  float psi, rk, yc, sc; int typ;
+                  figParams(k, nFig, psi, rk, yc, sc, typ);
+                  float Psi = wrapPi(psi + uTheta);
+                  float rEff = clamp(rk + uEcc * cos(Psi - uEccA), 0.24, 0.90);
+                  float blurW = R_FLAME * (R_O / rEff - 1.0) * pen;
+                  // この図形にとっての1画素の足跡(切り絵面での弧長)
+                  float arcPx = arcK * rEff;
+                  // 実効のなまし幅 = 半影 か 1画素の足跡 の大きい方。係数は 1.4 で
+                  // 「1画素分の箱フィルタ」を包む(0.75 では縁で1画素の孤立片が残った)。
+                  float smoothW = max(blurW, arcPx * 1.4);
+                  // カリング境界は「実際になましている幅」を含める。含めないと
+                  // 縁では dφ/画素 が大きいため continue が硬い段差になって縞に割れる。
+                  float span = (sc * 1.45 + smoothW * 2.0) / rEff + 0.05;
+                  // 裏側(筒の向こう)の切り絵の影は前面には映らない
+                  if (abs(Psi) > 1.5708 + span) continue;
+                  float phiSrc = phi + latShift * (1.0 - rEff / R_O);
+                  float dphi = wrapPi(phiSrc - Psi);
+                  if (abs(dphi) > span) continue;
+                  float sy = hL + (v - hL) * (rEff / Rv) - yc;
+                  if (abs(sy) > sc * 1.45 + smoothW * 1.6) continue;
+                  vec2 p = vec2(dphi * rEff, sy) / sc;
+                  float d = figSdf(typ, p);
+                  // 手切りの紙の縁(座標由来・時間なし)。生の距離場の露出を避ける。
+                  // 波長は sc/5.2。1画素がそれに迫る縁では折り返してノイズになるので、
+                  // 解像できる間だけ効かせる。
+                  float jitK = smoothstep(sc * 0.19, sc * 0.075, arcPx);
+                  d += (vnoise(p * 5.2 + h11(float(k) + 0.37) * 41.0) - 0.5) * 0.040 * jitK;
+                  float wdt = smoothW / sc + 1e-4;
+                  float cov = 1.0 - smoothstep(-wdt, wdt, d);
+                  float dens = mix(1.0, 0.76, clamp((blurW - 0.010) / 0.032, 0.0, 1.0));
+                  // 1画素が切り絵のディテール(脚・穂)を丸ごと飲む領域は、どんな
+                  // なまし幅でも輪郭を再構成できない。孤立片に割れる前に滑らかに
+                  // 消して縁の減光に溶かす(グレージング側の可読限界)。
+                  float legible = smoothstep(sc * 0.085, sc * 0.030, arcPx);
+                  shadow = max(shadow, cov * dens * legible);   // 純粋シルエット: 加算しない
+                }
+                shadow *= smoothstep(0.0, 0.10, cosphi);   // 端で滑らかに消す
+                if (uDebug == 2) shadow = 0.0;
+
+                /* ------------- 和紙の繊維 ------------------------------- */
+                // 楮の長い繊維が幾方向にも重なって漉かれている紙。等方 fbm の高周波を
+                // そのまま乗せると 1px の軸整列した暗点(= 埃)になるので、細長い
+                // 異方性(周方向:高さ = 1:10 前後)の単一オクターブ noise を3方向に
+                // 重ねて「筋」を作る。暗側だけに偏らせず明暗の両側へ振らせる。
+                vec2 fp = vec2(phi * R_O, v);
+                // 繊維の太さを常に数ピクセルに保つ(低解像度で点/塵に落ちない)
+                float fs = clamp(0.0052 / max(uPxWorld, 1e-5), 0.28, 1.0);
+                vec2 fa = mat2( 0.966,  0.259, -0.259, 0.966) * fp;   //  +15°
+                vec2 fb = mat2( 0.839, -0.545,  0.545, 0.839) * fp;   //  -33°
+                vec2 fc = mat2( 0.242,  0.970, -0.970, 0.242) * fp;   //  +76°
+                float t1 = vnoise(vec2(fa.x * 4.0, fa.y * 40.0) * fs) - 0.5;
+                float t2 = vnoise(vec2(fb.x * 3.0, fb.y * 29.0) * fs + 19.3) - 0.5;
+                float t3 = vnoise(vec2(fc.x * 5.0, fc.y * 52.0) * fs + 43.1) - 0.5;
+                float threads = t1 + t2 * 0.85 + t3 * 0.70;
+                float cloud = fbm3(fp * 4.2) - 0.5;    // 紙厚の低周波むら
+                float fibAmp = uWashi * smoothstep(0.0, 0.26, cosphi) * mix(1.0, 0.28, shadow);
+                float fib = 1.0 + (threads * 0.40 + cloud * 0.30) * fibAmp;
+
+                /* ------------- 縦桟(等間隔の暗帯) ---------------------- */
+                float rd = abs(fract(phi * NRIB / TAU + 0.5) - 0.5) * (TAU / NRIB);
+                float ribAA = max(uPxWorld / cosphi, 0.0025);
+                float rib = 1.0 - smoothstep(RIB_W - ribAA, RIB_W + ribAA, rd * Rv);
+
+                float lit = I * fib * mix(1.0, 0.07, shadow * shDepth) * (1.0 - 0.90 * rib);
+                // 紙面の周縁を締める(edge darkening)
+                float ex = smoothstep(0.72, 1.02, abs(u) / Rv);
+                float ey = smoothstep(0.74, 1.00, abs(v) / H_P);
+                lit *= 1.0 - 0.55 * max(ex, ey);
+
+                surf = washiRamp(toneT(lit));
+                if (uDebug == 1) surf = vec3(shadow);
+                surfA = inside;
+              }
+
+              if (woodMask > 0.0) {
+                // 木部(笠・上下輪・支柱・台)は轆轤挽きの丸物。光源が内側にあるので
+                // 正面中央は灯を浅い角度で受けて明るく、輪郭へ向かって暗く落ちる
+                // (円柱の cos)。紙の上下開口から漏れる光が笠の裏と台の甲を温める。
+                // ベタ塗りの軸整列矩形に見えないよう、この階調と木目を必ず持たせる。
+                float wRef = max(hw, 0.09);
+                float wsn = clamp(u / wRef, -1.0, 1.0);
+                float wcos = sqrt(max(1.0 - wsn * wsn, 0.0));
+                float leak = exp(-max(abs(v) - H_P, 0.0) * 3.2) * uLampGain * mix(0.4, 1.0, uLamp);
+                float wlit = leak * (0.28 + 0.72 * pow(wcos, 0.85));
+                // 輪郭際に回り込む淡い縁光(控えめに)
+                float wrim = (1.0 - wcos) * (1.0 - wcos) * leak * 0.30;
+                // 木目: 横木(笠・輪・台)は繊維が水平に走る。低振幅・明暗両側。
+                float wg = (vnoise(vec2(u * 5.5, v * 62.0)) - 0.5)
+                         + (vnoise(vec2(u * 2.3, v * 27.0) + 13.7) - 0.5) * 0.7;
+                vec3 wood = mix(vec3(0.030, 0.020, 0.015), vec3(0.235, 0.128, 0.062),
+                                clamp(wlit * 0.88 + wrim, 0.0, 1.0));
+                wood *= 1.0 + wg * 0.22;
+                if (uDebug == 1) wood = vec3(0.0);
+                surf = mix(surf, wood, woodMask / max(max(surfA, woodMask), 1e-4));
+                surfA = max(surfA, woodMask);
+              }
+              col = mix(col, surf, clamp(surfA, 0.0, 1.0));
+            }
+
+            /* ---- frame-wide edge darkening + dither ------------------------ */
+            float rr = length((vUv - 0.5) * vec2(uAspect, 1.0)) /
+                       (0.5 * length(vec2(uAspect, 1.0)));
+            col *= 1.0 - 0.42 * smoothstep(0.46, 1.10, rr);
+            col += (hash12(gl_FragCoord.xy) - 0.5) * (1.0 / 255.0);
+            fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        /* ==================================================================
+           Program + target plumbing
+        ================================================================== */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          flame: createProgram(fullscreenVS, flameFS),
+          scene: createProgram(fullscreenVS, sceneFS),
+        };
+        const locations = {
+          flame: getLocations(programs.flame, ["uPrev", "uDt", "uSimT", "uEma"]),
+          scene: getLocations(programs.scene, [
+            "uRes", "uAspect", "uViewS", "uPxWorld", "uTheta", "uLampGain",
+            "uFlameY", "uFlameLat", "uEcc", "uEccA", "uNFig", "uPenumbra",
+            "uShadow", "uLamp", "uFlicker", "uWashi", "uDebug",
+            "uLab0", "uLab1", "uLab2", "uLab3", "uFlame",
+          ]),
+        };
+
+        const FLAME_INT = FLOAT_OK ? gl.RGBA16F : gl.RGBA8;
+        const FLAME_TYPE = FLOAT_OK ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+
+        function createFlameTarget(w, h, fbo) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          // azimuth wraps around the flame column, height clamps
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, FLAME_INT, w, h, 0, gl.RGBA, FLAME_TYPE, null);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          const ok =
+            gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          // neutral state: luminance 1.0, no wick offset (all encoded at 0.5)
+          gl.viewport(0, 0, w, h);
+          gl.clearColor(0.5, 0.5, 0.5, 1.0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (!ok) throw new Error("RENDER TARGET INCOMPLETE");
+          return { tex, fbo, width: w, height: h };
+        }
+
+        const vao = gl.createVertexArray();
+
+        // ping-pong pair for the flame feedback field (never read & written in
+        // the same pass — repo §8-2)
+        // two DISTINCT framebuffers, one per ping-pong slot
+        const flameSets = [
+          createFlameTarget(FLAME_W, FLAME_H, gl.createFramebuffer()),
+          createFlameTarget(FLAME_W, FLAME_H, gl.createFramebuffer()),
+        ];
+        let flamePing = false;
+        function flameCur() { return flameSets[flamePing ? 1 : 0]; }
+        function flameNext() { return flameSets[flamePing ? 0 : 1]; }
+
+        function renderTo(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(
+            0, 0,
+            target ? target.width : canvas.width,
+            target ? target.height : canvas.height,
+          );
+          gl.useProgram(program);
+          gl.bindVertexArray(vao);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+          gl.bindVertexArray(null);
+        }
+
+        // True GPU sync (CRAFT §C4): gl.finish() is effectively non-blocking on
+        // software GL, so a 1×1 readPixels round-trip drains the queue. Used to
+        // chunk the deterministic pre-roll and to stamp __artReady honestly.
+        const syncPx = new Uint8Array(4);
+        function glSync() {
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+        }
+
+        /* ==================================================================
+           Canvas sizing (DPR ≤ 2, long-side clamp — this piece is fill-rate
+           bound, so the clamp is what keeps mobile at 30fps+)
+        ================================================================== */
+
+        let aspect = 1;
+        let viewS = 1.88;
+        let pxWorld = 0.01;
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          let w = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          let h = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          const longSide = Math.max(w, h);
+          if (longSide > MAX_LONG_SIDE) {
+            const k = MAX_LONG_SIDE / longSide;
+            w = Math.max(2, Math.round(w * k));
+            h = Math.max(2, Math.round(h * k));
+          }
+          if (canvas.width === w && canvas.height === h) return;
+          canvas.width = w;
+          canvas.height = h;
+          aspect = w / h;
+          // fit the whole lantern (half-width 1.25, half-height 1.95 in world
+          // units) whatever the aspect ratio
+          viewS = Math.max(1.88, 1.25 / Math.max(aspect, 0.05));
+          pxWorld = (2 * viewS) / h;
+          needsRedraw = true;
+        }
+
+        /* ==================================================================
+           oklab ramp stops. Converted on the CPU (sRGB → oklab) and uploaded,
+           so the fragment shader only mixes in oklab and converts back once.
+           These are the 標本(uDebug 4)で承認するパラメタ — 無断で変えない。
+        ================================================================== */
+
+        function srgb2lin(c) {
+          return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        }
+        function srgb2oklab(rgb) {
+          const R = srgb2lin(rgb[0]), G = srgb2lin(rgb[1]), B = srgb2lin(rgb[2]);
+          const l = Math.cbrt(0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B);
+          const m = Math.cbrt(0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B);
+          const s = Math.cbrt(0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B);
+          return [
+            0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+          ];
+        }
+        function mix3(a, b, t) {
+          return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+        }
+        // 琥珀寄り(amber=0) ↔ 赤橙寄り(amber=1)
+        const RAMP_A = [
+          [0.135, 0.062, 0.040],  // 影の暗褐色(純黒にしない)
+          [0.460, 0.205, 0.078],  // 暗褐色
+          [0.990, 0.720, 0.340],  // 琥珀
+          [1.000, 0.930, 0.745],  // 芯の白熱寄り
+        ];
+        const RAMP_B = [
+          [0.140, 0.052, 0.032],
+          [0.450, 0.160, 0.055],
+          [1.000, 0.575, 0.235],
+          [1.000, 0.855, 0.615],
+        ];
+        function rampLabs(amber) {
+          return RAMP_A.map((c, i) => srgb2oklab(mix3(c, RAMP_B[i], amber)));
+        }
+
+        /* ==================================================================
+           CPU state — rotation phase, flame envelope, drum eccentricity.
+           All driven by a deterministic value-noise fbm of the sim clock and
+           smoothed with an ema so nothing ever jumps (invariant 5). The phase
+           is wrapped every step so a long run never loses precision (§8-14).
+        ================================================================== */
+
+        const TAU = Math.PI * 2;
+        const ECC = 0.06;          // drum eccentricity (world units)
+
+        function fr(x) { return x - Math.floor(x); }
+        function h1js(p) {
+          p = fr(p * 0.1031);
+          p *= p + 33.33;
+          p *= p + p;
+          return fr(p);
+        }
+        function vn1(x) {
+          const i = Math.floor(x);
+          const f = x - i;
+          const u = f * f * (3 - 2 * f);
+          return h1js(i) * (1 - u) + h1js(i + 1) * u;
+        }
+        function fbm1(x) {
+          let acc = 0, amp = 0.5;
+          for (let i = 0; i < 4; i++) {
+            acc += amp * vn1(x);
+            x = x * 2.03 + 11.7;
+            amp *= 0.5;
+          }
+          return acc / 0.9375;
+        }
+
+        let simTime = 0;
+        let theta = 0.42;
+        let omegaEma = 0.18;
+        let gainEma = 1.0;
+        let flameY = 0;
+        let flameLat = 0;
+        let eccA = 0.7;
+        let nFig = 11;
+        let visibleFigs = 0;
+
+        // pointer (secondary input — the piece is complete without it)
+        let pointerActive = false;
+        let pointerU = 0.5;
+        let spinEma = 0;
+        let boostEma = 0;
+        let lastInputT = -1e9;
+        let hintShown = false;
+
+        function clientToU(clientX) {
+          const rect = canvas.getBoundingClientRect();
+          return Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(rect.width, 1)));
+        }
+        canvas.addEventListener("pointerdown", (e) => {
+          pointerActive = true;
+          pointerU = clientToU(e.clientX);
+          lastInputT = simTime;
+          hideHint();
+          canvas.setPointerCapture?.(e.pointerId);
+        });
+        canvas.addEventListener("pointermove", (e) => {
+          if (!pointerActive) return;
+          pointerU = clientToU(e.clientX);
+          lastInputT = simTime;
+        });
+        function endPointer() { pointerActive = false; }
+        canvas.addEventListener("pointerup", endPointer);
+        canvas.addEventListener("pointercancel", endPointer);
+
+        function showHint() {
+          if (hintShown || FAKESOURCE) return;
+          hintShown = true;
+          hintEl.classList.add("show");
+        }
+        function hideHint() {
+          if (!hintShown) return;
+          hintShown = false;
+          hintEl.classList.remove("show");
+        }
+
+        function figPsi(k, n) {
+          const hA = h1js(k + 0.37);
+          return ((k + 0.5) / n) * TAU + (hA - 0.5) * (TAU / n) * 0.62;
+        }
+
+        function stepCpu(dt) {
+          simTime = (simTime + dt) % 3600;   // bounded clock (§8-14)
+
+          if (FAKESOURCE) {
+            // deterministic synthetic pointer: nudges the spin and the lamp so
+            // the piece is provably input-driven, while the underlying 巡り is
+            // exactly the same as the idle behaviour.
+            pointerActive = true;
+            pointerU = 0.5 + 0.32 * Math.sin(simTime * 0.21);
+          }
+
+          const fl = state.flicker;
+          const f1 = fbm1(simTime * 0.55);
+          const f2 = fbm1(simTime * 0.31 + 40.0);
+          const f3 = fbm1(simTime * 0.19 + 90.0);
+          const f4 = fbm1(simTime * 0.42 + 150.0);
+
+          const spinTarget = pointerActive ? (pointerU - 0.5) * 1.7 : 0;
+          spinEma += (spinTarget - spinEma) * Math.min(1, dt * 2.5);
+          const boostTarget = pointerActive ? 1 : 0;
+          boostEma += (boostTarget - boostEma) * Math.min(1, dt * 2.0);
+
+          const baseOmega = 0.055 + 0.365 * state.speed;
+          const omegaTarget =
+            baseOmega * (1 + (f1 - 0.5) * 1.1 * fl) * (1 + spinEma);
+          omegaEma += (omegaTarget - omegaEma) * Math.min(1, dt * 2.2);
+          theta = (theta + omegaEma * dt) % TAU;   // 位相は毎ステップ折り返す
+          if (theta < 0) theta += TAU;
+
+          const gainTarget = (1 + (f2 - 0.5) * 0.55 * fl) * (1 + 0.22 * boostEma);
+          gainEma += (gainTarget - gainEma) * Math.min(1, dt * 4.0);
+
+          flameY += ((f3 - 0.5) * 0.11 * fl - flameY) * Math.min(1, dt * 3.0);
+          flameLat += ((f4 - 0.5) * 0.055 * fl - flameLat) * Math.min(1, dt * 3.0);
+          eccA = (eccA + (0.20 + (f1 - 0.5) * 0.26) * dt) % TAU;
+
+          nFig = Math.round(5 + 13 * state.figures);
+          let vis = 0;
+          for (let k = 0; k < nFig; k++) {
+            let a = (figPsi(k, nFig) + theta + Math.PI) % TAU;
+            if (a < 0) a += TAU;
+            if (Math.abs(a - Math.PI) < Math.PI * 0.5) vis++;
+          }
+          visibleFigs = vis;
+        }
+
+        function stepFlame(dt) {
+          renderTo(flameNext(), programs.flame, () => {
+            const u = locations.flame;
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, flameCur().tex);
+            gl.uniform1i(u.uPrev, 0);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uSimT, simTime);
+            gl.uniform1f(u.uEma, 2.6);
+          });
+          flamePing = !flamePing;
+        }
+
+        function simStep(dt) {
+          stepCpu(dt);
+          stepFlame(dt);
+        }
+
+        function drawScene() {
+          const labs = rampLabs(state.amber);
+          renderTo(null, programs.scene, () => {
+            const u = locations.scene;
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, flameCur().tex);
+            gl.uniform1i(u.uFlame, 0);
+            gl.uniform2f(u.uRes, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uViewS, viewS);
+            gl.uniform1f(u.uPxWorld, pxWorld);
+            gl.uniform1f(u.uTheta, theta);
+            gl.uniform1f(u.uLampGain, gainEma);
+            gl.uniform1f(u.uFlameY, flameY);
+            gl.uniform1f(u.uFlameLat, flameLat);
+            gl.uniform1f(u.uEcc, ECC);
+            gl.uniform1f(u.uEccA, eccA);
+            gl.uniform1i(u.uNFig, nFig);
+            gl.uniform1f(u.uPenumbra, state.penumbra);
+            gl.uniform1f(u.uShadow, state.shadow);
+            gl.uniform1f(u.uLamp, state.lamp);
+            gl.uniform1f(u.uFlicker, state.flicker);
+            gl.uniform1f(u.uWashi, state.washi);
+            gl.uniform1i(u.uDebug, state.debugView);
+            gl.uniform3fv(u.uLab0, labs[0]);
+            gl.uniform3fv(u.uLab1, labs[1]);
+            gl.uniform3fv(u.uLab2, labs[2]);
+            gl.uniform3fv(u.uLab3, labs[3]);
+          });
+        }
+
+        /* ==================================================================
+           Frame loop
+        ================================================================== */
+
+        const STEP = 1 / 60;
+        const MAX_SUBSTEPS = 4;
+        // ?prewarm=<sec> and ?freeze=1 share ONE deterministic pre-roll: run
+        // <sec> of simulation at a fixed dt before the first presented frame.
+        // freeze additionally holds time afterwards; prewarm hands over to the
+        // live clock. 6s is the freeze default so the drum has visibly turned
+        // and the flame field has settled.
+        const PRE_SEC = (FREEZE || state.pauseAnim) ? Math.max(PREWARM, 6.0) : PREWARM;
+        let preRoll = Math.round(Math.min(PRE_SEC, 180) * 60);
+        const PRE_CHUNK = 45;
+
+        let acc = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let readyStamped = false;
+        const readout = document.getElementById("readout");
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(
+            MAX_SUBSTEPS / 60,
+            Math.max(0, (now - lastNow) / 1000),
+          );
+          lastNow = now;
+
+          // STILL = frozen or paused (reduced-motion). Time is held; the flame
+          // field is NOT stepped, so the state texture keeps its exact contents
+          // and the frame is bit-stable.
+          const still = FREEZE || state.pauseAnim;
+
+          if (preRoll > 0) {
+            const steps = Math.min(PRE_CHUNK, preRoll);
+            for (let i = 0; i < steps; i++) simStep(STEP);
+            preRoll -= steps;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            glSync();   // chunked so the software GL queue never stalls (§C4)
+            if (preRoll > 0) {
+              requestAnimationFrame(frame);
+              return;
+            }
+            needsRedraw = true;
+          } else if (!still) {
+            acc += rawDt;
+            let n = 0;
+            while (acc >= STEP && n < MAX_SUBSTEPS) {
+              simStep(STEP);
+              acc -= STEP;
+              n++;
+            }
+            if (n === MAX_SUBSTEPS) acc = 0;
+          }
+
+          // While still, only redraw when something actually changed (a slider,
+          // the debug view, a resize). preserveDrawingBuffer keeps the last
+          // frame on screen and rAF stays free for the UI (CRAFT §C4-(4)).
+          if (!still || needsRedraw || !readyStamped) {
+            drawScene();
+            needsRedraw = false;
+          }
+
+          if (!readyStamped) {
+            glSync();
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          if (!FAKESOURCE && !FREEZE && readyStamped) {
+            if (!pointerActive && simTime - lastInputT > 6.0) showHint();
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            const modeLabel = FAKESOURCE
+              ? "fake"
+              : pointerActive
+                ? "pointer●"
+                : "idle";
+            readout.textContent =
+              `FPS ${fps.toFixed(0)} / 描画 ${canvas.width}×${canvas.height}` +
+              ` / 位相 ${((theta * 180) / Math.PI).toFixed(0)}°・影 ${visibleFigs}` +
+              ` / 入力 ${modeLabel}`;
+          }
+          requestAnimationFrame(frame);
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) {
+            lastNow = performance.now();
+            needsRedraw = true;
+          }
+        });
+        window.addEventListener("resize", () => { needsRedraw = true; });
+
+        try {
+          resize();
+          if (!FLOAT_OK) {
+            document.getElementById("glBadge").textContent =
+              "WebGL2 · sdf shadow · penumbra · oklab · fbm · ping-pong · RGBA8";
+          }
+          requestAnimationFrame(frame);
+        } catch (error) {
+          const msg = error && error.message ? error.message : "";
+          if (/RENDER TARGET INCOMPLETE/.test(msg)) {
+            setOverlay(
+              "RENDER TARGET UNAVAILABLE",
+              "炎の状態レンダーターゲットを確保できませんでした。別のブラウザ/GPU でお試しください。",
+              true,
+            );
+          } else {
+            setOverlay("WEBGL SETUP ERROR", msg || "レンダラーを初期化できませんでした。", true);
+          }
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
