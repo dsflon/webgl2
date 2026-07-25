@@ -1,5 +1,21 @@
 [
   {
+    "slug": "opus5_samoarinan",
+    "file": "opus5_samoarinan.html",
+    "title": "さもありなん",
+    "date": "2026-07-25",
+    "desc": "画面に映っているのは「いま」ではない。各所がそれぞれ違う遅れを持った過去の光として届く。動きが止まったところでは時間も止まり、その場所は最後に起きたことを映したまま凍る。歌う声が続く間だけ遅れた像は一つに寄り、最も古い光は像を失って泡になり割れて消える。",
+    "model": "Opus 5",
+    "tags": [
+      "WebGL2",
+      "Mic",
+      "Time Delay",
+      "Camera"
+    ],
+    "series": "OPUS5",
+    "thumb": "thumbs/opus5_samoarinan.jpg"
+  },
+  {
     "slug": "opus5_hana",
     "file": "opus5_hana.html",
     "title": "花",
