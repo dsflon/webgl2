@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  fable5_kiin-seido.html — WebGL2 webcam →「気韻生動 / Ink Aura Poster」
+  opus5_kiin-seido.html — WebGL2 webcam →「気韻生動 / Ink Aura Poster」
   カメラの人物だけが実写のまま生成りの紙の上に残り、周囲は墨の飛沫・にじみ・かすれた
   筆致の抽象へ変わる。動きは遅れて追う墨の残像(布の遅延)と、身体の軌道を描く払いの
   弧になって紙に残る。現代的デジタルペインティング × 水墨・書道のポスターアート。
@@ -57,7 +57,7 @@
                 13% 前面に重ねて交差させる → 飛沫を最前面 → 紙の粒子と周辺減光
 
   実行方法:
-    python3 -m http.server 8899 → http://localhost:8899/fable5_kiin-seido.html を開きカメラを許可
+    python3 -m http.server 8899 → http://localhost:8899/opus5_kiin-seido.html を開きカメラを許可
     (カメラ API はセキュアコンテキスト必須。file:// では動きません)
     ?fakesource=1 … カメラ/MediaPipe 不使用。合成室内+動く人型で全パイプライン駆動(検証用)
     ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
@@ -98,7 +98,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>FABLE5 · 気韻生動 — WebGL2 ink aura poster cam</title>
+    <title>OPUS5 · 気韻生動 — WebGL2 ink aura poster cam</title>
     <style>
       :root {
         color-scheme: dark;
@@ -350,7 +350,7 @@
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
           <div class="panel-body">
-          <h1>FABLE5 · 気韻生動</h1>
+          <h1>OPUS5 · 気韻生動</h1>
           <p>
             実写の世界をそのまま映しながら、動きに合わせて墨の飛沫・にじみ・かすれた
             筆致が加わります。人物のコアは実写のまま、背景は画面の周縁と不規則な
@@ -452,7 +452,7 @@
         document.getElementById("savePng").addEventListener("click", () => {
           const link = document.createElement("a");
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          link.download = `fable5-kiin-seido-${stamp}.png`;
+          link.download = `opus5-kiin-seido-${stamp}.png`;
           link.href = canvas.toDataURL("image/png");
           link.click();
         });

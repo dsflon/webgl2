@@ -9,7 +9,7 @@ Web カメラが映す**実写の世界をそのまま地として残しなが�
 軌道が払いの弧になって残る。止まれば墨は吸われて薄れ、余白が戻る。現代的なデジタル
 ペインティング × 水墨・書道のポスターアート。
 
-- ファイル名: `fable5_kiin-seido.html`
+- ファイル名: `opus5_kiin-seido.html`
 - リポジトリ: `dsflon/webgl2`(単一HTML作品集。GitHub Pages で配信)
 
 この様式の本質は「**人物はリアル、周囲は抽象。その境界が筆で破れている**」である。
@@ -126,7 +126,7 @@ Phase 1 ではこの表を独自の再解析で置き換えず、復唱と実装
 
 ## 9. 検証環境と手順
 
-- ローカル: `python3 -m http.server 8899` → `http://localhost:8899/fable5_kiin-seido.html`
+- ローカル: `python3 -m http.server 8899` → `http://localhost:8899/opus5_kiin-seido.html`
 - **フェイクカメラ**(Playwright `addInitScript` で `getUserMedia` を差し替え)+
   `?fakesource=1` で全パイプラインをオフライン駆動。**スクリーンショット**を1変更ごとに
   撮って自分の目で見る(CRAFT §D1)。デバッグ表示 0〜5 を巡回して場を数値で確認する。
