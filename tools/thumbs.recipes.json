@@ -324,5 +324,17 @@
     "audio": false,
     "note": "オフライン環境では描画不可(MediaPipe CDN または未コミット基底画像に依存)。現在はプレースホルダ。オンライン環境で node tools/thumbs.mjs <slug> を実行すると実絵に置き換わる",
     "placeholder": true
+  },
+  "fable5_kiin-seido": {
+    "query": "fakesource=1&prewarm=13",
+    "warmMs": 7000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "合成人型で全駆動。?prewarm= で墨が育った状態を決定的に撮る(蓄積系)。",
+    "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }

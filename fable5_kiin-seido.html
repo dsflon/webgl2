@@ -1,0 +1,2649 @@
+<!doctype html>
+<!--
+  fable5_kiin-seido.html — WebGL2 webcam →「気韻生動 / Ink Aura Poster」
+  カメラの人物だけが実写のまま生成りの紙の上に残り、周囲は墨の飛沫・にじみ・かすれた
+  筆致の抽象へ変わる。動きは遅れて追う墨の残像(布の遅延)と、身体の軌道を描く払いの
+  弧になって紙に残る。現代的デジタルペインティング × 水墨・書道のポスターアート。
+  派生元エンジン: fable5_gas-head.html(人物検知・モバイル recipe・流体)/
+  fable5_uchimizu.html(にじみと乾き)/ fable5_senkohanabi.html(GPU エージェント)。
+
+  様式解析(視覚的不変量。優先度 1>2>3>4>5>6):
+    1. 紙地 — 背景は実カメラ映像でなく生成りの紙(繊維のむら・不規則な余白)。純白でも
+       黒でもない warm gray。墨は画面を埋めず、余白が残る。
+    2. 具象→抽象の勾配 — 人物のコアは実写のまま鮮明に残り、輪郭から外へ向かうほど
+       墨の抽象になる。可視の輪郭は検知マスクそのものではなく、乱流ワープ越しの
+       サンプルとかすれゲートで破断させる(ステッカー輪郭の禁止)。
+    3. 気の残像 — 遅い EMA のシルエット(=直前の身体)が濃紺の水墨として遅れて残り、
+       動きの方向へ払われる。静止すれば紙に吸われて薄れる。
+    4. 墨の語彙 — 飛沫(ハードエッジの黒点+衛星滴)/かすれ(進行方向に沿った異方性の
+       破断)/にじみ(乾き縁が濃い水染み)/払い(勢いのある弧のストローク)。丸い
+       ソフトグローの光の粒にしない。
+    5. 抑制配色 — 生成り・墨黒・濃紺・ブラウン・グレーに金/銅のアクセントのみ。原色を
+       出さない。人物の実写も同じ色域へグレーディングする。
+    6. 有界性/頑健性 — 墨は身体からの距離で散逸し定常有界(蓄積で黒く埋まらない)。
+       MediaPipe ロード中/未検出/オフラインでも待機の絵が出る。?fakesource=1 で全駆動。
+    7. モバイル — 検知は ImageSegmenter のみ。推論は 288px 縮小コピーに対して実行し、
+       推論時間に応じて 33〜250ms で間引き。GPU デリゲートの出力破綻(全0/全1)が続けば
+       CPU へ自動再生成。ステータスチップに 推論ms・デリゲートを表示(実機診断用)。
+
+  パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
+    入力: カメラ映像 / fakeScene(GLSL 室内+動く人型) / MediaPipe seg マスク(uint8 tex)
+    [P0 scene]  cover-fit+mirror                        sceneA/B RGBA8 長辺≤1280
+    [P1 mask]   seg tex or fake SDF → R=速い EMA マスク   maskA/B★ ≤448
+                G=遅い EMA(布の遅延) BA=運動場(フレーム差分の EMA)
+    [P2 soft]   マスク縁のソフト化(注入帯)              softT★
+    [P3 aura]   soft をさらに大きくぼかした近傍場         auraT★(距離依存の散逸に使う)
+    [P4 curl]→[P5 vel 移流+運動力+外向き+curl+渦度]→[P6 div]→[P7..20 Jacobi×14]→[P21 proj] ★
+    [P22 agents] 筆エージェント 12体の ping-pong(12×2)★ 縁の運動帯に棄却サンプリングで
+                発生(毎秒本数で律速。外れたら発生しない)→ 角速度で弧を描き、余白では
+                寿命が縮む。太さは二峰(細筆多数+含み筆少数)
+    [P23 stroke] strokeT RGBA8 ≤1024 = 硬い筆致レイヤ。乗算 blend で減衰 → 生存
+                エージェントを線分インスタンス矩形で MAX blend 描画。毛先ノイズで縁が
+                ぎざつき、寿命後半で割れる(=かすれ)。R=墨 G=紺 B=金
+    [P24 ink]   移流(弱)+注入(遅延シルエット=濃紺の筋 / 縁帯=墨)+距離依存散逸。
+                柔らかいにじみ専用 inkA/B★ ≤448 R=墨量 G=顔料 B=乾き A=金 clamp[0,1]
+    [P25 drops] 飛沫のスポーン(16×1)★ 運動の強い縁帯のみ。外れたら size=0
+    [P26 splat] splatT RGBA8 ≤1024 も同じく 乗算減衰 → インスタンス+MAX blend で
+                ハードエッジの滴+衛星滴を刻む
+    [P27 bleed] ink の分離ガウス(にじみ用の水染み)      bleedT★
+    [P28 composite] 紙(paperT に焼き込み済み。resize 時のみ再生成)→ にじみ(柔・雲状に
+                破断+乾き縁)→ 筆致(硬)→ 人物(グレーディング済み実写。輪郭は
+                広い遷移帯を毛先ノイズで変調して破断。深部は不透明を保証)→ 筆致を
+                13% 前面に重ねて交差させる → 飛沫を最前面 → 紙の粒子と周辺減光
+
+  実行方法:
+    python3 -m http.server 8899 → http://localhost:8899/fable5_kiin-seido.html を開きカメラを許可
+    (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    ?fakesource=1 … カメラ/MediaPipe 不使用。合成室内+動く人型で全パイプライン駆動(検証用)
+    ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
+    ?prewarm=<秒> … 初回描画前に固定 dt で指定秒ぶん早送りし「育った墨」を出す(検証用)
+    ?fakeseg=1   … 既知向きの合成マスクを実カメラ経路へ流し Y 反転を検査(検証用)
+    ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
+    デバッグ表示: 0=最終 1=マスク/運動 2=墨密度 3=速度場 4=飛沫層 5=配色標本
+
+  スライダーの説明:
+    墨の量    墨の注入量(気の濃さ)
+    気の残り  残像・墨が紙に残る長さ(散逸の速さ)
+    払い      動きに反応して走る弧の筆致の強さ
+    飛沫      墨の飛び散る量
+    にじみ    紙への吸い込みと水染みの広がり
+    かすれ    乾いた筆の破断の強さ
+    金        金・銅のアクセント量
+    人物の写実 人物のコアが実写として残る度合い
+    紙の明るさ 生成りの紙の露出
+
+  依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
+  WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · 気韻生動 — WebGL2 ink aura poster cam</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #cfc7b8;
+        --ink: #eae3d6;
+        --muted: rgba(234, 227, 214, 0.68);
+        --panel: rgba(24, 22, 20, 0.84);
+        --line: rgba(234, 227, 214, 0.18);
+        --accent: #c9a86a;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #d3ccbe, #c6bdad 55%, #b9b0a2);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      video {
+        position: fixed; width: 1px; height: 1px; left: -10px; top: -10px;
+        opacity: 0; pointer-events: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(234, 227, 214, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(234, 227, 214, 0.14); }
+      #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
+      @media (pointer: coarse) { #flipCamera { display: block; } }
+      #statusChip {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 11; padding: 7px 12px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: var(--panel); font-size: 10px; letter-spacing: 0.1em;
+        pointer-events: none; transition: opacity 0.6s ease; white-space: nowrap;
+      }
+      #statusChip.hidden { opacity: 0; }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(234, 227, 214, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(234, 227, 214, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(20, 18, 16, 0.72);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
+      .overlay-card button {
+        margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(234, 227, 214, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 ink aura poster webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
+    <div id="statusChip">起動中</div>
+
+    <section id="panel" class="panel" aria-label="Ink aura poster controls"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces the camera with a synthetic scene (a plain room
+        // backdrop with a full-body figure that drifts and swings its limbs).
+        // MediaPipe is never touched; the person mask comes from the same SDF,
+        // so the ink / trail / splatter pipeline runs fully offline.
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: the fluid, the ink injection, the brush agents,
+        // the splatter decay, the fake figure and every EMA stop (still frame).
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
+        // KNOWN orientation (person in the TOP ~60% of image space, top-left
+        // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
+        // With the Y-flip correct the real person must appear in the TOP of the
+        // screen; if it lands at the bottom the flip regressed (CRAFT §C1).
+        const FAKESEG = QUERY.get("fakeseg") === "1";
+        // ?fakescale=<f> scales the synthetic figure (real-scale divergence test,
+        // CRAFT §C2). f>1 = big/close, f<1 = far/small. Default 1.0.
+        const FAKESCALE = (() => {
+          const v = parseFloat(QUERY.get("fakescale"));
+          return Number.isFinite(v) && v > 0.05 ? Math.min(4, v) : 1.0;
+        })();
+        // ?prewarm=<sec> fast-forwards the simulation with a fixed dt before the
+        // first present, so a screenshot shows grown ink instead of bare paper
+        // (the verification GPU is too slow to warm in real time — CRAFT §C4).
+        const PREWARM = (() => {
+          const v = parseFloat(QUERY.get("prewarm"));
+          return Number.isFinite(v) && v > 0 ? Math.min(20, v) : 0;
+        })();
+        const PREWARM_DT = 1 / 24;
+
+        const DEBUG_MODES = [
+          "最終",
+          "マスク/運動",
+          "墨密度",
+          "速度場",
+          "飛沫層",
+          "配色標本",
+        ];
+
+        const DEFAULTS = {
+          inkAmt: 0.62,
+          hold: 0.5,
+          sweep: 0.55,
+          splatter: 0.55,
+          bleed: 0.5,
+          dry: 0.55,
+          gold: 0.45,
+          realism: 0.6,
+          paper: 1.0,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["inkAmt", "墨の量", "墨の注入量(気の濃さ)", 0, 1, 0.01],
+          ["hold", "気の残り", "残像が紙に残る長さ(散逸の速さ)", 0, 1, 0.01],
+          ["sweep", "払い", "動きに反応して走る弧の筆致", 0, 1, 0.01],
+          ["splatter", "飛沫", "墨の飛び散る量", 0, 1, 0.01],
+          ["bleed", "にじみ", "紙への吸い込みと水染みの広がり", 0, 1, 0.01],
+          ["dry", "かすれ", "乾いた筆の破断の強さ", 0, 1, 0.01],
+          ["gold", "金", "金・銅のアクセント量", 0, 1, 0.01],
+          ["realism", "人物の写実", "人物のコアが実写として残る度合い", 0, 1, 0.01],
+          ["paper", "紙の明るさ", "生成りの紙の露出", 0.6, 1.3, 0.01],
+        ];
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>FABLE5 · 気韻生動</h1>
+          <p>
+            カメラの人物だけが実写のまま生成りの紙に残り、周囲は墨の飛沫・にじみ・
+            かすれた筆致へ変わります。動くと直前の身体が濃紺の水墨として遅れて追い、
+            軌道が払いの弧になって紙に残ります。止まれば墨は紙に吸われて薄れます。
+          </p>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>左右反転(鏡)</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>ゆらぎを停止</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 解像度 -- / 墨場 -- / 検知 --</div>
+            <span class="badge">WebGL2 · Ink Fluid · MediaPipe</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode = state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-kiin-seido-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the fluid / EMAs / agent state from
+        // stalling in 8 bits. Signed quantities are offset-encoded into [0,1]
+        // (encV / encS) so the RGBA8 fallback runs the same shaders, coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Brush agents (the sweeping arcs) and splatter droplets per frame. Both
+        // live entirely in GPU state textures — no readback, so nothing stalls.
+        const AGENT_COUNT = 12;
+        const DROP_COUNT = 16;
+
+        // Shared: pcg-flavoured hash + value noise + fbm + curl noise, plus the
+        // 2D SDF helpers used by the synthetic figure and the brush strokes.
+        // Grain, paper fibre and the injection mottle are seeded by position
+        // only — never by time — so they stay deterministic under ?freeze=1.
+        const CHUNK_NOISE = `
+          const float PI2 = 6.28318530718;
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          vec2 hash22(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            p3 += dot(p3, p3.yxz + 33.33);
+            return fract((p3.xx + p3.yz) * p3.zy);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm4(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 4; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          float fbm(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 5; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          vec2 curlN(vec2 p) {
+            float e = 0.35;
+            float n1 = vnoise(p + vec2(0.0, e)) - vnoise(p - vec2(0.0, e));
+            float n2 = vnoise(p + vec2(e, 0.0)) - vnoise(p - vec2(e, 0.0));
+            return vec2(n1, -n2) * 1.6;   // ≈ unit scale
+          }
+          float sdSeg(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+        `;
+
+        // Shared: body-movement measurement. Frame-difference optical flow alone
+        // is far too weak to gate anything (measured: |flow| ≈ 0.03 for a walking
+        // pace), so the primary energy is the difference between the FAST and
+        // SLOW mask EMAs — a scale-free "where the body just moved" signal — read
+        // off the blurred copies so the band is wide and smooth instead of a
+        // few-pixel sliver. travelDir turns the same difference into a direction:
+        // grad(fast - slow) points from where the body was toward where it is.
+        const CHUNK_MOTION = `
+          vec2 travelDir(sampler2D src, vec2 uv, vec2 texel, out float mag) {
+            vec2 st = texel * 2.0;
+            vec4 sl = texture(src, uv - vec2(st.x, 0.0));
+            vec4 sr = texture(src, uv + vec2(st.x, 0.0));
+            vec4 sb = texture(src, uv - vec2(0.0, st.y));
+            vec4 stp = texture(src, uv + vec2(0.0, st.y));
+            vec2 g = vec2((sr.r - sr.g) - (sl.r - sl.g),
+                          (stp.r - stp.g) - (sb.r - sb.g));
+            mag = length(g);
+            return mag > 1e-5 ? g / mag : vec2(0.0, 1.0);
+          }
+        `;
+
+        // Shared: [0,1] offset encoding for signed fields. The clamp doubles as
+        // the mandatory velocity clamp (no NaN blow-ups in the fluid).
+        const CHUNK_ENC = `
+          const float VMAX = 2.4;
+          const float SMAX = 3.0;
+          vec2 encV(vec2 v) { return clamp(v, -VMAX, VMAX) / (2.0 * VMAX) + 0.5; }
+          vec2 decV(vec2 e) { return (e - 0.5) * (2.0 * VMAX); }
+          float encS(float x) { return clamp(x, -SMAX, SMAX) / (2.0 * SMAX) + 0.5; }
+          float decS(float e) { return (e - 0.5) * (2.0 * SMAX); }
+        `;
+
+        // Shared: the ?fakesource=1 synthetic scene — a plain room backdrop
+        // (never black) with a full-body figure that drifts sideways, bobs and
+        // swings its limbs. The swing is what makes the trailing silhouette and
+        // the brush sweeps testable offline. fakeMask returns the coverage used
+        // in place of the MediaPipe mask; uScale is ?fakescale= (CRAFT §C2).
+        const CHUNK_FAKE = `
+          float humanDist(vec2 p, float cx, float swing, float sc) {
+            vec2 anchor = vec2(cx, 0.46);
+            p = (p - anchor) / max(sc, 0.05) + anchor;
+            float d = 1e9;
+            vec2 head = vec2(cx, 0.80);
+            d = min(d, length((p - head) / vec2(1.0, 1.14)) - 0.062);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.745), vec2(cx, 0.685)) - 0.024, 0.018);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.685), vec2(cx, 0.40)) - 0.098, 0.045);
+            d = smin2(d, sdSeg(p, vec2(cx - 0.115, 0.665), vec2(cx + 0.115, 0.665)) - 0.052, 0.04);
+            // arms: shoulder → elbow → hand, driven by the swing phase
+            float aL = 2.55 + 0.62 * swing;
+            vec2 shL = vec2(cx - 0.115, 0.655);
+            vec2 elL = shL + 0.135 * vec2(cos(aL), sin(aL) * 0.7 - 0.35);
+            vec2 haL = elL + 0.125 * vec2(cos(aL - 0.55 - 0.5 * swing),
+                                          sin(aL - 0.55 - 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shL, elL) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elL, haL) - 0.028, 0.028);
+            float aR = 0.59 - 0.62 * swing;
+            vec2 shR = vec2(cx + 0.115, 0.655);
+            vec2 elR = shR + 0.135 * vec2(cos(aR), sin(aR) * 0.7 - 0.35);
+            vec2 haR = elR + 0.125 * vec2(cos(aR + 0.55 + 0.5 * swing),
+                                          sin(aR + 0.55 + 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shR, elR) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elR, haR) - 0.028, 0.028);
+            // legs: hip → knee → foot, counter-swinging
+            vec2 hipL = vec2(cx - 0.05, 0.405);
+            vec2 knL = hipL + vec2(-0.028 - 0.05 * swing, -0.15);
+            vec2 ftL = knL + vec2(-0.012 + 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipL, knL) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knL, ftL) - 0.034, 0.03);
+            vec2 hipR = vec2(cx + 0.05, 0.405);
+            vec2 knR = hipR + vec2(0.028 + 0.05 * swing, -0.15);
+            vec2 ftR = knR + vec2(0.012 - 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipR, knR) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knR, ftR) - 0.034, 0.03);
+            return d;
+          }
+          vec3 fakeScene(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            vec3 top = vec3(0.30, 0.31, 0.34);
+            vec3 bot = vec3(0.44, 0.40, 0.35);
+            vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
+            bg += 0.03 * (0.5 + 0.5 * sin(uv.x * 30.0) - 0.5);
+            float horizon = exp(-pow((uv.y - 0.42) * 6.0, 2.0));
+            bg = mix(bg, vec3(0.55, 0.52, 0.46), 0.16 * horizon);
+            bg += 0.04 * (vnoise(uv * 5.0) - 0.5);
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            float d = humanDist(p, cx, swing, sc);
+            float m = 1.0 - smoothstep(-0.004, 0.008, d);
+            // body-local coords (same transform humanDist uses) so the costume
+            // regions ride with ?fakescale=. The figure needs INTERNAL tonal
+            // structure — a flat silhouette makes the grading and the
+            // figure/ink interplay impossible to judge offline.
+            vec2 q = (p - vec2(cx, 0.46)) / max(sc, 0.05) + vec2(cx, 0.46);
+            float folds = 0.86 + 0.30 * fbm(q * vec2(34.0, 20.0));
+            float upper = smoothstep(0.40, 0.46, q.y);
+            vec3 person = mix(vec3(0.27, 0.29, 0.37), vec3(0.74, 0.70, 0.62), upper);
+            person = mix(person, vec3(0.17, 0.20, 0.31),
+              smoothstep(0.01, -0.05, q.x - cx) * upper * 0.75);     // cloak
+            person = mix(person, vec3(0.16, 0.19, 0.30),
+              smoothstep(0.60, 0.69, q.y) * 0.85);                   // scarf/hood
+            person = mix(person, vec3(0.37, 0.26, 0.17),
+              exp(-pow((q.y - 0.44) * 55.0, 2.0)));                  // belt
+            person *= folds;
+            float headM = 1.0 - smoothstep(0.050, 0.070,
+              length((q - vec2(cx, 0.80)) / vec2(1.0, 1.14)));
+            vec3 skin = vec3(0.63, 0.50, 0.43);
+            skin *= 1.0 - 0.45 * exp(-pow((q.y - 0.815) * 240.0, 2.0));  // brow
+            skin *= 1.0 - 0.28 * exp(-pow((q.y - 0.772) * 190.0, 2.0));  // mouth
+            person = mix(person, skin, headM);
+            person *= 0.78 + 0.34 * smoothstep(0.05, 0.80, q.y);
+            return clamp(mix(bg, person, m), 0.0, 1.0);
+          }
+          float fakeMask(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            return 1.0 - smoothstep(-0.006, 0.010, humanDist(p, cx, swing, sc));
+          }
+        `;
+
+        // Shared: the restrained palette (invariant 5) — ivory paper, sumi black,
+        // deep indigo, leather brown, gray wash, gold and copper. No saturated
+        // primaries anywhere, and the camera person is graded into the same
+        // range so figure and ink read as one picture.
+        const CHUNK_PALETTE = `
+          const vec3 PAPER_L = vec3(0.845, 0.828, 0.795);
+          const vec3 PAPER_D = vec3(0.735, 0.718, 0.686);
+          const vec3 SUMI = vec3(0.082, 0.081, 0.090);
+          const vec3 INK_GRAY = vec3(0.455, 0.450, 0.445);
+          const vec3 INDIGO = vec3(0.128, 0.163, 0.272);
+          const vec3 BROWN = vec3(0.335, 0.238, 0.158);
+          const vec3 GOLD = vec3(0.722, 0.552, 0.238);
+          const vec3 COPPER = vec3(0.565, 0.330, 0.183);
+          vec3 paperColor(vec2 uv, float aspect, float tone) {
+            vec2 p = uv * vec2(aspect, 1.0);
+            float blot = fbm(p * 2.4 + 4.0);
+            vec3 base = mix(PAPER_D, PAPER_L, smoothstep(0.22, 0.82, blot));
+            // laid-paper fibre: two strongly anisotropic noise layers
+            base += (vnoise(p * vec2(310.0, 5.0)) - 0.5) * 0.009;
+            base += (vnoise(p * vec2(5.0, 275.0)) - 0.5) * 0.006;
+            base += (fbm(p * 13.0) - 0.5) * 0.016;
+            // a very faint cool wash so the ground is not a flat swatch
+            base = mix(base, base * vec3(0.97, 0.985, 1.01),
+              0.5 + 0.5 * sin(6.0 * fbm(p * 1.3)));
+            return clamp(base * tone, 0.0, 1.0);
+          }
+          // Camera → poster palette. Luma drives a 5-stop ramp; a fraction of the
+          // original chroma is kept so skin, cloth and leather stay legible.
+          vec3 gradePerson(vec3 c, float realism) {
+            float l = dot(c, vec3(0.299, 0.587, 0.114));
+            vec3 s0 = vec3(0.100, 0.107, 0.140);
+            vec3 s1 = vec3(0.235, 0.225, 0.245);
+            vec3 s2 = mix(BROWN, vec3(0.40, 0.375, 0.345), 0.45);
+            vec3 s3 = vec3(0.735, 0.700, 0.640);
+            vec3 s4 = vec3(0.930, 0.905, 0.855);
+            vec3 ramp = l < 0.25 ? mix(s0, s1, l / 0.25)
+              : (l < 0.50 ? mix(s1, s2, (l - 0.25) / 0.25)
+              : (l < 0.75 ? mix(s2, s3, (l - 0.50) / 0.25)
+              : mix(s3, s4, (l - 0.75) / 0.25)));
+            vec3 chroma = c - vec3(l);
+            vec3 res = ramp + chroma * (0.22 + 0.34 * realism);
+            // gentle S-curve so the figure keeps poster contrast
+            res = clamp(res, 0.0, 1.0);
+            res = mix(res, res * res * (3.0 - 2.0 * res), 0.24);
+            return res;
+          }
+        `;
+
+        // Paper is baked ONCE per resize (it never changes): the fibre and blotch
+        // fields cost ~17 noise octaves per pixel, which is real money at DPR 2
+        // on a phone. uPaper (exposure) is applied at composite time.
+        const paperFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform float uAspect;
+          ${CHUNK_NOISE}
+          ${CHUNK_PALETTE}
+          void main() {
+            fragColor = vec4(paperColor(vUv, uAspect, 1.0), 1.0);
+          }
+        `;
+
+        // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
+        // working scene buffer. Everything downstream is screen-aligned to it.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeScene(vUv, uCx, uCy, uSwing, uAspect, uScale), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.34, 0.33, 0.31),
+                vec3(0.46, 0.44, 0.40), vUv.y), 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scale = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scale + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — the mask / motion field:
+        //   R = fast person-mask EMA (the body as it is NOW)
+        //   G = slow person-mask EMA (the body ~0.4s AGO → the delayed cloth /
+        //       afterimage source; G-R is the trailing silhouette band)
+        //   BA = motion field (frame-difference pseudo flow, EMA-smoothed)
+        const maskFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uScenePrev;
+          uniform sampler2D uPrev;
+          uniform sampler2D uSeg;
+          uniform vec2 uTexel;
+          uniform vec2 uSegScale;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform float uDt;
+          uniform float uAlphaFast;
+          uniform float uAlphaSlow;
+          uniform float uAlphaMot;
+          uniform int uReset;
+          uniform int uSource;
+          uniform int uMirror;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_FAKE}
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            float rawMask = 0.0;
+            if (uSource == 0) {
+              rawMask = fakeMask(vUv, uCx, uCy, uSwing, uAspect, uScale);
+            } else if (uSource == 1) {
+              // Real-camera segmentation mask. Coordinate convention matched to
+              // overflowing_aura_4taigyo_v2.html / gas-head so the mask overlaps
+              // the real person pixel-for-pixel with the P0 background:
+              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
+              //     to the P0 scene, so scene and mask stay in register.
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — the same crop as P0.
+              //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
+              //     image-space (top-left origin) and segTexture is uploaded
+              //     UNPACK_FLIP_Y=false, while the video texture is uploaded
+              //     UNPACK_FLIP_Y=true (upright). Without the explicit flip the
+              //     mask lands upside-down (CRAFT §C1: "only the face" bug).
+              vec2 uv = vUv;
+              if (uMirror == 1) uv.x = 1.0 - uv.x;
+              vec2 suv = (uv - 0.5) * uSegScale + 0.5;
+              float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              // firm the soft confidence mask toward 0/1 so the real body is a
+              // solid figure (the person must stay legible inside it)
+              rawMask = smoothstep(0.32, 0.70, rawSeg);
+            }
+            vec4 prev = texture(uPrev, vUv);
+            float fastM = uReset == 1 ? rawMask : mix(prev.r, rawMask, uAlphaFast);
+            float slowM = uReset == 1 ? rawMask : mix(prev.g, rawMask, uAlphaSlow);
+
+            // pseudo optical flow from the scene frame difference
+            vec3 cur = texture(uScene, vUv).rgb;
+            float l0 = lumaf(texture(uScenePrev, vUv).rgb);
+            float l1 = lumaf(cur);
+            float lx = lumaf(texture(uScene, vUv + vec2(uTexel.x, 0.0)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(uTexel.x, 0.0)).rgb);
+            float ly = lumaf(texture(uScene, vUv + vec2(0.0, uTexel.y)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(0.0, uTexel.y)).rgb);
+            vec2 grd = vec2(lx / (2.0 * uTexel.x), ly / (2.0 * uTexel.y));
+            float it = (l1 - l0) / max(uDt, 1e-3);
+            vec2 flowRaw = -it * grd / (dot(grd, grd) + 40.0);
+            flowRaw = clamp(flowRaw, vec2(-VMAX), vec2(VMAX));
+            vec2 flow = uReset == 1 ? vec2(0.0)
+              : mix(decV(prev.ba), flowRaw, uAlphaMot);
+
+            fragColor = vec4(clamp(fastM, 0.0, 1.0), clamp(slowM, 0.0, 1.0), encV(flow));
+          }
+        `;
+
+        // Separable Gaussian (all channels). Softens the mask edge (P2), builds
+        // the proximity aura (P3) and blurs the ink for the bleed halo (P26).
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -10; i <= 10; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P4 — curl of the velocity field (vorticity confinement source).
+        const curlFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            vec2 vL = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).xy);
+            vec2 vR = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).xy);
+            vec2 vB = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).xy);
+            vec2 vT = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).xy);
+            float c = 0.5 * ((vR.y - vL.y) - (vT.x - vB.x));
+            fragColor = vec4(encS(c), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P5 — velocity: semi-Lagrangian advection + body motion + an outward
+        // push along the aura gradient (ink is thrown AWAY from the body) +
+        // vorticity confinement + curl-noise turbulence + drag.
+        const velFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uCurl;
+          uniform sampler2D uMask;
+          uniform sampler2D uAura;
+          uniform sampler2D uInk;
+          uniform vec2 uTexel;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uAspect;
+          uniform float uSweep;
+          uniform float uPresent;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          void main() {
+            vec2 ar = vec2(uAspect, 1.0);
+            vec2 v0 = decV(texture(uVel, vUv).xy);
+            vec2 back = vUv - v0 * uDt / ar;
+            vec2 v = decV(texture(uVel, back).xy);
+
+            vec4 m = texture(uMask, vUv);
+            vec2 mot = decV(m.ba);
+            float motMag = length(mot);
+            float aura = texture(uAura, vUv).r;
+            float ink = texture(uInk, vUv).r;
+
+            // body motion drags the surrounding ink (invariant 3)
+            v += mot * uDt * (1.7 + 3.0 * uSweep) * uPresent;
+
+            // outward: -grad(aura) points away from the body
+            float aL = texture(uAura, vUv - vec2(uTexel.x, 0.0)).r;
+            float aR = texture(uAura, vUv + vec2(uTexel.x, 0.0)).r;
+            float aB = texture(uAura, vUv - vec2(0.0, uTexel.y)).r;
+            float aT = texture(uAura, vUv + vec2(0.0, uTexel.y)).r;
+            vec2 gA = vec2(aR - aL, aT - aB) * 0.5;
+            float gLen = length(gA);
+            if (gLen > 1e-5) {
+              v += (-gA / gLen) * uDt * (0.15 + 0.40 * uSweep) *
+                smoothstep(0.02, 0.30, aura) * (0.25 + 2.6 * motMag);
+            }
+
+            // vorticity confinement — keeps the sweeps as filaments, not blobs
+            float cC = decS(texture(uCurl, vUv).x);
+            float cL = abs(decS(texture(uCurl, vUv - vec2(uTexel.x, 0.0)).x));
+            float cR = abs(decS(texture(uCurl, vUv + vec2(uTexel.x, 0.0)).x));
+            float cB = abs(decS(texture(uCurl, vUv - vec2(0.0, uTexel.y)).x));
+            float cT = abs(decS(texture(uCurl, vUv + vec2(0.0, uTexel.y)).x));
+            vec2 gc = vec2(cR - cL, cT - cB) * 0.5;
+            float gcLen = length(gc);
+            if (gcLen > 1e-5) {
+              vec2 nrm = gc / gcLen;
+              v += vec2(nrm.y, -nrm.x) * cC * uDt * (0.5 + 1.6 * uSweep);
+            }
+
+            // curl-noise turbulence, gated to where there is ink or a body
+            v += curlN(vUv * ar * 3.0 + vec2(0.0, uTime * 0.05)) * uDt *
+              (0.35 + 1.30 * uSweep) * smoothstep(0.01, 0.22, max(aura, ink));
+
+            v *= exp(-uDt * 0.95);
+            fragColor = vec4(encV(v), 0.0, 1.0);
+          }
+        `;
+
+        // P6 — divergence of the advected velocity.
+        const divFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            vec2 vL = decV(texture(uVel, vUv - vec2(uTexel.x, 0.0)).xy);
+            vec2 vR = decV(texture(uVel, vUv + vec2(uTexel.x, 0.0)).xy);
+            vec2 vB = decV(texture(uVel, vUv - vec2(0.0, uTexel.y)).xy);
+            vec2 vT = decV(texture(uVel, vUv + vec2(0.0, uTexel.y)).xy);
+            float d = 0.5 * ((vR.x - vL.x) + (vT.y - vB.y));
+            fragColor = vec4(encS(d), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P7..P20 — Jacobi pressure iterations (warm-started from last frame).
+        const jacobiFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrs;
+          uniform sampler2D uDiv;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float pL = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).x);
+            float pR = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).x);
+            float pB = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).x);
+            float pT = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).x);
+            float d = decS(texture(uDiv, vUv).x);
+            fragColor = vec4(encS((pL + pR + pB + pT - d) * 0.25), 0.0, 0.0, 1.0);
+          }
+        `;
+
+        // P21 — projection: subtract the pressure gradient (divergence-free).
+        const projFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVel;
+          uniform sampler2D uPrs;
+          uniform vec2 uTexel;
+          ${CHUNK_ENC}
+          void main() {
+            float pL = decS(texture(uPrs, vUv - vec2(uTexel.x, 0.0)).x);
+            float pR = decS(texture(uPrs, vUv + vec2(uTexel.x, 0.0)).x);
+            float pB = decS(texture(uPrs, vUv - vec2(0.0, uTexel.y)).x);
+            float pT = decS(texture(uPrs, vUv + vec2(0.0, uTexel.y)).x);
+            vec2 v = decV(texture(uVel, vUv).xy);
+            v -= 0.5 * vec2(pR - pL, pT - pB);
+            fragColor = vec4(encV(v), 0.0, 1.0);
+          }
+        `;
+
+        // P22 — brush agents (筆). A tiny ping-pong state texture, AGENTS wide
+        // and 2 rows tall:
+        //   row 0 = (pos.x, pos.y, life, seed)
+        //   row 1 = (encV(vel), width, pigment)
+        // An idle agent tries to respawn on the MOVING EDGE BAND of the person
+        // (rejection sampling over the frame). If every candidate misses it stays
+        // dormant — it never falls back to spraying somewhere random (CRAFT §B3).
+        // A live agent turns at a constant angular velocity, which is what makes
+        // the stroke a circular brush arc rather than a straight ray.
+        const agentFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uAg;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform sampler2D uAura;
+          uniform sampler2D uVel;
+          uniform float uDt;
+          uniform float uSeed;
+          uniform float uAspect;
+          uniform float uSweep;
+          uniform float uPresent;
+          uniform vec2 uTexel;
+          const float AGENTS_F = ${AGENT_COUNT}.0;
+          ${CHUNK_NOISE}
+          ${CHUNK_MOTION}
+          ${CHUNK_ENC}
+          void main() {
+            ivec2 ij = ivec2(gl_FragCoord.xy);
+            int i = ij.x;
+            vec4 s0 = texelFetch(uAg, ivec2(i, 0), 0);
+            vec4 s1 = texelFetch(uAg, ivec2(i, 1), 0);
+            if (uDt <= 0.0) {           // frozen: hold the state exactly
+              fragColor = ij.y == 0 ? s0 : s1;
+              return;
+            }
+            vec2 pos = s0.xy;
+            float life = s0.z;
+            float seed = s0.w;
+            vec2 vel = decV(s1.xy);
+            float wid = s1.z;
+            float pigment = s1.w;
+
+            if (life <= 0.0) {
+              float found = 0.0;
+              // strokes per SECOND, spread over the pool — density must not
+              // depend on the frame rate or on the ?prewarm= step size
+              float rate = (3.0 + 8.0 * uSweep) * uDt / AGENTS_F;
+              if (hash12(vec2(float(i) * 1.77, uSeed * 0.91)) > rate) {
+                fragColor = ij.y == 0
+                  ? vec4(pos, 0.0, seed)
+                  : vec4(encV(vel), wid, pigment);
+                return;
+              }
+              for (int k = 0; k < 8; k++) {
+                vec2 cand = hash22(vec2(float(i) * 3.77 + float(k) * 11.31,
+                  uSeed * 1.63 + float(k) * 5.11));
+                vec4 m = texture(uMask, cand);
+                vec4 sf = texture(uSoft, cand);
+                // the moving edge band: just outside the silhouette AND where
+                // the fast/slow masks disagree (= the body passed through here)
+                float band = clamp(sf.r - m.r, 0.0, 1.0);
+                float move = abs(sf.r - sf.g);
+                float dmag = 0.0;
+                vec2 md = travelDir(uSoft, cand, uTexel, dmag);
+                if (found < 0.5 && uPresent > 0.25 &&
+                    band + move > 0.06 && move > 0.010) {
+                  found = 1.0;
+                  seed = hash12(vec2(float(i) * 7.13, uSeed * 3.31));
+                  pos = cand;
+                  md = normalize(md + decV(m.ba) * 0.6 + vec2(1e-5, 1e-5));
+                  float side = hash12(vec2(float(i) * 2.1, uSeed * 0.37)) < 0.5 ? -1.0 : 1.0;
+                  float rot = (0.30 + 0.60 * hash12(vec2(uSeed, float(i) * 1.93))) * side;
+                  float cs = cos(rot);
+                  float sn = sin(rot);
+                  // a speed FLOOR: a stroke has to travel far enough to read as
+                  // a sweep even when the subject moves slowly
+                  vel = vec2(md.x * cs - md.y * sn, md.x * sn + md.y * cs) *
+                    (0.20 + 0.95 * move + 0.26 * length(decV(m.ba))) *
+                    (0.55 + 0.9 * uSweep) * (1.25 - 0.55 * wid);
+                  float wr = hash12(vec2(seed * 13.0, 2.71));
+                  wid = 0.10 + 0.90 * pow(wr, 2.1);   // bimodal: fine ∙ loaded
+                  // brush size follows the SUBJECT's size: the aura plateau is
+                  // higher next to a big body than a distant one, so a small
+                  // subject gets a proportionally finer brush (CRAFT §C2)
+                  wid *= clamp(0.55 + 1.15 * texture(uAura, cand).r, 0.5, 1.25);
+                  pigment = hash12(vec2(seed * 5.0, 9.13));
+                  if (pigment > 0.93) wid *= 0.42;   // gold is an accent, not a sweep
+                  life = 1.0;
+                }
+              }
+              if (found < 0.5) life = 0.0;
+            } else {
+              float omega = (hash12(vec2(seed * 21.0, 1.31)) - 0.5) * 5.4;
+              float cs = cos(omega * uDt);
+              float sn = sin(omega * uDt);
+              vel = vec2(vel.x * cs - vel.y * sn, vel.x * sn + vel.y * cs);
+              vel += decV(texture(uVel, pos).xy) * uDt * 0.6;
+              vel += curlN(pos * vec2(uAspect, 1.0) * 4.0 + seed * 17.0) * uDt * 0.55;
+              vel *= exp(-uDt * 0.55);
+              pos += vel * uDt / vec2(uAspect, 1.0);
+              // out in the margin a stroke runs out fast: this is what keeps
+              // the paper's irregular white space (invariant 1/6)
+              float far = 1.0 - smoothstep(0.0010, 0.020, texture(uAura, pos).r);
+              life -= uDt * (1.0 + 2.0 * far) /
+                (0.85 + 1.50 * hash12(vec2(seed * 3.11, 4.43)));
+              if (pos.x < -0.06 || pos.x > 1.06 || pos.y < -0.06 || pos.y > 1.06) {
+                life = 0.0;
+              }
+            }
+            fragColor = ij.y == 0
+              ? vec4(pos, max(life, 0.0), seed)
+              : vec4(encV(vel), wid, pigment);
+          }
+        `;
+
+        // P23 — the ink field. R = ink, G = pigment (0 sumi → 1 indigo),
+        // B = dryness (age), A = gold. Advected by the fluid, injected from
+        // three sources, dissipated by DISTANCE FROM THE BODY so ink never
+        // accumulates unbounded far from the figure (invariant 6 / CRAFT §A5).
+        const inkFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uInk;
+          uniform sampler2D uVel;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform sampler2D uAura;
+          uniform float uDt;
+          uniform float uAspect;
+          uniform float uInkAmt;
+          uniform float uHold;
+          uniform float uGoldAmt;
+          uniform float uPresent;
+          uniform vec2 uTexel;
+          ${CHUNK_NOISE}
+          ${CHUNK_MOTION}
+          ${CHUNK_ENC}
+          void main() {
+            vec2 ar = vec2(uAspect, 1.0);
+            vec2 v = decV(texture(uVel, vUv).xy);
+            // ink is absorbed by paper: it drifts with the field but far less
+            // than a gas would, otherwise the picture reads as smoke, not ink
+            vec4 prev = texture(uInk, vUv - v * uDt * 0.30 / ar);
+            float ink = prev.r;
+            float pigment = prev.g;
+            float dry = prev.b;
+            float gold = prev.a;
+
+            vec4 m = texture(uMask, vUv);
+            vec4 sf = texture(uSoft, vUv);
+            vec4 au = texture(uAura, vUv);
+            float aura = au.r;
+            vec2 mot = decV(m.ba);
+
+            // --- dissipation: fast far from the body, slow next to it. This is
+            // the containment that keeps the paper's irregular margin (inv 1/6).
+            float near = smoothstep(0.015, 0.32, aura);
+            float soaked = smoothstep(0.08, 0.42, prev.r) * 0.62;
+            float diss = mix(2.05, 0.34, max(near, soaked)) *
+              mix(1.55, 0.55, uHold);
+            ink *= exp(-uDt * diss);
+            gold *= exp(-uDt * (diss + 0.35));
+            dry = min(1.0, dry + uDt * (0.28 + 0.5 * (1.0 - near)));
+
+            // --- injection sources ------------------------------------------
+            // Every source is GATED by texture, never laid down as a smooth
+            // field: an ungated wide band injects a flat plateau, which has no
+            // gradient and reads as a soft blob instead of ink (CRAFT §A1).
+            float mott = fbm(vUv * ar * 9.0 + 3.1);
+            float blotch = smoothstep(0.32, 0.62, mott);       // patches WITH gaps
+            float fine = smoothstep(0.34, 0.70, fbm(vUv * ar * 24.0 + 8.7));
+
+            // travel direction of the body → the lanes the ink is dragged into
+            float dmag = 0.0;
+            vec2 td = travelDir(uSoft, vUv, uTexel, dmag);
+            vec2 tp = vec2(-td.y, td.x);
+            float lanes = smoothstep(0.30, 0.68,
+              fbm(vec2(dot(vUv * ar, td) * 4.0, dot(vUv * ar, tp) * 44.0)));
+
+            // movement energy: the medium-scale band (soft) plus a wide, smooth
+            // halo of it (aura) so the whole surround answers a big movement
+            float trailBand = clamp(sf.g - sf.r, 0.0, 1.0) * 0.22 +
+              clamp(m.g - m.r, 0.0, 1.0) * 1.05;
+            float leadBand = clamp(sf.r - sf.g, 0.0, 1.0);
+            float wideMot = min(1.0, abs(au.g - au.r) * 7.0);
+            float energy = min(1.2, (trailBand + leadBand) * 2.6 +
+              wideMot * 0.75 + length(mot) * 0.5);
+
+            // ink belongs OUTSIDE the body: the figure stays the readable core
+            float outside = 1.0 - smoothstep(0.45, 0.85, m.r);
+
+            // (a) trailing silhouette: where the body WAS but no longer is —
+            //     dragged into streaks along the travel direction (布の遅延)
+            float injTrail = trailBand * (0.55 + 1.7 * energy) *
+              mix(0.25, 1.0, lanes) * mix(0.45, 1.0, blotch) * outside;
+
+            // (b) edge aura: a broken sumi band hugging the silhouette, present
+            //     even when the subject is still (so a static pose still reads).
+            float edgeBand = clamp(sf.r - m.r, 0.0, 1.0);
+            float injEdge = edgeBand * (0.20 + 2.2 * energy) *
+              mix(0.2, 1.0, blotch) * mix(0.35, 1.0, fine) * outside;
+
+            // (c) the brush sweeps live in their own hard-edged layer (P24b);
+            //     what remains here is the wet wash the paper wicks around them
+            float wsum = injTrail * 0.95 + injEdge * 1.30;
+            // taper as the field fills: keeps ink in the 0.4–0.9 band WITH
+            // structure instead of a flat saturated plateau (CRAFT §A1)
+            float inj = wsum * uInkAmt * uPresent * uDt * 4.2 *
+              (1.0 - 0.88 * smoothstep(0.30, 0.95, ink));
+            if (wsum > 1e-4) {
+              float pigT = (injTrail * 0.95 * 0.42 + injEdge * 1.30 * 0.06) / wsum;
+              float dryT = (injTrail * 0.95 * 0.34 + injEdge * 1.30 * 0.62) / wsum;
+              float k = clamp(inj * 5.0, 0.0, 0.85);
+              pigment = mix(pigment, clamp(pigT, 0.0, 1.0), k);
+              dry = mix(dry, clamp(dryT, 0.0, 1.0), k);
+              // a few patches of the wash carry gold rather than sumi
+              float goldPatch = smoothstep(0.60, 0.80, fbm(vUv * ar * 3.5 + 21.0));
+              gold = max(gold, min(1.0, inj * 7.0 * goldPatch * uGoldAmt));
+            }
+            ink = min(1.0, ink + inj);
+
+            fragColor = vec4(clamp(ink, 0.0, 1.0), clamp(pigment, 0.0, 1.0),
+              clamp(dry, 0.0, 1.0), clamp(gold, 0.0, 1.0));
+          }
+        `;
+
+        // P24 — splatter spawn (DROPS x 1). One texel per droplet candidate:
+        // (pos.x, pos.y, radius, angle/2π+0.5). Only the vigorously moving edge
+        // band throws ink; a miss writes radius 0 and nothing is stamped.
+        const dropFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrev;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform float uDt;
+          uniform float uSeed;
+          uniform float uSplatter;
+          uniform float uPresent;
+          uniform vec2 uTexel;
+          ${CHUNK_NOISE}
+          ${CHUNK_MOTION}
+          ${CHUNK_ENC}
+          void main() {
+            int j = int(gl_FragCoord.x);
+            if (uDt <= 0.0) {   // frozen: keep the last stamp set (idempotent)
+              fragColor = texelFetch(uPrev, ivec2(j, 0), 0);
+              return;
+            }
+            vec4 res = vec4(0.0, 0.0, 0.0, 0.5);
+            float gate = hash12(vec2(float(j) * 4.31, uSeed * 2.17));
+            // rate is per SECOND, not per frame, so the density of flecks does
+            // not depend on the frame rate (or on the ?prewarm= step size)
+            float rate = (0.030 + 0.150 * uSplatter) * min(2.0, uDt * 24.0);
+            if (gate < rate && uPresent > 0.25) {
+              for (int k = 0; k < 6; k++) {
+                vec2 cand = hash22(vec2(uSeed * 2.71 + float(k) * 7.77,
+                  float(j) * 13.3 + float(k) * 3.19));
+                vec4 m = texture(uMask, cand);
+                vec4 sf = texture(uSoft, cand);
+                float band = clamp(sf.r - m.r, 0.0, 1.0);
+                float move = abs(sf.r - sf.g);
+                float dmag = 0.0;
+                vec2 md = travelDir(uSoft, cand, uTexel, dmag);
+                md = normalize(md + decV(m.ba) * 0.5 + vec2(1e-5, 1e-5));
+                // thrown ink needs real movement — a still subject barely spits
+                if (res.z <= 0.0 && band + move > 0.10 && move > 0.018) {
+                  float sz = hash12(vec2(cand.x * 91.0, cand.y * 57.0 + uSeed));
+                  // heavily skewed size: mostly specks, a few fat blobs
+                  float radius = 0.0012 + 0.0095 * pow(sz, 3.6) +
+                    0.0030 * min(move * 4.0, 0.8);
+                  res = vec4(cand, radius, atan(md.y, md.x) / PI2 + 0.5);
+                }
+              }
+            }
+            fragColor = res;
+          }
+        `;
+
+        // P24b — the brush-stroke layer. The fluid ink field can only make SOFT
+        // washes; a sweep of a loaded brush has a hard, bristle-ragged edge. So
+        // the agents are drawn as instanced quads (one per live agent, spanning
+        // last frame's position to this one) into their own high-resolution layer
+        // with MAX blending — the same machinery that made the splatter crisp.
+        // R = sumi coverage, G = indigo, B = gold.
+        const strokeVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uAg;
+          uniform float uAspect;
+          uniform float uDt;
+          out vec2 vP;
+          out vec4 vSeg;
+          out vec3 vAttr;
+          ${CHUNK_ENC}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0)
+          );
+          void main() {
+            int id = gl_InstanceID;
+            vec4 s0 = texelFetch(uAg, ivec2(id, 0), 0);
+            vec4 s1 = texelFetch(uAg, ivec2(id, 1), 0);
+            float life = s0.z;
+            if (life <= 0.0) {
+              vP = vec2(0.0); vSeg = vec4(0.0); vAttr = vec3(0.0);
+              gl_Position = vec4(3.0, 3.0, 0.0, 1.0);
+              return;
+            }
+            vec2 ar = vec2(uAspect, 1.0);
+            vec2 vel = decV(s1.xy);
+            float r = (0.005 + 0.030 * s1.z) * (0.18 + 0.82 * life);
+            vec2 b = s0.xy * ar;
+            vec2 a = (s0.xy - vel * uDt / ar) * ar;
+            vec2 axis = b - a;
+            float len = length(axis);
+            vec2 ax = len > 1e-6 ? axis / len : vec2(1.0, 0.0);
+            vec2 pv = vec2(-ax.y, ax.x);
+            vec2 q = QUAD[gl_VertexID];
+            vec2 P = 0.5 * (a + b) + ax * q.x * (0.5 * len + r * 1.7) +
+              pv * q.y * r * 1.7;
+            vP = P;
+            vSeg = vec4(a, b);
+            vAttr = vec3(life, r, s1.w);
+            gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const strokeFS = `#version 300 es
+          precision highp float;
+          in vec2 vP;
+          in vec4 vSeg;
+          in vec3 vAttr;
+          out vec4 fragColor;
+          uniform float uDryAmt;
+          ${CHUNK_NOISE}
+          void main() {
+            float life = vAttr.x;
+            float r = vAttr.y;
+            float pig = vAttr.z;
+            vec2 a = vSeg.xy;
+            vec2 b = vSeg.zw;
+            vec2 axis = b - a;
+            float len = length(axis);
+            vec2 ax = len > 1e-6 ? axis / len : vec2(1.0, 0.0);
+            vec2 pv = vec2(-ax.y, ax.x);
+            float d = sdSeg(vP, a, b);
+            // bristles: fine ACROSS the stroke, drawn out ALONG it
+            float u1 = dot(vP, ax) * 120.0;
+            float u2 = dot(vP, pv) * 880.0;
+            float bris = 0.62 * vnoise(vec2(u1, u2)) +
+              0.38 * vnoise(vec2(u1 * 2.3, u2 * 2.6));
+            // a brush runs dry as the stroke is pulled: gaps open near the tail
+            float dryness = clamp((1.0 - life) * (0.30 + 0.95 * uDryAmt),
+              0.0, 1.0);
+            float w = r * (0.58 + 0.42 * bris);
+            float cov = 1.0 - smoothstep(w * 0.78, w, d);
+            cov *= mix(1.0, smoothstep(0.28, 0.62, bris), dryness);
+            if (cov <= 0.012) discard;
+            float isGold = step(0.93, pig);
+            float isIndigo = (1.0 - isGold) * step(0.82, pig);
+            fragColor = vec4(cov * (1.0 - isGold - isIndigo), cov * isIndigo,
+              cov * isGold, cov);
+          }
+        `;
+
+        // P25a — splatter decay. Drawn as a fullscreen quad with
+        // blendFunc(ZERO, SRC_COLOR): dst *= decay. No ping-pong needed, so the
+        // splatter layer can live at a higher resolution than the fluid and keep
+        // its hard edges (ink hitting paper is not a soft glow).
+        const fadeFS = `#version 300 es
+          precision highp float;
+          out vec4 fragColor;
+          uniform float uFade;
+          void main() { fragColor = vec4(uFade, uFade, uFade, uFade); }
+        `;
+
+        // P25b — splatter stamps: one instanced quad per droplet, MAX-blended.
+        // The vertex shader pulls the droplet record with texelFetch, so the
+        // whole system stays on the GPU (no readback stall).
+        const dropVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uDrops;
+          out vec2 vLocal;
+          out vec4 vDrop;
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0)
+          );
+          void main() {
+            vec4 d = texelFetch(uDrops, ivec2(gl_InstanceID, 0), 0);
+            vec2 q = QUAD[gl_VertexID];
+            vLocal = q;
+            vDrop = d;
+            if (d.z <= 0.0) {          // no droplet: park the quad offscreen
+              gl_Position = vec4(3.0, 3.0, 0.0, 1.0);
+              return;
+            }
+            vec2 p = d.xy + q * d.z * 3.2;
+            gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        // Hard-edged teardrop + satellite droplets, irregular boundary. R = sumi
+        // coverage, G = gold/copper coverage (a small hashed minority).
+        const dropSplatFS = `#version 300 es
+          precision highp float;
+          in vec2 vLocal;
+          in vec4 vDrop;
+          out vec4 fragColor;
+          uniform float uAspect;
+          ${CHUNK_NOISE}
+          void main() {
+            float seed = hash12(vDrop.xy * 113.0);
+            // quad space is isotropic by construction: 1 unit = droplet radius
+            vec2 p = vLocal * 3.2;
+            float ang = (vDrop.w - 0.5) * PI2;
+            vec2 dir = vec2(cos(ang), sin(ang));
+            vec2 q = vec2(dot(p, dir), dot(p, vec2(-dir.y, dir.x)));
+            // thrown ink is a teardrop: stretched along the throw direction
+            float stretch = 1.0 + 1.25 * hash12(vec2(seed * 31.0, 2.3));
+            vec2 e = vec2(q.x / stretch + 0.25 * stretch, q.y);
+            float rr = length(e);
+            float wob = 0.20 * (vnoise(vec2(atan(e.y, e.x) * 2.4, seed * 23.0)) - 0.5);
+            float blob = 1.0 - smoothstep(0.95 + wob, 1.02 + wob, rr);
+            // three satellites flung further along the throw
+            float sat = 0.0;
+            for (int k = 0; k < 3; k++) {
+              vec2 h = hash22(vec2(seed * 17.0 + float(k) * 5.7, float(k) * 3.1));
+              vec2 c = dir * (1.2 + 1.6 * h.x) + vec2(-dir.y, dir.x) * (h.y - 0.5) * 1.4;
+              float sr = 0.10 + 0.20 * h.y;
+              sat = max(sat, 1.0 - smoothstep(sr * 0.88, sr, length(p - c)));
+            }
+            float cov = max(blob, sat * 0.92);
+            if (cov <= 0.002) discard;
+            float goldPick = step(0.88, hash12(vDrop.xy * 57.0 + 3.7));
+            fragColor = vec4(cov * (1.0 - goldPick), cov * goldPick, 0.0, cov);
+          }
+        `;
+
+        // P27 — composite. Paper → ink (turbulence-warped sample, dry-brush
+        // break, bleed rim, gold) → the real person (graded, ragged edge) →
+        // splatter on top → paper grain and a mild vignette.
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform sampler2D uAura;
+          uniform sampler2D uInk;
+          uniform sampler2D uBleed;
+          uniform sampler2D uSplat;
+          uniform sampler2D uStroke;
+          uniform sampler2D uPaperTex;
+          uniform sampler2D uVel;
+          uniform vec2 uResolution;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uPaper;
+          uniform float uBleedAmt;
+          uniform float uDryAmt;
+          uniform float uGoldAmt;
+          uniform float uRealism;
+          uniform float uSplatAmt;
+          uniform float uFallback;
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_PALETTE}
+          void main() {
+            vec2 ar = vec2(uAspect, 1.0);
+            vec4 m = texture(uMask, vUv);
+            vec2 flow = decV(m.ba);
+            vec2 vel = decV(texture(uVel, vUv).xy);
+            float soft = texture(uSoft, vUv).r;
+            float aura = texture(uAura, vUv).r;
+            vec3 paper = clamp(texture(uPaperTex, vUv).rgb * uPaper, 0.0, 1.0);
+            // a barely-there gray breath of 気 on the paper around the body —
+            // enough to seat the figure on the ground, far too weak to read as
+            // a cut-out halo
+            float halo = max(aura * 0.9, soft * 0.30);
+            paper = mix(paper, paper * vec3(0.955, 0.960, 0.968),
+              smoothstep(0.02, 0.55, halo) * 0.7);
+
+            // --- ink: never sample the mask/field straight (CRAFT §A2). The
+            // visible contour comes from a turbulent warp + a dry-brush gate.
+            vec2 warp = curlN(vUv * ar * 3.4 + vec2(0.0, uTime * 0.035)) * 0.011
+              + vel * 0.012 + flow * 0.007;
+            vec4 ink = texture(uInk, vUv + warp);
+            vec4 bleed = texture(uBleed, vUv + warp * 0.55);
+
+            // かすれ: noise stretched ALONG the local stroke direction, so the
+            // breaks read as a dragged dry brush instead of generic dither.
+            vec2 dirv = normalize(vel + flow * 0.6 + vec2(1e-4, 1e-4));
+            vec2 perp = vec2(-dirv.y, dirv.x);
+            float along = dot(vUv * ar, dirv);
+            float across = dot(vUv * ar, perp);
+            // bristle texture: two octaves, both stretched ALONG the stroke
+            float bristle = 0.62 * fbm4(vec2(along * 5.0, across * 30.0)) +
+              0.38 * fbm4(vec2(along * 11.0, across * 72.0));
+            float grit = vnoise(vUv * ar * 340.0);
+            // a dry brush loses contact with the paper; a wet one does not
+            float dryBreak = smoothstep(0.34, 0.76, bristle + 0.08 * (grit - 0.5)) *
+              (0.25 + 0.75 * uDryAmt) * smoothstep(0.12, 0.82, ink.b);
+            // paper absorption is blotchy, so the wash breaks in clouds
+            float blot = fbm4(vUv * ar * 13.0 + 5.0);
+            float washBreak = smoothstep(0.30, 0.64,
+              blot + 0.30 - (0.20 + 0.40 * uDryAmt) * ink.b);
+            float stroke = smoothstep(0.035, 0.28, ink.r) *
+              mix(1.0, washBreak, 0.60) * (1.0 - 0.30 * dryBreak);
+            float wash = smoothstep(0.020, 0.34, bleed.r) *
+              (0.20 + 0.34 * uBleedAmt);
+            float cov = clamp(max(wash * 0.42, stroke * 0.95), 0.0, 1.0);
+
+            // にじみ: the drying boundary holds more pigment than the middle
+            float rim = smoothstep(0.02, 0.13, bleed.r) *
+              (1.0 - smoothstep(0.08, 0.28, ink.r));
+            vec3 pig = mix(SUMI, INDIGO, clamp(ink.g, 0.0, 1.0));
+            pig = mix(pig, INK_GRAY, 0.30 * (1.0 - smoothstep(0.04, 0.30, ink.r)));
+            pig = mix(pig, pig * 0.72, rim * (0.35 + 0.5 * uBleedAmt));
+            pig = mix(pig, mix(GOLD, COPPER, 0.35),
+              clamp(ink.a * 2.4, 0.0, 1.0) * uGoldAmt);
+            vec3 col = mix(paper, pig, cov * 0.94);
+
+            // --- the brush strokes: hard-edged, on top of the wash
+            vec3 stk = texture(uStroke, vUv).rgb;
+            float stkTot = max(stk.r, max(stk.g, stk.b));
+            vec3 stkCol = (stk.r * SUMI + stk.g * mix(INDIGO, SUMI, 0.42) +
+              stk.b * mix(GOLD, COPPER, 0.30) * uGoldAmt +
+              stk.b * SUMI * (1.0 - uGoldAmt)) / max(stkTot, 1e-4);
+            float stkA = smoothstep(0.12, 0.48, stkTot);
+            col = mix(col, stkCol, stkA);
+
+            // --- the person: real camera, graded into the palette. The core is
+            // solid (the subject must stay legible); the fringe is torn open by
+            // the same dry-brush gate so cloth continues into brush strokes.
+            float mSharp = texture(uMask, vUv + warp * 0.30).r;
+            float mSoft = texture(uSoft, vUv + warp * 0.55).r;
+            float deep = smoothstep(0.62, 0.96, mSharp);
+            // brush-scale noise: stretched along the stroke direction so the torn
+            // boundary reads as dragged bristles, not as dither
+            float ragged = 0.55 * bristle +
+              0.45 * fbm4(vec2(along * 16.0, across * 120.0));
+            float bite = (0.34 + 0.60 * uDryAmt) * (1.0 - deep);
+            // NOTE: the softened mask may only LIFT the contour slightly. Using
+            // it as a full term dilates the figure far past the silhouette and
+            // paints the camera's own background onto the paper as a blob.
+            float mFirm = smoothstep(0.50, 0.80, mSharp);
+            float mWide = smoothstep(0.22, 0.78, mSoft);
+            float mVast = smoothstep(0.38, 0.88, aura);
+            float solid = smoothstep(0.82, 0.99, mSharp);
+            float contour = max(solid,
+              mVast * 0.42 + mWide * 0.36 + mFirm * 0.22 + (ragged - 0.55) * bite);
+            float pa = smoothstep(0.40, 0.68, contour);
+            pa *= smoothstep(0.02, 0.22, mSoft);   // hard leash on dilation
+            // dense ink eats into the silhouette, so cloth passes INTO the stroke
+            pa *= 1.0 - 0.22 * smoothstep(0.30, 0.85, ink.r) * (1.0 - deep);
+            pa = clamp(mix(pa, 1.0, uFallback), 0.0, 1.0);
+            vec3 cam = gradePerson(texture(uScene, vUv).rgb, uRealism);
+            vec3 camF = mix(cam, mix(SUMI, INDIGO, 0.55),
+              (1.0 - deep) * 0.60 * (1.0 - uFallback));
+            col = mix(col, camF, pa);
+
+            // a share of the strokes passes IN FRONT of the body, so the ink
+            // and the figure interleave instead of sitting in separate planes
+            col = mix(col, stkCol, stkA * 0.13);
+
+            // --- splatter last: thrown ink lands on top of everything
+            vec2 sc = texture(uSplat, vUv).rg;
+            float onBody = 1.0 - 0.55 * deep;
+            float dSumi = smoothstep(0.30, 0.72, sc.r) *
+              (0.55 + 0.45 * uSplatAmt) * onBody;
+            col = mix(col, SUMI * 0.90, dSumi);
+            float dGold = smoothstep(0.30, 0.72, sc.g) *
+              (0.55 + 0.45 * uSplatAmt) * uGoldAmt * onBody;
+            col = mix(col, mix(GOLD, COPPER, 0.30), dGold);
+
+            // --- paper grain + mild vignette (static: seeded by pixel only)
+            col += (hash12(gl_FragCoord.xy) - 0.5) * 0.030;
+            float vig = 1.0 - 0.11 *
+              pow(clamp(length((vUv - 0.5) * vec2(1.04, 1.0)) * 1.42, 0.0, 1.0), 2.0);
+            col *= vig;
+
+            if (uDebug == 1) {
+              col = vec3(m.r, m.g, clamp(length(flow) * 2.0, 0.0, 1.0));
+            } else if (uDebug == 2) {
+              col = mix(vec3(ink.r), mix(vec3(0.2, 0.2, 0.25), vec3(0.2, 0.35, 0.9),
+                ink.g) * ink.r, 0.55) + vec3(0.6, 0.45, 0.1) * ink.a;
+            } else if (uDebug == 3) {
+              col = vec3(0.5 + vel.x * 0.6, 0.5 + vel.y * 0.6,
+                0.5 - 0.4 * length(vel));
+            } else if (uDebug == 4) {
+              col = vec3(max(sc.r, stk.r), max(sc.g, stk.g) * 0.8 + stk.b * 0.6,
+                sc.r * 0.4 + stk.g * 0.7);
+            } else if (uDebug == 5) {
+              float band = floor(vUv.y * 8.0);
+              vec3 sw = band < 1.0 ? texture(uPaperTex, vUv).rgb * uPaper
+                : (band < 2.0 ? SUMI
+                : (band < 3.0 ? INK_GRAY
+                : (band < 4.0 ? INDIGO
+                : (band < 5.0 ? BROWN
+                : (band < 6.0 ? GOLD
+                : (band < 7.0 ? COPPER
+                : gradePerson(vec3(vUv.x), uRealism)))))));
+              col = sw;
+            }
+            fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program / target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgramVS(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function createProgram(fsSource) {
+          return createProgramVS(fullscreenVS, fsSource);
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          mask: createProgram(maskFS),
+          blur: createProgram(blurFS),
+          curl: createProgram(curlFS),
+          vel: createProgram(velFS),
+          div: createProgram(divFS),
+          jacobi: createProgram(jacobiFS),
+          proj: createProgram(projFS),
+          agent: createProgram(agentFS),
+          ink: createProgram(inkFS),
+          drop: createProgram(dropFS),
+          fade: createProgram(fadeFS),
+          splat: createProgramVS(dropVS, dropSplatFS),
+          stroke: createProgramVS(strokeVS, strokeFS),
+          composite: createProgram(compositeFS),
+          paper: createProgram(paperFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uCx", "uCy",
+            "uSwing", "uScale", "uMirror", "uFake", "uHasVideo",
+          ]),
+          mask: getLocations(programs.mask, [
+            "uScene", "uScenePrev", "uPrev", "uSeg", "uTexel", "uSegScale",
+            "uAspect", "uCx", "uCy", "uSwing", "uScale", "uDt", "uAlphaFast",
+            "uAlphaSlow", "uAlphaMot", "uReset", "uSource", "uMirror",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          curl: getLocations(programs.curl, ["uVel", "uTexel"]),
+          vel: getLocations(programs.vel, [
+            "uVel", "uCurl", "uMask", "uAura", "uInk", "uTexel", "uDt", "uTime",
+            "uAspect", "uSweep", "uPresent",
+          ]),
+          div: getLocations(programs.div, ["uVel", "uTexel"]),
+          jacobi: getLocations(programs.jacobi, ["uPrs", "uDiv", "uTexel"]),
+          proj: getLocations(programs.proj, ["uVel", "uPrs", "uTexel"]),
+          agent: getLocations(programs.agent, [
+            "uAg", "uMask", "uSoft", "uAura", "uVel", "uDt", "uSeed", "uAspect",
+            "uSweep", "uPresent", "uTexel",
+          ]),
+          ink: getLocations(programs.ink, [
+            "uInk", "uVel", "uMask", "uSoft", "uAura", "uDt", "uAspect",
+            "uInkAmt", "uHold", "uGoldAmt", "uPresent", "uTexel",
+          ]),
+          drop: getLocations(programs.drop, [
+            "uPrev", "uMask", "uSoft", "uDt", "uSeed", "uSplatter", "uPresent",
+            "uTexel",
+          ]),
+          fade: getLocations(programs.fade, ["uFade"]),
+          splat: getLocations(programs.splat, ["uDrops", "uAspect"]),
+          stroke: getLocations(programs.stroke, ["uAg", "uAspect", "uDt", "uDryAmt"]),
+          paper: getLocations(programs.paper, ["uAspect"]),
+          composite: getLocations(programs.composite, [
+            "uScene", "uMask", "uSoft", "uAura", "uInk", "uBleed", "uSplat",
+            "uStroke", "uPaperTex", "uVel", "uResolution", "uAspect", "uTime", "uPaper", "uBleedAmt",
+            "uDryAmt", "uGoldAmt", "uRealism", "uSplatAmt", "uFallback", "uDebug",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          return tex;
+        }
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        // Video texture (DOM source → UNPACK_FLIP_Y). The segmentation texture is
+        // a plain R8 upload from MediaPipe (image space, no flip on upload).
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const segTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, segTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 2, 2, 0, gl.RED, gl.UNSIGNED_BYTE,
+          new Uint8Array([0, 0, 0, 0]));
+        let segSize = [2, 2];
+
+        let targets = null;
+        let paintW = 2, paintH = 2, fieldW = 2, fieldH = 2, splatW = 2, splatH = 2;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          targets = {
+            sceneA: createTarget(paintW, paintH, false),
+            sceneB: createTarget(paintW, paintH, false),
+            maskA: createTarget(fieldW, fieldH, true),
+            maskB: createTarget(fieldW, fieldH, true),
+            softT: createTarget(fieldW, fieldH, true),
+            softTmp: createTarget(fieldW, fieldH, true),
+            auraT: createTarget(fieldW, fieldH, true),
+            auraTmp: createTarget(fieldW, fieldH, true),
+            curlT: createTarget(fieldW, fieldH, true),
+            velA: createTarget(fieldW, fieldH, true),
+            velB: createTarget(fieldW, fieldH, true),
+            divT: createTarget(fieldW, fieldH, true),
+            prsA: createTarget(fieldW, fieldH, true),
+            prsB: createTarget(fieldW, fieldH, true),
+            inkA: createTarget(fieldW, fieldH, true),
+            inkB: createTarget(fieldW, fieldH, true),
+            bleedT: createTarget(fieldW, fieldH, true),
+            bleedTmp: createTarget(fieldW, fieldH, true),
+            agA: createTarget(AGENT_COUNT, 2, true),
+            agB: createTarget(AGENT_COUNT, 2, true),
+            dropA: createTarget(DROP_COUNT, 1, true),
+            dropB: createTarget(DROP_COUNT, 1, true),
+            splatT: createTarget(splatW, splatH, false),
+            strokeT: createTarget(splatW, splatH, false),
+            paperT: createTarget(paintW, paintH, false),
+          };
+          renderPass(targets.paperT, programs.paper, () => {
+            gl.uniform1f(locations.paper.uAspect,
+              canvas.width / Math.max(canvas.height, 1));
+          });
+          needsReset = true;
+        }
+
+        // Encoded targets must clear to encoded zero (0.5), else "clear" decodes
+        // to -VMAX and the first frame kicks the fluid.
+        function clearSimTargets() {
+          clearTarget(targets.sceneA, 0.35, 0.34, 0.32, 1);
+          clearTarget(targets.sceneB, 0.35, 0.34, 0.32, 1);
+          clearTarget(targets.maskA, 0, 0, 0.5, 0.5);
+          clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softTmp, 0, 0, 0.5, 0.5);
+          clearTarget(targets.auraT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.auraTmp, 0, 0, 0.5, 0.5);
+          clearTarget(targets.velA, 0.5, 0.5, 0, 1);
+          clearTarget(targets.velB, 0.5, 0.5, 0, 1);
+          clearTarget(targets.curlT, 0.5, 0, 0, 1);
+          clearTarget(targets.divT, 0.5, 0, 0, 1);
+          clearTarget(targets.prsA, 0.5, 0, 0, 1);
+          clearTarget(targets.prsB, 0.5, 0, 0, 1);
+          clearTarget(targets.inkA, 0, 0, 0, 1);
+          clearTarget(targets.inkB, 0, 0, 0, 1);
+          clearTarget(targets.bleedT, 0, 0, 0, 1);
+          clearTarget(targets.bleedTmp, 0, 0, 0, 1);
+          clearTarget(targets.agA, 0, 0, 0, 0);
+          clearTarget(targets.agB, 0, 0, 0, 0);
+          clearTarget(targets.dropA, 0, 0, 0, 0.5);
+          clearTarget(targets.dropB, 0, 0, 0, 0.5);
+          clearTarget(targets.splatT, 0, 0, 0, 0);
+          clearTarget(targets.strokeT, 0, 0, 0, 0);
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            const paintScale = Math.min(1, 1280 / maxSide);
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            const fieldScale = Math.min(1, 448 / maxSide);
+            fieldW = Math.max(8, Math.round(width * fieldScale));
+            fieldH = Math.max(8, Math.round(height * fieldScale));
+            const splatScale = Math.min(1, 1024 / maxSide);
+            splatW = Math.max(8, Math.round(width * splatScale));
+            splatH = Math.max(8, Math.round(height * splatScale));
+            rebuildTargets();
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        // stride lets a 21-tap kernel reach far (the proximity aura) without
+        // turning into a truncated, boxy blur.
+        function blurPass(src, tmp, dst, sigma, stride) {
+          const st = stride || 1;
+          renderPass(tmp, programs.blur, () => {
+            bindTexture(0, src.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, st / tmp.width, 0);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 0, st / dst.height);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+        }
+        // True GPU sync for this environment: gl.finish() is effectively
+        // non-blocking under swiftshader, a 1x1 readPixels is not (CRAFT §C4).
+        const syncPixel = new Uint8Array(4);
+        function glSync() {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+        }
+
+        /* ------------------------------------------------------------------
+           Detection state (person mask + presence). Everything lives in SCREEN
+           UV so fakesource and MediaPipe drive the exact same shader path, and
+           every quantity is EMA-smoothed. Only ImageSegmenter is loaded — no
+           pose model, because nothing in this piece needs landmarks (CRAFT §C3).
+        ------------------------------------------------------------------ */
+
+        const det = {
+          cx: 0.5, cy: 0, present: 0, fallback: FAKE || FAKESEG ? 0 : 1,
+          tcx: 0.5, tcy: 0, tpresent: 0, tfallback: FAKE || FAKESEG ? 0 : 1,
+          swing: 0,
+          segScale: [1, 1],
+          segReady: false,
+        };
+
+        // MediaPipe handles (real camera only; loaded lazily via dynamic import).
+        // URLs / models / options match gas-head + overflowing_aura_4taigyo_v2;
+        // the verify_static allowlist covers the CDN and the model host.
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+
+        let mpSegmenter = null;
+        let mpState = "idle"; // idle | loading | ready | error
+        let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
+        let segU8 = new Uint8Array(4);
+        // Inference reads a SMALL offscreen copy of the video, never the full
+        // 1280x720 frame: the mask is consumed at field resolution (≤448)
+        // anyway, and a ~288px input is 10-20x cheaper — the difference between
+        // a phone that keeps up and one that janks to a crawl (CRAFT §C3).
+        const SEG_MAX_SIDE = 288;
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;   // EMA of inference ms → adaptive cadence + readout
+        let segBadRun = 0;  // consecutive degenerate masks (GPU-health check)
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
+
+        async function loadMediaPipe() {
+          if (FAKE || mpState === "loading" || mpState === "ready") return;
+          mpState = "loading";
+          mpProgress = 0.05;
+          try {
+            const mod = await import(/* @vite-ignore */ MP_PKG);
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
+            try {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
+            } catch (_e) {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
+            }
+            mpProgress = 1;
+            mpState = "ready";
+          } catch (error) {
+            console.error("MediaPipe load failed", error);
+            mpState = "error";
+          }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("kiin-seido: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
+        }
+
+        // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
+        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
+        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the real
+        // mask. The person occupies the TOP ~60% of the image, so a correct
+        // Y-flip renders the real (graded) figure in the TOP of the screen.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const inTop = y < h * 0.6;
+              const inBand = x > w * 0.22 && x < w * 0.78;
+              arr[y * w + x] = inTop && inBand ? 255 : 0;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+          det.tpresent = 1;
+        }
+
+        // Uploads the confidence mask and returns its mean coverage (0..1).
+        function uploadSegMask(mask) {
+          const w = mask.width, h = mask.height;
+          const f = mask.getAsFloat32Array();
+          if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
+          let sum = 0;
+          for (let i = 0; i < w * h; i++) {
+            const v = Math.max(0, Math.min(255, (f[i] * 255) | 0));
+            segU8[i] = v;
+            sum += v;
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (segSize[0] !== w || segSize[1] !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, segU8);
+            segSize = [w, h];
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, segU8);
+          }
+          det.segReady = true;
+          return sum / (w * h * 255);
+        }
+
+        // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
+        function runDetection(now) {
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
+          try {
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
+            const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
+            if (cm) {
+              const cover = uploadSegMask(cm);
+              // presence from real coverage — the ink stops being injected when
+              // nobody is in frame instead of clinging to a stale mask.
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
+            if (seg && seg.close) seg.close();
+          } catch (_e) {
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
+          }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
+        }
+
+        let detTimer = 0;
+        function detectionTick() {
+          if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
+            runDetection(performance.now());
+          }
+          // Adaptive cadence: inference must never own the main thread. Slow
+          // devices (phones, CPU delegate) detect less often and the mask EMA
+          // bridges the gaps; fast devices stay at ~30Hz.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
+        }
+
+        /* ------------------------------------------------------------------
+           Simulation + present
+        ------------------------------------------------------------------ */
+
+        const JACOBI_ITERATIONS = 14;
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let seedCounter = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let scenePing = false, maskPing = false, inkPing = false;
+        let agPing = false, dropPing = false;
+        let haveVideo = false;
+        let readyStamped = false;
+        let prewarmLeft = Math.min(320, Math.round(PREWARM / PREWARM_DT));
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        function updateDetection(dt) {
+          const canvasAspect = canvas.width / Math.max(canvas.height, 1);
+          const videoAspect = (video.videoWidth && video.videoHeight)
+            ? video.videoWidth / video.videoHeight : 4 / 3;
+          det.segScale = videoAspect > canvasAspect
+            ? [canvasAspect / videoAspect, 1]
+            : [1, videoAspect / canvasAspect];
+
+          if (FAKE) {
+            // sway + bob + limb swing so the mask moves like a real body: this
+            // is what feeds the motion field, the trailing silhouette and the
+            // brush sweeps offline (verify_runtime --motion depends on it).
+            det.tcx = 0.5 + 0.075 * Math.sin(animTime * 0.42);
+            det.tcy = 0.022 * Math.sin(animTime * 0.71 + 1.0);
+            det.swing = Math.sin(animTime * 1.25);
+            det.tpresent = 1;
+            det.tfallback = 0;
+          } else if (FAKESEG) {
+            det.tpresent = 1;
+            det.tfallback = 0;
+          } else if (mpState === "ready" && det.segReady) {
+            det.tfallback = 0;
+          } else {
+            det.tpresent = 0;
+            det.tfallback = 1;
+          }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
+          const k = FREEZE ? 0 : 1 - Math.exp(-dt * 6);
+          det.cx += (det.tcx - det.cx) * k;
+          det.cy += (det.tcy - det.cy) * k;
+          det.present += (det.tpresent - det.present) * k;
+          det.fallback += (det.tfallback - det.fallback) * (FREEZE ? 0 : 1 - Math.exp(-dt * 1.6));
+        }
+
+        // One simulation step: every pass except the final composite. Called once
+        // per frame, or repeatedly with a fixed dt while ?prewarm= fast-forwards.
+        function stepSim(dt) {
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          // FAKESEG forces the real-camera seg path (uSource==1) with the
+          // synthetic mask so the Y-flip can be validated offline.
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
+          seedCounter = (seedCounter + 1) % 65536;
+          const seed = dt > 0 ? seedCounter * 0.017 + 0.31 : 0.31;
+
+          const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
+          const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
+          const maskOut = maskPing ? targets.maskA : targets.maskB;
+          const maskPrev = maskPing ? targets.maskB : targets.maskA;
+          const inkOut = inkPing ? targets.inkA : targets.inkB;
+          const inkPrev = inkPing ? targets.inkB : targets.inkA;
+          const agOut = agPing ? targets.agA : targets.agB;
+          const agPrev = agPing ? targets.agB : targets.agA;
+          const dropOut = dropPing ? targets.dropA : targets.dropB;
+          const dropPrev = dropPing ? targets.dropB : targets.dropA;
+          const fieldTexel = [1 / fieldW, 1 / fieldH];
+
+          // P0 — scene (camera cover-fit / synthetic room)
+          renderPass(sceneCur, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize,
+              Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+          });
+
+          // P1 — mask (fast + slow EMA) and motion field
+          renderPass(maskOut, programs.mask, () => {
+            const u = locations.mask;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, scenePrev.tex);
+            bindTexture(2, maskPrev.tex);
+            bindTexture(3, segTexture);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uScenePrev, 1);
+            gl.uniform1i(u.uPrev, 2);
+            gl.uniform1i(u.uSeg, 3);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAlphaFast, 1 - Math.exp(-Math.max(dt, 1e-4) * 20));
+            gl.uniform1f(u.uAlphaSlow, 1 - Math.exp(-Math.max(dt, 1e-4) * 2.3));
+            gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+            gl.uniform1i(u.uSource, source);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // P2 — soft mask (the injection band) and P3 — the wide proximity aura
+          blurPass(maskOut, targets.softTmp, targets.softT, 3.2, 1);
+          blurPass(targets.softT, targets.auraTmp, targets.auraT, 3.2, 8);
+
+          // P4 — curl of the velocity field
+          renderPass(targets.curlT, programs.curl, () => {
+            bindTexture(0, targets.velA.tex);
+            gl.uniform1i(locations.curl.uVel, 0);
+            gl.uniform2f(locations.curl.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P5 — advect velocity + forces
+          renderPass(targets.velB, programs.vel, () => {
+            const u = locations.vel;
+            bindTexture(0, targets.velA.tex);
+            bindTexture(1, targets.curlT.tex);
+            bindTexture(2, maskOut.tex);
+            bindTexture(3, targets.auraT.tex);
+            bindTexture(4, inkPrev.tex);
+            gl.uniform1i(u.uVel, 0);
+            gl.uniform1i(u.uCurl, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1i(u.uAura, 3);
+            gl.uniform1i(u.uInk, 4);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uSweep, state.sweep);
+            gl.uniform1f(u.uPresent, det.present);
+          });
+
+          // P6 — divergence
+          renderPass(targets.divT, programs.div, () => {
+            bindTexture(0, targets.velB.tex);
+            gl.uniform1i(locations.div.uVel, 0);
+            gl.uniform2f(locations.div.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P7..P20 — Jacobi pressure solve (warm-started)
+          let prsIn = targets.prsA;
+          let prsOut = targets.prsB;
+          for (let i = 0; i < JACOBI_ITERATIONS; i++) {
+            const src = prsIn;
+            renderPass(prsOut, programs.jacobi, () => {
+              bindTexture(0, src.tex);
+              bindTexture(1, targets.divT.tex);
+              gl.uniform1i(locations.jacobi.uPrs, 0);
+              gl.uniform1i(locations.jacobi.uDiv, 1);
+              gl.uniform2f(locations.jacobi.uTexel, fieldTexel[0], fieldTexel[1]);
+            });
+            const swap = prsIn; prsIn = prsOut; prsOut = swap;
+          }
+
+          // P21 — projection → velA
+          renderPass(targets.velA, programs.proj, () => {
+            bindTexture(0, targets.velB.tex);
+            bindTexture(1, prsIn.tex);
+            gl.uniform1i(locations.proj.uVel, 0);
+            gl.uniform1i(locations.proj.uPrs, 1);
+            gl.uniform2f(locations.proj.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P22 — brush agents
+          renderPass(agOut, programs.agent, () => {
+            const u = locations.agent;
+            bindTexture(0, agPrev.tex);
+            bindTexture(1, maskOut.tex);
+            bindTexture(2, targets.softT.tex);
+            bindTexture(3, targets.velA.tex);
+            bindTexture(4, targets.auraT.tex);
+            gl.uniform1i(u.uAg, 0);
+            gl.uniform1i(u.uMask, 1);
+            gl.uniform1i(u.uSoft, 2);
+            gl.uniform1i(u.uVel, 3);
+            gl.uniform1i(u.uAura, 4);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uSeed, seed);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uSweep, state.sweep);
+            gl.uniform1f(u.uPresent, det.present);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P24b — brush strokes: decay the layer, then stamp every live agent
+          // as a hard-edged, bristle-broken mark (MAX blend, no advection, no
+          // blur — a stroke stays exactly where the brush put it).
+          const strokeFade = Math.exp(-dt * (0.10 + 0.85 * (1 - state.hold)));
+          gl.enable(gl.BLEND);
+          gl.blendEquation(gl.FUNC_ADD);
+          gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
+          renderPass(targets.strokeT, programs.fade, () => {
+            gl.uniform1f(locations.fade.uFade, strokeFade);
+          });
+          if (dt > 0) {
+            gl.blendEquation(gl.MAX);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targets.strokeT.fbo);
+            gl.viewport(0, 0, targets.strokeT.width, targets.strokeT.height);
+            gl.useProgram(programs.stroke);
+            bindTexture(0, agOut.tex);
+            gl.uniform1i(locations.stroke.uAg, 0);
+            gl.uniform1f(locations.stroke.uAspect, aspect);
+            gl.uniform1f(locations.stroke.uDt, dt);
+            gl.uniform1f(locations.stroke.uDryAmt, state.dry);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, AGENT_COUNT);
+          }
+          gl.blendEquation(gl.FUNC_ADD);
+          gl.disable(gl.BLEND);
+
+          // P23 — ink: advect + inject (trail / edge / brush) + dissipate
+          renderPass(inkOut, programs.ink, () => {
+            const u = locations.ink;
+            bindTexture(0, inkPrev.tex);
+            bindTexture(1, targets.velA.tex);
+            bindTexture(2, maskOut.tex);
+            bindTexture(3, targets.softT.tex);
+            bindTexture(4, targets.auraT.tex);
+            gl.uniform1i(u.uInk, 0);
+            gl.uniform1i(u.uVel, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1i(u.uSoft, 3);
+            gl.uniform1i(u.uAura, 4);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uInkAmt, state.inkAmt);
+            gl.uniform1f(u.uHold, state.hold);
+            gl.uniform1f(u.uGoldAmt, state.gold);
+            gl.uniform1f(u.uPresent, det.present);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P24 — splatter spawn
+          renderPass(dropOut, programs.drop, () => {
+            const u = locations.drop;
+            bindTexture(0, dropPrev.tex);
+            bindTexture(1, maskOut.tex);
+            bindTexture(2, targets.softT.tex);
+            gl.uniform1i(u.uPrev, 0);
+            gl.uniform1i(u.uMask, 1);
+            gl.uniform1i(u.uSoft, 2);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uSeed, seed);
+            gl.uniform1f(u.uSplatter, state.splatter);
+            gl.uniform1f(u.uPresent, det.present);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+          });
+
+          // P25 — splatter layer: multiply-decay, then MAX-blend the stamps.
+          // Ink that has landed on paper is opaque and hard-edged, so MAX (not
+          // additive) keeps a hit from ever turning into a bright halo.
+          const fade = Math.exp(-dt * (0.08 + 0.50 * (1 - state.hold)));
+          gl.enable(gl.BLEND);
+          gl.blendEquation(gl.FUNC_ADD);
+          gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
+          renderPass(targets.splatT, programs.fade, () => {
+            gl.uniform1f(locations.fade.uFade, fade);
+          });
+          gl.blendEquation(gl.MAX);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.splatT.fbo);
+          gl.viewport(0, 0, targets.splatT.width, targets.splatT.height);
+          gl.useProgram(programs.splat);
+          bindTexture(0, dropOut.tex);
+          gl.uniform1i(locations.splat.uDrops, 0);
+          gl.uniform1f(locations.splat.uAspect, aspect);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, DROP_COUNT);
+          gl.blendEquation(gl.FUNC_ADD);
+          gl.disable(gl.BLEND);
+
+          // P26 — bleed: the wet halo the paper wicks out of the stroke
+          blurPass(inkOut, targets.bleedTmp, targets.bleedT,
+            1.6 + 2.4 * state.bleed, 2);
+
+          scenePing = !scenePing;
+          maskPing = !maskPing;
+          inkPing = !inkPing;
+          agPing = !agPing;
+          dropPing = !dropPing;
+        }
+
+        // P27 — composite to the canvas.
+        function present() {
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const sceneCur = scenePing ? targets.sceneB : targets.sceneA;
+          const maskCur = maskPing ? targets.maskB : targets.maskA;
+          const inkCur = inkPing ? targets.inkB : targets.inkA;
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, maskCur.tex);
+            bindTexture(2, targets.softT.tex);
+            bindTexture(3, targets.auraT.tex);
+            bindTexture(4, inkCur.tex);
+            bindTexture(5, targets.bleedT.tex);
+            bindTexture(6, targets.splatT.tex);
+            bindTexture(7, targets.velA.tex);
+            bindTexture(8, targets.strokeT.tex);
+            bindTexture(9, targets.paperT.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uMask, 1);
+            gl.uniform1i(u.uSoft, 2);
+            gl.uniform1i(u.uAura, 3);
+            gl.uniform1i(u.uInk, 4);
+            gl.uniform1i(u.uBleed, 5);
+            gl.uniform1i(u.uSplat, 6);
+            gl.uniform1i(u.uVel, 7);
+            gl.uniform1i(u.uStroke, 8);
+            gl.uniform1i(u.uPaperTex, 9);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uPaper, state.paper);
+            gl.uniform1f(u.uBleedAmt, state.bleed);
+            gl.uniform1f(u.uDryAmt, state.dry);
+            gl.uniform1f(u.uGoldAmt, state.gold);
+            gl.uniform1f(u.uRealism, state.realism);
+            gl.uniform1f(u.uSplatAmt, state.splatter);
+            gl.uniform1f(u.uFallback, det.fallback);
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+        }
+
+        function detectionLabel() {
+          if (FAKE) return "合成";
+          if (FAKESEG) return "合成マスク";
+          if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
+          if (mpState === "error") return "検知エラー";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
+          return "待機";
+        }
+
+        function updateChip() {
+          statusChip.textContent = FAKE
+            ? "入力 · 合成 (fakesource=1)"
+            : `検知 · ${detectionLabel()}`;
+          statusChip.classList.toggle(
+            "hidden", FAKE ? performance.now() - bootWall > 4000 : false);
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          const dt = FREEZE ? 0 : rawDt;
+
+          haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || FAKESEG || haveVideo || mpState === "ready";
+
+          if (!state.pauseAnim) animTime += dt;
+          updateDetection(dt);
+
+          // ?prewarm=<sec>: deterministic fast-forward before __artReady, spread
+          // over several rAF frames and synced with a 1x1 readPixels so the
+          // preroll never parks the compositor for tens of seconds — under
+          // swiftshader a single blocking preroll stalls everything (CRAFT §C4).
+          if (prewarmLeft > 0) {
+            const n = Math.min(16, prewarmLeft);
+            for (let i = 0; i < n; i++) {
+              if (!state.pauseAnim) animTime += PREWARM_DT;
+              updateDetection(PREWARM_DT);
+              stepSim(PREWARM_DT);
+            }
+            prewarmLeft -= n;
+            glSync();
+          }
+
+          stepSim(dt);
+          present();
+
+          if (!readyStamped && hasInput && prewarmLeft <= 0) {
+            glSync();               // the first REAL frame has completed
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
+              canvas.height} / 墨場 ${fieldW}×${fieldH} / 検知 ${detectionLabel()}`;
+            updateChip();
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. With ?fakesource=1 the synthetic scene drives the
+           pipeline and MediaPipe is never touched, but getUserMedia still runs
+           so the three error paths stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay("requesting", "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.");
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay("error", "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8899) or HTTPS, then reload.");
+            retryCamera.disabled = false;
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.");
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 }, height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            retryCamera.disabled = false;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+            if (!FAKE) loadMediaPipe();
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay("error", "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true });
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay("error", "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true });
+            } else {
+              setOverlay("error", "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true });
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => { startCamera(); });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+        window.addEventListener("beforeunload", stopCamera);
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
+          // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
+          // scene drives the whole pipeline regardless of the camera (the video
+          // texture is never sampled, MediaPipe stays untouched), so the camera
+          // is only exercised to keep the three error overlays observable: on
+          // success the overlay hides and the fake art shows; on denial/no-camera
+          // the matching error overlay appears over the still-rendering art.
+          startCamera();
+          detectionTick();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay("error", "WEBGL SETUP ERROR",
+            error && error.message ? error.message : "Could not initialize the renderer.");
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>

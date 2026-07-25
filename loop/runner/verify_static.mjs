@@ -23,6 +23,12 @@ const RESERVED = [
   "common",
   "partition",
   "active",
+  // GLSL ES 3.00 also reserves the tessellation-stage words. `patch` cost a
+  // full verification round in kiin-seido: it compiles nowhere, and the only
+  // symptom is a silent all-black canvas (制作規約 §9-1).
+  "patch",
+  "resource",
+  "buffer",
 ];
 
 // LITERT_GUIDE.md §8 と同期(3点同期: 本リスト / LITERT_GUIDE §8 / 制作規約 §4)

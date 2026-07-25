@@ -39,3 +39,5 @@
 [https://dsflon.github.io/webgl2/fable5_senkohanabi.html](https://dsflon.github.io/webgl2/fable5_senkohanabi.html)
 
 [https://dsflon.github.io/webgl2/fable5_soumatou.html](https://dsflon.github.io/webgl2/fable5_soumatou.html)
+
+[https://dsflon.github.io/webgl2/fable5_kiin-seido.html](https://dsflon.github.io/webgl2/fable5_kiin-seido.html)
