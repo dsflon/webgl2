@@ -334,7 +334,7 @@
     ],
     "readyFlag": true,
     "audio": false,
-    "note": "合成人型で全駆動。?prewarm= で墨が育った状態を決定的に撮る(蓄積系)。",
+    "note": "実機の実写キャプチャを thumbs/manual/ に置いた手置き差し替え(スクリプトは manual を上書きしない)。合成人型のキャプチャでは実背景が残る様式が伝わらないため。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
