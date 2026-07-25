@@ -1074,6 +1074,19 @@
             vec3 haloCol = oklab2srgb(mix(uLab2, uLab3, 0.35));
             col += haloCol * halo * uLampGain * mix(0.10, 0.34, uLamp);
 
+            // 台が載っている面: 灯りの光だまりと、台自身の接地影。灯籠が
+            // 「置かれている」証拠。台の底が平坦に切れて浮いて見えるのを防ぐ。
+            float floorY = -H_P - 0.44;
+            if (v < floorY) {
+              float dy = floorY - v;
+              float ux = min(abs(u) / 1.25, 6.0);
+              float pool = exp(-dy * 3.4) * exp(-ux * ux);
+              float occl = exp(-min(dy / 0.055, 6.0)) *
+                           (1.0 - smoothstep(R_O * 0.60, R_O * 0.80, abs(u)));
+              col += haloCol * pool * (1.0 - occl * 0.9) * uLampGain * mix(0.05, 0.17, uLamp);
+              col *= 1.0 - 0.62 * occl;
+            }
+
             /* ---- lantern body --------------------------------------------- */
             float aaW = max(uPxWorld * 1.1, 1e-4);
             if (abs(u) < R_O * 1.30 && v < H_P + 0.46 && v > -H_P - 0.52) {
@@ -1114,6 +1127,9 @@
                 float shadow = 0.0;
                 // 芯の横ずれ: 光源が軸から外れると射線がわずかに傾く(一次近似)。
                 float latShift = uFlameLat + (fl.g * 2.0 - 1.0) * 0.012 * uFlicker;
+                // 1画素が覆う「筒の周方向の弧長」/ 半径。u = R·sinφ 写像は端で
+                // dφ/du が発散するので、この値は縁で急激に大きくなる。
+                float arcK = uPxWorld / (cosphi * Rv);
                 for (int k = 0; k < MAX_FIG; k++){
                   if (k >= nFig) break;
                   float psi, rk, yc, sc; int typ;
@@ -1121,36 +1137,58 @@
                   float Psi = wrapPi(psi + uTheta);
                   float rEff = clamp(rk + uEcc * cos(Psi - uEccA), 0.24, 0.90);
                   float blurW = R_FLAME * (R_O / rEff - 1.0) * pen;
-                  float span = (sc * 1.45 + blurW * 2.0) / rEff + 0.05;
+                  // この図形にとっての1画素の足跡(切り絵面での弧長)
+                  float arcPx = arcK * rEff;
+                  // 実効のなまし幅 = 半影 か 1画素の足跡 の大きい方。係数は 1.4 で
+                  // 「1画素分の箱フィルタ」を包む(0.75 では縁で1画素の孤立片が残った)。
+                  float smoothW = max(blurW, arcPx * 1.4);
+                  // カリング境界は「実際になましている幅」を含める。含めないと
+                  // 縁では dφ/画素 が大きいため continue が硬い段差になって縞に割れる。
+                  float span = (sc * 1.45 + smoothW * 2.0) / rEff + 0.05;
                   // 裏側(筒の向こう)の切り絵の影は前面には映らない
                   if (abs(Psi) > 1.5708 + span) continue;
                   float phiSrc = phi + latShift * (1.0 - rEff / R_O);
                   float dphi = wrapPi(phiSrc - Psi);
                   if (abs(dphi) > span) continue;
                   float sy = hL + (v - hL) * (rEff / Rv) - yc;
-                  if (abs(sy) > sc * 1.45 + blurW * 1.6) continue;
+                  if (abs(sy) > sc * 1.45 + smoothW * 1.6) continue;
                   vec2 p = vec2(dphi * rEff, sy) / sc;
                   float d = figSdf(typ, p);
                   // 手切りの紙の縁(座標由来・時間なし)。生の距離場の露出を避ける。
-                  d += (vnoise(p * 5.2 + h11(float(k) + 0.37) * 41.0) - 0.5) * 0.040;
-                  // 半影 = smoothstep 幅。端(φ→±90°)の潰れに対する解析的 AA 下限。
-                  float aaArc = uPxWorld * rEff / (cosphi * Rv);
-                  float wdt = max(blurW, aaArc * 0.75) / sc + 1e-4;
+                  // 波長は sc/5.2。1画素がそれに迫る縁では折り返してノイズになるので、
+                  // 解像できる間だけ効かせる。
+                  float jitK = smoothstep(sc * 0.19, sc * 0.075, arcPx);
+                  d += (vnoise(p * 5.2 + h11(float(k) + 0.37) * 41.0) - 0.5) * 0.040 * jitK;
+                  float wdt = smoothW / sc + 1e-4;
                   float cov = 1.0 - smoothstep(-wdt, wdt, d);
                   float dens = mix(1.0, 0.76, clamp((blurW - 0.010) / 0.032, 0.0, 1.0));
-                  shadow = max(shadow, cov * dens);   // 純粋シルエット: 加算しない
+                  // 1画素が切り絵のディテール(脚・穂)を丸ごと飲む領域は、どんな
+                  // なまし幅でも輪郭を再構成できない。孤立片に割れる前に滑らかに
+                  // 消して縁の減光に溶かす(グレージング側の可読限界)。
+                  float legible = smoothstep(sc * 0.085, sc * 0.030, arcPx);
+                  shadow = max(shadow, cov * dens * legible);   // 純粋シルエット: 加算しない
                 }
                 shadow *= smoothstep(0.0, 0.10, cosphi);   // 端で滑らかに消す
                 if (uDebug == 2) shadow = 0.0;
 
                 /* ------------- 和紙の繊維 ------------------------------- */
+                // 楮の長い繊維が幾方向にも重なって漉かれている紙。等方 fbm の高周波を
+                // そのまま乗せると 1px の軸整列した暗点(= 埃)になるので、細長い
+                // 異方性(周方向:高さ = 1:10 前後)の単一オクターブ noise を3方向に
+                // 重ねて「筋」を作る。暗側だけに偏らせず明暗の両側へ振らせる。
                 vec2 fp = vec2(phi * R_O, v);
-                float fine   = fbm3(fp * 26.0);
-                float strand = fbm3(vec2(fp.x * 7.0, fp.y * 40.0));
+                // 繊維の太さを常に数ピクセルに保つ(低解像度で点/塵に落ちない)
+                float fs = clamp(0.0052 / max(uPxWorld, 1e-5), 0.28, 1.0);
+                vec2 fa = mat2( 0.966,  0.259, -0.259, 0.966) * fp;   //  +15°
+                vec2 fb = mat2( 0.839, -0.545,  0.545, 0.839) * fp;   //  -33°
+                vec2 fc = mat2( 0.242,  0.970, -0.970, 0.242) * fp;   //  +76°
+                float t1 = vnoise(vec2(fa.x * 4.0, fa.y * 40.0) * fs) - 0.5;
+                float t2 = vnoise(vec2(fb.x * 3.0, fb.y * 29.0) * fs + 19.3) - 0.5;
+                float t3 = vnoise(vec2(fc.x * 5.0, fc.y * 52.0) * fs + 43.1) - 0.5;
+                float threads = t1 + t2 * 0.85 + t3 * 0.70;
+                float cloud = fbm3(fp * 4.2) - 0.5;    // 紙厚の低周波むら
                 float fibAmp = uWashi * smoothstep(0.0, 0.26, cosphi) * mix(1.0, 0.28, shadow);
-                float fib = 1.0 + ((fine - 0.5) * 0.40 + (strand - 0.5) * 0.28) * fibAmp;
-                float speck = hash12(floor(fp * 74.0));
-                fib *= 1.0 - 0.30 * step(0.9885, speck) * fibAmp;
+                float fib = 1.0 + (threads * 0.40 + cloud * 0.30) * fibAmp;
 
                 /* ------------- 縦桟(等間隔の暗帯) ---------------------- */
                 float rd = abs(fract(phi * NRIB / TAU + 0.5) - 0.5) * (TAU / NRIB);
@@ -1169,9 +1207,23 @@
               }
 
               if (woodMask > 0.0) {
-                // 木部: ほぼ黒に沈むが、紙から漏れる灯りが縁を微かに温める
+                // 木部(笠・上下輪・支柱・台)は轆轤挽きの丸物。光源が内側にあるので
+                // 正面中央は灯を浅い角度で受けて明るく、輪郭へ向かって暗く落ちる
+                // (円柱の cos)。紙の上下開口から漏れる光が笠の裏と台の甲を温める。
+                // ベタ塗りの軸整列矩形に見えないよう、この階調と木目を必ず持たせる。
+                float wRef = max(hw, 0.09);
+                float wsn = clamp(u / wRef, -1.0, 1.0);
+                float wcos = sqrt(max(1.0 - wsn * wsn, 0.0));
                 float leak = exp(-max(abs(v) - H_P, 0.0) * 3.2) * uLampGain * mix(0.4, 1.0, uLamp);
-                vec3 wood = mix(vec3(0.040, 0.026, 0.019), vec3(0.20, 0.108, 0.052), leak * 0.8);
+                float wlit = leak * (0.28 + 0.72 * pow(wcos, 0.85));
+                // 輪郭際に回り込む淡い縁光(控えめに)
+                float wrim = (1.0 - wcos) * (1.0 - wcos) * leak * 0.30;
+                // 木目: 横木(笠・輪・台)は繊維が水平に走る。低振幅・明暗両側。
+                float wg = (vnoise(vec2(u * 5.5, v * 62.0)) - 0.5)
+                         + (vnoise(vec2(u * 2.3, v * 27.0) + 13.7) - 0.5) * 0.7;
+                vec3 wood = mix(vec3(0.030, 0.020, 0.015), vec3(0.235, 0.128, 0.062),
+                                clamp(wlit * 0.88 + wrim, 0.0, 1.0));
+                wood *= 1.0 + wg * 0.22;
                 if (uDebug == 1) wood = vec3(0.0);
                 surf = mix(surf, wood, woodMask / max(max(surfA, woodMask), 1e-4));
                 surfA = max(surfA, woodMask);
