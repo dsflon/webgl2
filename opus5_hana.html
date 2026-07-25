@@ -12,20 +12,34 @@
   モバイル recipe・検証フック)/ fable5_kotonoha-shigure.html(マイク解析)。
 
   様式解析(視覚的不変量。優先度 1>2>3>4>5>6):
-    1. 音が進めるライフサイクル — 花は舞うだけの花びらではなく、根を持つ株として
-       芽吹き、茎が伸び、蕾が膨らみ、開花し、やがて散る。段階を進めるのは音だけ
-       (持続音=伸長 / アタック=開花 / 無音=萎れ)。株は固定プールの状態機械で、
-       段階は連続量 stage∈[0,4.6] として GPU の状態テクスチャに持つ。
+    1. 音と風が進めるライフサイクル — 花は舞うだけの花びらではなく、根を持つ株と
+       して芽吹き、茎が伸び、蕾が膨らみ、開花し、散って**実を結ぶ**。段階を進める
+       のは音(持続音=伸長 / アタック=開花 / 無音=萎れ)と、**画面を渡っていく突風**
+       (「風に綻ぶ花になりたい」= 開花を仕上げるのは風。ゆえに開花は帯となって
+       伝播する)。散華後の実は減衰を 0.30 倍にして残る(「それぞれの実がたわわ」)。
+       株は固定プールの状態機械で stage∈[0,4.6] を GPU の状態テクスチャに持つ。
     2. 人物は実写・周囲は花園 — 地はカメラ映像そのもの(バーチャル背景にしない)。
-       抽象度場 =(周縁 + fbm パッチ − 人物近傍)で背景だけが夜の花園へ溶ける。
-       距離だけで抽象化すると人型ハロー=切り抜きが再発する。花は人物の周縁帯と
-       画面下から芽吹き、体の外へ向かって咲く(向きは −grad(aura) と上方向の合成)。
+       抽象度場 =(周縁のなめらかな夕暮れ − 人物近傍)で背景だけが夜の花園へ沈む。
+       fbm パッチによる斑は使わない(実写の上では黒い染みに見えるため)。
+       **花は人体から生えない** — 根は大地に置く: 画面下の花壇 / 左右の土手 /
+       天井から垂れる藤の滝 の3種のみ。人物とその近傍帯は発芽から明示的に除外し、
+       歌う人の近くでは「密度が増す」だけにする(生えるのではない)。
     3. 音の要素が別々の視覚量に写る — 音量=開き・発光・舞い上がり / 声色(重心)=
        色相 / 音高=茎の伸びる高さ / アタック=一斉開花と花びらの射出 / 息のノイズ=
        綿毛と花びら縁のかすれ / ビブラート=揺れ。ひとつの量に束ねない。
-    4. 花は離散した個体 — 丸いボケ玉にしない。深い花弁スキャロップ+花弁間の暗い
-       スリット+彩度のある花芯、茎・葉・蕾・穂を持つ。散った花びらは先の尖った
-       涙型で tumble する。3種(小花/大輪/穂)+綿毛。
+    4. 花は写実的な立体 — 丸いボケ玉にも、正面向きの放射ロゼットにもしない。
+       花冠は seed 由来の3D姿勢(cosTilt/roll)を持ち、花の自平面で花弁を組んでから
+       前縮(foreshorten)する。1枚ごとに幅プロファイル(喉で細く2/3で最大)・先端の
+       切れ込み・羽毛状の縁・反り由来の擬似法線による陰影・先端の透過光・放射脈・
+       表面のむら・個体差のある色を持ち、傾きで手前/奥の花弁が前後する。喉は奥へ
+       ずれる(=最強の立体キュー)。葉は非対称で主脈に沿って折れ、側脈と鋸歯を持つ。
+       花冠の傾きは sqrt バイアスで 45〜80° に寄せる(a*a は0側=正面に偏るため誤り)。
+       約4割は**背を向けた花**として萼と花弁の外側(緑寄り・鈍い・萼脈)を描く。
+       散った花びらは平板なアーモンドにしない: 主脈を軸に巻いた円筒面として扱い、
+       巻くほど画面上の幅が縮み、陰影は midrib から cos(φ) で落ち、外縁は裏返って
+       **淡い裏面**と折り目の光る線を見せる。シルエットは3種(桜=先端に切れ込み /
+       蓮=尖る / 丸)、爪部は生成り、放射脈あり。tumble で薄刃↔広面を往復する。
+       大輪は二重花冠。奥行き(seed)で大きさ・彩度・被写界深度が変わる。
     5. 有界性 — 株と花びらは固定プール(=構造的に有界)。加算でなく前乗算アルファの
        重ね合わせで、発光はブルーム+肩付きトーンマップに通す(白飛びしない)。
        無音が続けば萎れて散り、余白が戻る。
@@ -51,8 +65,10 @@
     [P6 field]  fieldT★ を (0,0,0,0) にクリアし前乗算アルファで重ねる:
                 茎+葉 → 花冠(蕾/花/穂) → 花びら+綿毛(すべて instanced quad)
     [P7 bloom]  fieldT の明部を抽出 → 2段ダウンサンプル+ぼかし        b1 b2
-    [P8 comp]   地=実写カメラ → 抽象度場(周縁+fbmパッチ−人物近傍)で方向性スメア/
-                彩度落ち/夜の花園へ沈める → field を前乗算合成 → 人物のコアを
+    [P8 comp]   地=実写カメラ → 抽象度場(周縁の夕暮れ−人物近傍)で方向性スメア/
+                彩度落ち/夜の花園へ沈める → 濡れた床の反射(field を水平線で鏡像し
+                4タップぼかし+ゆらぎ+減衰。teamLab 的な暗室の床)→ field を
+                前乗算合成 → 人物のコアを
                 45% 手前に戻す(歌う人が判読できること)→ ブルーム加算 →
                 肩付きトーンマップ・粒子・周辺減光
 
@@ -527,8 +543,8 @@
         // Rooted plants live in a tiny state texture (one texel per plant, two
         // MRT attachments). The pool is FIXED, which is what bounds the picture
         // (invariant 5): flowers can never accumulate past PLANT_N.
-        const PLANT_W = IS_SOFT ? 14 : (COARSE ? 16 : 28);
-        const PLANT_H = IS_SOFT ? 6 : (COARSE ? 7 : 10);
+        const PLANT_W = IS_SOFT ? 14 : (COARSE ? 20 : 34);
+        const PLANT_H = IS_SOFT ? 6 : (COARSE ? 9 : 13);
         const PLANT_N = PLANT_W * PLANT_H;      // 84 / 112 / 280
         const STEM_SEGS = 7;                    // quads per stem
         const LEAF_N = 3;                       // leaves per plant
@@ -790,6 +806,34 @@
             float f = e < 1.0 ? 0.13 * e : 0.13 + 0.87 * (e - 1.0);
             return hgt * f;
           }
+          // ---- 3D POSTURE. Real flowers face every which way; a bed of
+          // frontal rosettes is the single strongest "cheap CG" cue. Derived from
+          // the seed so it needs no extra state. Returns (cosTilt, sinTilt, roll):
+          // cosTilt 1 = looking straight into the corolla, 0.15 = nearly edge-on.
+          vec4 plantFacing(float seed) {
+            float a = h11(seed * 61.3 + 7.7);
+            // NOTE: a*a piles up near ZERO, which is near-frontal — the exact
+            // opposite of what a bed needs. sqrt puts the mass at 45°..80°, so
+            // most blossoms are seen at an angle and only a few face the lens.
+            float tilt = 0.26 + 1.12 * sqrt(a);
+            float roll = (h11(seed * 71.9 + 2.2) - 0.5) * PI2;
+            // and a good share of a real bed has its BACK to the lens: what you
+            // see there is the calyx and the outsides of the petals, not a face
+            float away = h11(seed * 97.0 + 5.5) < 0.38 ? 1.0 : 0.0;
+            return vec4(max(cos(tilt), 0.13), sin(tilt), roll, away);
+          }
+          // 0 = far (small, hazy, cool), 1 = near (large, soft-edged)
+          float plantDepth(float seed) { return h11(seed * 83.1 + 3.9); }
+
+          // 「風に綻ぶ花になりたい」— a gust that TRAVELS across the garden. It is
+          // the wind, not the loudness, that finishes an opening: buds crack open
+          // in the wake of a gust, and the whole bed leans in waves.
+          float windAt(vec2 p, float t) {
+            float ph = p.x * 1.15 + p.y * 0.30 - t * 0.30;
+            float g = 0.5 + 0.5 * sin(ph * PI2);
+            return clamp(g * (0.40 + 0.80 * vnoise(p * 1.7 + vec2(t * 0.06, 0.0))),
+              0.0, 1.0);
+          }
           // The stem: a curved line rooted at rootA (ASPECT space), leaning along
           // ang, permanently bent by its seed and swaying with the music. s runs
           // 0 at the root → 1 at the tip.
@@ -800,6 +844,10 @@
             float bend = (h11(seed * 7.7 + 3.1) - 0.5) * 0.42;
             float sw = sin(t * (0.55 + 0.75 * h11(seed * 3.3 + 4.7)) + seed * 19.0) *
               swayAmt;
+            // the travelling gust bends every stem in the same direction as it
+            // passes, which is what makes a field read as wind rather than as
+            // each stalk wobbling on its own
+            sw += (windAt(rootA, t) - 0.45) * (0.55 + 1.5 * swayAmt);
             float lat = (bend + sw) * s * s;
             return rootA + d * (s * len) + pp * (lat * len);
           }
@@ -1003,6 +1051,7 @@
           uniform float uGrowth;
           uniform float uFall;
           uniform float uHueMove;
+          uniform float uTime;
           uniform vec4 uAudA;   // rms, centroid, zcr, onset envelope
           uniform vec4 uAudB;   // sustain, pitch, vibrato, arc
           ${CHUNK_NOISE}
@@ -1043,48 +1092,51 @@
                 (0.35 + 0.95 * arc);
               float pr = rate * uDt / max(uCount, 1.0);
               if (hash12(vec2(idx * 1.71, uSeed * 0.93)) < pr) {
-                bool wantEdge = uPresent > 0.25 &&
-                  hash12(vec2(idx * 3.31, uSeed * 1.77)) < 0.66;
                 bool got = false;
+                float hang = 0.0;
                 vec2 cand = vec2(0.5);
                 for (int k = 0; k < 10; k++) {
                   vec2 c = hash22(vec2(idx * 5.13 + float(k) * 7.31,
                     uSeed * 2.11 + float(k) * 3.70));
                   float m = texture(uMask, c).r;
                   float sf = texture(uSoft, c).r;
-                  // the soft edge band: just OUTSIDE the silhouette (mask low,
-                  // blurred mask still high) — flowers hug the performer without
-                  // ever being drawn from the mask contour itself (CRAFT §A2)
-                  float band = clamp(sf - m, 0.0, 1.0);
-                  if (!got && wantEdge && band > 0.045 && m < 0.42 && sf > 0.05) {
+                  float au = texture(uAura, c).r;
+                  // 「大地を強く踏みしめて」— roots go in the GROUND. Nothing may
+                  // germinate on the performer or in the band hugging them: a
+                  // flower growing out of a person's shoulder is the one thing
+                  // that breaks the reading of the whole piece.
+                  if (m > 0.10 || sf > 0.32) continue;
+                  float bed = 1.0 - smoothstep(0.02, 0.30, c.y);      // bottom bed
+                  float wallL = 1.0 - smoothstep(0.02, 0.24, c.x);
+                  float wallR = 1.0 - smoothstep(0.02, 0.24, 1.0 - c.x);
+                  float wall = max(wallL, wallR) *
+                    (1.0 - smoothstep(0.30, 0.98, c.y));             // side banks
+                  // and a third bed overhead: trailing falls that hang DOWN into
+                  // the room, which is what fills a wall of flowers instead of
+                  // leaving the upper frame empty
+                  float fall = smoothstep(0.70, 0.98, c.y);
+                  float site = max(max(bed, wall * 0.88), fall * 0.92);
+                  hang = fall * 0.92 > max(bed, wall * 0.88) ? 1.0 : 0.0;
+                  // the singer's presence enriches the bed NEARBY — the song
+                  // makes the garden thicker where they stand, without a single
+                  // stem touching them
+                  float near = smoothstep(0.02, 0.30, au) * uPresent;
+                  float clump = fbm(c * vec2(uAspect, 1.0) * 3.2 + 11.0);
+                  if (!got && site > 0.20 && clump > 0.40 - 0.20 * near) {
                     got = true;
                     cand = c;
-                  }
-                  if (!got && !wantEdge) {
-                    // the flower bed along the bottom of the frame, clumped by a
-                    // static fbm so there are gaps instead of a uniform lawn
-                    float ground = 1.0 - smoothstep(0.03, 0.34, c.y);
-                    if (ground > 0.25 && m < 0.14 &&
-                        fbm(c * vec2(uAspect, 1.0) * 3.5) > 0.40) {
-                      got = true;
-                      cand = c;
-                    }
                   }
                 }
                 if (got) {
                   root = cand;
-                  // grow AWAY from the body: -grad(aura) points outward. Blended
-                  // with straight up so nothing grows downward off the shoulders.
-                  float aL = texture(uAura, cand - vec2(uTexel.x, 0.0)).r;
-                  float aR = texture(uAura, cand + vec2(uTexel.x, 0.0)).r;
-                  float aB = texture(uAura, cand - vec2(0.0, uTexel.y)).r;
-                  float aT = texture(uAura, cand + vec2(0.0, uTexel.y)).r;
-                  vec2 gA = vec2(aR - aL, aT - aB) * 0.5;
-                  float gLen = length(gA);
-                  vec2 outw = gLen > 1e-5 ? -gA / gLen : vec2(0.0, 1.0);
+                  // rooted in the earth: it grows UP, with its own lean. Stems on
+                  // the side banks lean into the room.
                   float lean = hash12(vec2(idx * 11.7, uSeed * 5.19)) - 0.5;
-                  vec2 d = normalize(vec2(0.0, 1.0) +
-                    outw * (wantEdge ? 0.85 : 0.12) + vec2(lean * 0.55, 0.0));
+                  float inward = (cand.x < 0.5 ? 1.0 : -1.0) *
+                    (1.0 - smoothstep(0.06, 0.30, min(cand.x, 1.0 - cand.x))) * 0.45;
+                  // a fall grows DOWNWARD out of the ceiling bed
+                  vec2 d = normalize(vec2(lean * 0.42 + inward,
+                    hang > 0.5 ? -1.0 : 1.0));
                   ang = atan(d.y, d.x);
                   seed = hash12(vec2(idx * 9.13, uSeed * 4.31));
                   // TIMBRE → HUE. The centroid moves the CENTRE of the
@@ -1104,7 +1156,7 @@
                   }
                   // PITCH → HEIGHT. A high sustained note grows a tall stem.
                   hgt = clamp((0.070 + 0.135 * h11(seed * 7.7 + 2.3)) *
-                    (0.55 + 0.95 * pit), 0.045, 0.30);
+                    (0.55 + 0.95 * pit) * (hang > 0.5 ? 1.45 : 1.0), 0.045, 0.42);
                   stage = 0.0;
                   wilt = 0.0;
                 }
@@ -1125,13 +1177,24 @@
               } else {
                 ds = 0.06 + 1.00 * rms + 1.40 * ons;
               }
+              // 「せめて私は手を結び 風に綻ぶ花になりたい」— the gust is what
+              // finishes an opening. A bud waits, and cracks open as the wind
+              // reaches it, so the bloom travels across the bed as a wave
+              // instead of every flower opening at the same instant.
+              float gust = windAt(root * vec2(uAspect, 1.0), uTime);
+              if (stage > 1.9 && stage < 3.8) ds += 0.85 * gust * gust;
               stage = min(stage + ds * uDt * (0.35 + 1.6 * uGrowth), 4.6);
               // 有界性: silence dries any plant; a fully open flower ages anyway
               // and sheds faster on attacks late in the song (一斉散華)
               float quiet = 1.0 - smoothstep(0.02, 0.26, sus);
               float bloomed = smoothstep(3.5, 4.2, stage);
-              wilt += uDt * ((0.010 + 0.115 * quiet) +
-                bloomed * (0.022 + 0.16 * uFall + 0.55 * ons * uFall * arc));
+              float wr = (0.010 + 0.115 * quiet) +
+                bloomed * (0.022 + 0.16 * uFall + 0.55 * ons * uFall * arc);
+              // 「それぞれの実がたわわなれば」— once the petals are gone the head
+              // sets fruit, and the fruit LINGERS: the garden accumulates what the
+              // song has already sung instead of erasing it.
+              if (wilt > 0.62) wr *= 0.30;
+              wilt += uDt * wr;
               if (wilt >= 0.999) {
                 wilt = 1.0;
                 stage = 0.0;
@@ -1407,15 +1470,27 @@
               col *= 0.65 + 0.85 * pow(1.0 - abs(vLocal.y), 0.8);
               col += vec3(0.10, 0.16, 0.10) * smoothstep(0.55, 1.0, across);
             } else {
-              // --- leaf: a slender pointed blade with a central vein
+              // --- leaf: an ASYMMETRIC blade folded along its midrib, with
+              // secondary veins branching off it and a finely serrated edge. A
+              // symmetric ellipse with one centre line reads as a paper cut-out.
               vec2 p = vLocal;
               float ty = clamp(p.x * 0.5 + 0.5, 0.0, 1.0);
               float prof = pow(clamp(sin(ty * 3.14159265), 0.0, 1.0), 0.72);
+              float skew = 0.13 * sin(ty * 3.1 + vSeed * 5.0);   // no leaf is symmetric
               float halfw = 0.86 * prof;
-              cov = smoothstep(1.0, 0.55, abs(p.y) / max(halfw, 1e-3));
-              float vein = smoothstep(0.13, 0.0, abs(p.y)) * prof;
-              col *= 0.72 + 0.55 * prof;
-              col += vCol * 0.55 * vein;
+              float across = (p.y - skew) / max(halfw, 1e-3);
+              cov = smoothstep(1.0, 0.58, abs(across));
+              // serration: small teeth along the margin
+              cov *= 1.0 - 0.30 * smoothstep(0.66, 1.0, abs(across)) *
+                (0.5 + 0.5 * sin(ty * 44.0 + vSeed * 20.0));
+              float rib = smoothstep(0.10, 0.0, abs(across));
+              float sec = 0.5 + 0.5 * sin(abs(across) * 3.2 - ty * 24.0 + vSeed * 7.0);
+              // the fold: the two halves of the blade face different ways, so one
+              // catches the light and the other falls away
+              float fold = 1.0 - abs(across);
+              col *= 0.58 + 0.46 * prof + 0.34 * fold;
+              col += vCol * 0.30 * sec * smoothstep(0.12, 0.85, abs(across));
+              col += vCol * 0.50 * rib;
               cov *= 1.0 - 0.35 * wilt;
             }
             float a = clamp(cov, 0.0, 1.0) * 0.96;
@@ -1446,6 +1521,8 @@
           out vec3 vCol;
           out float vSeed;
           out float vGlow;
+          out vec4 vFace;    // cosTilt, sinTilt, roll, backTurned
+          out float vDepth;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
           ${CHUNK_PLANT}
@@ -1459,6 +1536,8 @@
             vCol = vec3(0.0);
             vSeed = 0.0;
             vGlow = 0.0;
+            vFace = vec4(1.0, 0.0, 0.0, 0.0);
+            vDepth = 0.5;
             float pid = float(gl_InstanceID);
             ivec2 tc = ivec2(int(mod(pid, uPlantW)), int(floor(pid / uPlantW)));
             vec4 A = texelFetch(uPlantA, tc, 0);
@@ -1487,14 +1566,21 @@
             float bloomT = smoothstep(3.05, 4.25, stage);
             // the three stage weights SUM TO 1, so a fully open flower is exactly
             // plantHeadSize and never twice it
+            // depth: a bed needs near and far individuals, not one size
+            float depth = plantDepth(seed);
+            vDepth = depth;
+            vFace = plantFacing(seed);
             float scale = plantHeadSize(seed, species) * (0.55 + 1.35 * uSize) *
-              (0.14 * shoot + 0.26 * budT + 0.60 * bloomT) * (1.0 - 0.20 * wilt);
+              (0.14 * shoot + 0.26 * budT + 0.60 * bloomT) * (1.0 - 0.20 * wilt) *
+              mix(0.60, 1.32, depth);
             // a bloom breathes with the loudness of the voice
             scale *= 1.0 + 0.10 * uAudA.x * bloomT;
             vec3 col = flowerHue(hue);
             // late in the song the whole field warms and deepens
             col = mix(col, col * vec3(1.05, 0.90, 0.94), 0.35 * uAudB.w);
             col = mix(col, col * vec3(0.72, 0.55, 0.52), 0.55 * wilt);
+            // aerial perspective: distance drains and cools a blossom
+            col = mix(col * vec3(0.72, 0.78, 0.98), col, 0.35 + 0.65 * depth);
             vCol = col;
             vAttr = vec4(bloomT, plantPetals(seed), wilt, species);
             vSeed = seed;
@@ -1506,7 +1592,10 @@
             float cs = cos(rot), sn = sin(rot);
             vec2 q = vLocal;
             vec2 rq = vec2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
-            vec2 P = c + rq * scale;
+            // a tilted head is carried on the far side of the stem tip, which
+            // is how a real flower hangs off its pedicel
+            vec2 off = vec2(-sin(vFace.z), cos(vFace.z)) * vFace.y * scale * 0.34;
+            vec2 P = c + off + rq * scale;
             gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
           }
         `;
@@ -1518,6 +1607,8 @@
           in vec3 vCol;
           in float vSeed;
           in float vGlow;
+          in vec4 vFace;
+          in float vDepth;
           out vec4 fragColor;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
@@ -1561,38 +1652,180 @@
               vec3 budCol = mix(LEAF_D, LEAF_L, 0.30 + 0.45 * ribs);
               budCol = mix(budCol, vCol, smoothstep(0.25, 0.95, p.y) * 0.62);
 
-              // ---- open flower: WIDE rounded petals with dark seams between
-              // them, a lighter tip and a small saturated stamen. Wide lobes and
-              // a restrained core are what keep it from reading as a star or a
-              // sparkle (CRAFT §B1).
-              float k = 0.5 + 0.5 * cos(ang * petals + vSeed * 6.0);
-              float petal = pow(k, 0.30);
-              float ragged = 1.0 - 0.07 * vnoise(vec2(ang * 6.0, vSeed * 30.0));
-              float rad = mix(0.60, 1.0, petal) * ragged * (1.0 - 0.14 * wilt);
-              rad *= mix(0.34, 1.0, bloomT);          // petals unfold outward
-              float edge = smoothstep(rad, rad * 0.90, r);
-              // the seam only bites the OUTER half of the petal, so the flower
-              // keeps a continuous disc near the middle instead of splitting
-              // into separate rays
-              float seam = mix(1.0, smoothstep(0.02, 0.34, petal),
-                smoothstep(0.30, 0.95, r / max(rad, 1e-3)));
-              // petal shading: darker at the throat, lighter toward the tip
-              float shade = 0.62 + 0.55 * smoothstep(0.10, 0.95, r / max(rad, 1e-3));
-              float vein = smoothstep(0.65, 1.0, k) *
-                (0.5 + 0.5 * sin(r * 22.0 + vSeed * 12.0)) * 0.08;
-              float core = smoothstep(0.30 * mix(1.4, 1.0, bloomT), 0.02, r);
-              vec3 fCol = vCol * (edge * seam * shade * (0.95 - 0.32 * wilt) + vein);
-              // the stamen is the only emissive part; it can exceed 1.0 so the
-              // bloom pass gives the flower a lamp instead of a halo
-              fCol += mix(vCol, vec3(1.0, 0.84, 0.42), 0.50) * core *
+              // ---- open flower. The corolla is built in the FLOWER'S OWN
+              // PLANE and then foreshortened by its 3D facing, so a bed shows
+              // blossoms turned away, in profile and full-face. Each petal is an
+              // individual blade: a width profile that pinches at the throat and
+              // swells at two thirds, a notched tip, curl shading from a faked
+              // normal, translucent tips, radial veins, and near/far petal
+              // ordering from the tilt. A radial cos() rosette is what read as
+              // a clip-art daisy.
+              float cosT = vFace.x;
+              float sinT = vFace.y;
+              float rollA = vFace.z;
+              float cr = cos(-rollA);
+              float sr = sin(-rollA);
+              vec2 pr = vec2(p.x * cr - p.y * sr, p.x * sr + p.y * cr);
+              vec2 fp = vec2(pr.x, pr.y / cosT);     // un-squash into the corolla
+              float rr = length(fp);
+              float aa2 = atan(fp.y, fp.x);
+              float open = mix(0.30, 1.0, bloomT);
+              float petalW = 0.0;
+              float bestScore = -9.0;
+              vec3 fCol = vec3(0.0);
+              // 大輪 gets a second, smaller inner whorl (most big flowers do)
+              float whorls = (species > 0.5 && species < 1.5) ? 2.0 : 1.0;
+              for (int wi = 0; wi < 2; wi++) {
+                if (float(wi) >= whorls) break;
+                float wsc = wi == 0 ? 1.0 : 0.62;
+                float woff = wi == 0 ? 0.0 : 0.5;
+                float ai = aa2 / PI2 * petals + woff;
+                float pidx = floor(ai);
+                float pf = (ai - pidx - 0.5) * 2.0;          // -1..1 across blade
+                float js = h11(vSeed * 17.0 + pidx * 3.7 + float(wi) * 11.0);
+                // no two blades on one flower are the same colour or length
+                float jv = h11(vSeed * 29.0 + pidx * 7.3 + float(wi) * 5.0);
+                float plen = (0.90 + 0.18 * js) * open * wsc * (1.0 - 0.16 * wilt);
+                float u = rr / max(plen, 1e-3);
+                if (u > 1.06) continue;
+                // BROAD blades that almost touch, leaving only a thin seam. A
+                // narrow blade turns the flower into a pinwheel / star.
+                float pwd = 0.74 + 0.34 * h11(vSeed * 23.0 + pidx * 5.1);
+                float wpro = min(pwd *
+                  pow(sin(clamp(u, 0.02, 1.0) * 3.14159265), 0.42), 0.97);
+                // a notch at the tip: very few petals end in a clean point
+                float notch = 1.0 - 0.26 * smoothstep(0.70, 1.0, u) *
+                  exp(-7.0 * pf * pf);
+                // the margin is feathered, and it wavers slightly: a hard
+                // mathematical edge is the last thing that says "vector art"
+                float wav = 1.0 + 0.05 * vnoise(vec2(u * 7.0, pidx * 3.0 + vSeed * 21.0));
+                float cov2 = (1.0 - smoothstep(wpro * 0.68, wpro * wav, abs(pf))) *
+                  (1.0 - smoothstep(0.84 * notch, notch * wav, u));
+                if (cov2 <= 0.003) continue;
+                // where this blade sits out of plane: the near half of a tilted
+                // flower catches the light and covers the far half
+                float pac = (pidx + 0.5 - woff) / petals * PI2;
+                float pz = sin(pac) * sinT;
+                float score = pz * 0.6 + cov2 * 0.5;
+                if (score <= bestScore) continue;
+                bestScore = score;
+                // curl: the blade bends back toward the tip
+                float curl = 0.62 * u * u;
+                vec3 nrm = normalize(vec3(pf * 0.55, curl + 0.30, 1.0 - 0.45 * curl));
+                vec3 L = normalize(vec3(-0.30, 0.60, 0.74));
+                float ndl = clamp(dot(nrm, L), 0.0, 1.0);
+                float lit = 0.44 + 0.78 * ndl + 0.26 * max(pz, 0.0);
+                // a petal is thin: light comes THROUGH the tip
+                float sss = pow(clamp(u, 0.0, 1.0), 1.7) * (0.30 + 0.50 * bloomT);
+                float vein = (0.5 + 0.5 * cos(pf * 9.0)) * smoothstep(0.12, 0.95, u);
+                // surface mottle: real petals are unevenly translucent
+                float mott = 0.90 + 0.20 * vnoise(vec2(u * 5.5, pf * 4.0 + vSeed * 13.0));
+                vec3 pcol = vCol * mix(0.90, 1.10, jv) * lit * mott *
+                  (1.0 - 0.11 * vein);
+                pcol += vCol * vec3(1.04, 0.88, 0.94) * sss * 0.52;
+                // a waxy sheen along the blade: the highlight runs across the
+                // curl, which is what makes a petal read as a surface with a
+                // thickness rather than as a filled outline
+                float sheen = pow(clamp(dot(nrm, normalize(vec3(-0.1, 0.9, 0.42))),
+                  0.0, 1.0), 7.0) * (1.0 - 0.5 * wilt);
+                pcol += mix(vec3(1.0), vCol, 0.45) * sheen * 0.30;
+                pcol *= 0.42 + 0.72 * smoothstep(0.0, 0.52, u);   // deep throat
+                pcol *= 1.0 - 0.34 * max(-pz, 0.0);               // far half shaded
+                // a translucent rim where the blade thins out to nothing
+                pcol += vCol * smoothstep(0.86, 1.0, u) * 0.22;
+                // the margin of a real blade curls back on itself, and what it
+                // shows there is the PALE UNDERSIDE with a lit line at the fold
+                float mrg = abs(pf) / max(wpro, 1e-3);
+                float backP = smoothstep(0.70, 0.98, mrg) *
+                  smoothstep(0.22, 0.85, u) * (0.30 + 0.70 * curl);
+                pcol = mix(pcol, mix(vCol, vec3(1.0, 0.96, 0.93), 0.58) *
+                  (0.42 + 0.38 * ndl), backP * 0.85);
+                pcol += vec3(1.0, 0.95, 0.92) *
+                  smoothstep(0.10, 0.0, abs(mrg - 0.80)) * curl * 0.22;
+                pcol *= 0.95 - 0.30 * wilt;
+                petalW = cov2;
+                fCol = pcol;
+              }
+              // ---- a blossom with its back to us. It keeps the PETAL
+              // SILHOUETTE (so it still reads as a flower, not a leaf) but shows
+              // the petal outsides and the calyx: duller, greener, ribbed by the
+              // sepals, with no throat and no stamen — you cannot see into a
+              // flower that faces away.
+              if (vFace.w > 0.5) {
+                float rb = length(fp);
+                float sep = 0.5 + 0.5 * cos(atan(fp.y, fp.x) * 5.0 + vSeed * 8.0);
+                vec3 outside = mix(mix(LEAF_D, LEAF_L, 0.28 + 0.34 * sep),
+                  vCol * 0.78, 0.30 + 0.34 * smoothstep(0.40, 1.0, rb));
+                // domed: the calyx catches the light at its shoulder
+                outside *= 0.58 + 0.60 * clamp(1.0 - rb, 0.0, 1.0) + 0.18 * sep;
+                float calyx = 1.0 - smoothstep(0.26, 0.50, rb);
+                outside = mix(outside, mix(LEAF_D, LEAF_L, 0.20) *
+                  (0.70 + 0.50 * sep), calyx * 0.82);
+                outside += vec3(0.10, 0.14, 0.09) *
+                  smoothstep(0.06, 0.0, abs(rb - 0.30)) * 0.8;
+                float bCov = clamp(petalW * (0.94 - 0.28 * wilt), 0.0, 1.0);
+                float mixB = smoothstep(0.10, 0.62, bloomT);
+                float cov3 = mix(budCov, bCov, mixB);
+                vec3 col3 = mix(budCol * budCov, outside * bCov, mixB);
+                float ab = clamp(cov3, 0.0, 1.0) *
+                  mix(1.0, 0.72, smoothstep(0.30, 0.0, vDepth));
+                if (ab <= 0.012) discard;
+                fragColor = vec4(col3, ab);
+                return;
+              }
+
+              // the throat, pushed toward the far side — on a tilted flower this
+              // offset centre is the strongest single 3D cue
+              vec2 tp = fp + vec2(0.0, 0.16 * sinT);
+              float tr2 = length(tp);
+              float core = smoothstep(0.30 * mix(1.5, 1.0, bloomT), 0.04, tr2);
+              float stam = smoothstep(0.17, 0.09, abs(tr2 - 0.19)) *
+                (0.45 + 0.55 * cos(atan(tp.y, tp.x) * 9.0 + vSeed * 21.0)) * bloomT;
+              fCol *= 1.0 - 0.55 * core;             // petals dip into the throat
+              fCol += mix(vCol, vec3(1.0, 0.84, 0.42), 0.50) * (core + stam * 0.55) *
                 (0.22 + 0.62 * vGlow) * (0.30 + 0.85 * bloomT);
-              float fCov = clamp(edge * seam + core * 0.35, 0.0, 1.0);
+              float fCov = clamp(petalW + (core + stam * 0.4) * 0.5, 0.0, 1.0);
 
               float mixT = smoothstep(0.10, 0.62, bloomT);
               cov = mix(budCov, fCov, mixT);
               col = mix(budCol * budCov, fCol, mixT);
+
+              // ---- 実: once the petals are spent the head sets fruit — two or
+              // three small berries with a hard specular dot, held on the calyx.
+              // 「それぞれの実がたわわなれば」
+              // only some species set a visible fruit, and it is a dark hip,
+              // not a bright bead
+              float fruitT = smoothstep(0.60, 0.90, wilt) * mixT *
+                (h11(vSeed * 43.0 + 6.1) < 0.55 ? 1.0 : 0.0);
+              if (fruitT > 0.004) {
+                float bcov = 0.0;
+                float spec = 0.0;
+                for (int bi = 0; bi < 3; bi++) {
+                  float fb = float(bi);
+                  vec2 bc = vec2(0.20 * cos(fb * 2.3 + vSeed * 11.0),
+                    -0.10 + 0.18 * sin(fb * 1.9 + vSeed * 7.0));
+                  float br = 0.13 + 0.05 * h11(vSeed * 19.0 + fb);
+                  float d2 = length((p - bc) * vec2(1.0, 1.06));
+                  bcov = max(bcov, 1.0 - smoothstep(br * 0.86, br, d2));
+                  spec = max(spec, 1.0 - smoothstep(br * 0.16, br * 0.34,
+                    length(p - bc - vec2(br * 0.30, br * 0.34))));
+                }
+                vec3 fruitCol = mix(vec3(0.22, 0.045, 0.075),
+                  vCol * vec3(0.34, 0.20, 0.24), 0.35);
+                fruitCol *= 0.60 + 0.55 * smoothstep(0.4, -0.5, p.y);
+                fruitCol += vec3(1.0, 0.86, 0.80) * spec * 0.34;
+                cov = mix(cov, clamp(bcov, 0.0, 1.0), fruitT);
+                col = mix(col, fruitCol * bcov, fruitT);
+              }
             }
-            float a = clamp(cov, 0.0, 1.0) * (1.0 - 0.35 * wilt);
+            // a bed has depth: the nearest and the farthest blossoms are off
+            // the focal plane, so their edges soften (and the far ones dim)
+            float defocus = abs(vDepth - 0.58);
+            float fruitKeep = smoothstep(0.55, 0.86, wilt);
+            float a = clamp(cov, 0.0, 1.0) *
+              (1.0 - 0.35 * wilt * (1.0 - fruitKeep));
+            a *= mix(1.0, 0.72, smoothstep(0.30, 0.0, vDepth));
+            a = mix(a, a * (0.55 + 0.45 * a), smoothstep(0.16, 0.46, defocus));
             if (a <= 0.012) discard;
             fragColor = vec4(col, a);   // col is already coverage-weighted
           }
@@ -1618,6 +1851,9 @@
           out float vKind;
           out float vSeed;
           out float vGlow;
+          out float vFlat;
+          out float vRoll;
+          out float vBow;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
           ${CHUNK_PALETTE}
@@ -1633,6 +1869,9 @@
             vKind = 0.0;
             vSeed = 0.0;
             vGlow = 0.0;
+            vFlat = 1.0;
+            vRoll = 0.5;
+            vBow = 0.0;
             int i = gl_InstanceID;
             int tw = int(uTexW);
             ivec2 tc = ivec2(i % tw, i / tw);
@@ -1652,15 +1891,31 @@
             vKind = tr.z;
             vSeed = B.z;
             vGlow = uGlow;
+            // size doubles as depth: the small ones are far away, so they are
+            // dimmer and cooler. Uniform bright confetti is what kills the fall.
+            float dep = clamp((tr.y - 11.0) / 27.0, 0.0, 1.0);
             vCol = flowerHue(B.w) * (tr.z > 0.5 ? 0.55 : 1.0);
+            vCol = mix(vCol * vec3(0.62, 0.70, 0.95), vCol, 0.30 + 0.70 * dep);
             // fades in as it detaches and out as it dies
             vAlpha = smoothstep(0.0, 0.06, ageF) * (1.0 - smoothstep(0.72, 1.0, ageF));
+            vAlpha *= 0.42 + 0.58 * dep;
             vec2 q = QUAD[gl_VertexID];
             vLocal = q;
             vec2 shape = q;
             if (tr.z < 0.5) {
               float stretch = 1.20 + 0.55 * clamp(length(vel) * 1.4, 0.0, 1.6);
-              shape = vec2(q.x * 0.52, q.y * stretch);
+              // TUMBLE: a falling petal turns over, so it flashes from a wide
+              // blade to a thin sliver and back. Without this every petal is a
+              // flat ellipse and the fall reads as paper confetti.
+              float tph = ageF * (5.0 + 12.0 * abs(tr.w)) + B.z * 13.0;
+              vFlat = 0.30 + 0.70 * abs(cos(tph));
+              // how tightly this blade is rolled, and how its midrib bows. Both
+              // are properties of the petal; the tumble only changes how much of
+              // the roll is turned toward us.
+              vRoll = (0.30 + 0.70 * h11(B.z * 11.0 + 3.3)) *
+                (0.55 + 0.45 * abs(sin(tph)));
+              vBow = (h11(B.z * 23.0 + 7.1) - 0.5) * 0.55;
+              shape = vec2(q.x * 0.62 * vFlat, q.y * stretch);
             }
             float cs = cos(rot), sn = sin(rot);
             vec2 rq = vec2(shape.x * cs - shape.y * sn, shape.x * sn + shape.y * cs);
@@ -1678,6 +1933,9 @@
           in float vKind;
           in float vSeed;
           in float vGlow;
+          in float vFlat;
+          in float vRoll;
+          in float vBow;
           out vec4 fragColor;
           ${CHUNK_NOISE}
           void main() {
@@ -1697,17 +1955,54 @@
               fragColor = vec4(c * a, a);
               return;
             }
-            // ---- petal: almond, pointed at both ends, with a centre vein
-            float ty = clamp(p.y * 0.5 + 0.5, 0.0, 1.0);
-            float prof = pow(clamp(sin(ty * 3.14159265), 0.0, 1.0), 0.62);
-            float halfw = 0.90 * prof;
-            float dx = abs(p.x) / max(halfw, 1e-3);
-            float body = smoothstep(1.0, 0.40, dx);
-            float vein = smoothstep(0.15, 0.0, abs(p.x)) * prof;
-            float a = body * vAlpha * 0.95;
+            // ---- petal: a CURLED SHEET, not a flat almond. The blade is a
+            // cylinder rolled about its own midrib, so (a) its screen width
+            // narrows as it rolls, (b) shading falls off as cos(φ) away from the
+            // midrib, and (c) the outermost band has turned past the silhouette,
+            // showing the PALE UNDERSIDE with a lit line along the fold. Three
+            // silhouettes — cleft sakura, drawn-out lotus point, round — plus a
+            // cream claw and fine veins. A single almond outline in flat colour
+            // is what read as confetti.
+            float u = clamp(p.y * 0.5 + 0.5, 0.0, 1.0);      // 0 claw → 1 tip
+            float shp = h11(vSeed * 7.3 + 1.7);
+            float prof;
+            float cleft = 0.0;
+            if (shp < 0.40) {
+              prof = pow(clamp(sin(pow(u, 0.86) * 3.14159265), 0.0, 1.0), 0.60);
+              cleft = 1.0;                                   // 桜: notched tip
+            } else if (shp < 0.74) {
+              prof = pow(clamp(sin(u * 3.14159265), 0.0, 1.0), 0.98) *
+                (1.0 - 0.22 * u);                            // 蓮: drawn point
+            } else {
+              prof = pow(clamp(sin(pow(u, 0.74) * 3.14159265), 0.0, 1.0), 0.42);
+            }
+            float halfw = 0.94 * prof;
+            float bow = vBow * (u * u - 0.30);               // the midrib bows
+            // the blade rolls harder toward the tip
+            float phimax = 0.28 + 1.55 * vRoll * smoothstep(0.05, 0.85, u);
+            float R = halfw / max(phimax, 0.20);
+            float screenHalf = max(R * sin(min(phimax, 1.40)), 1e-4);
+            float t = clamp(abs(p.x - bow) / screenHalf, 0.0, 1.0);
+            float body = (1.0 - smoothstep(0.88, 1.0, t)) *
+              (1.0 - smoothstep(0.90, 1.0, u));
+            if (cleft > 0.5) {
+              body *= 1.0 - 0.80 * smoothstep(0.78, 1.0, u) * exp(-13.0 * t * t);
+            }
+            float a = body * vAlpha * 0.86;
             if (a <= 0.006) discard;
-            // curl: one flank catches the light as the petal tumbles
-            vec3 c = vCol * (0.62 + 0.55 * smoothstep(-0.6, 0.9, p.x) + 0.30 * vein);
+            float phi = phimax * (0.55 * t + 0.45 * t * t);
+            float ndv = cos(phi);
+            float back = smoothstep(1.08, 1.34, phi);        // turned over
+            vec3 face = mix(vec3(1.0, 0.97, 0.91), vCol, smoothstep(0.02, 0.52, u));
+            face *= 0.60 + 0.64 * max(ndv, 0.0);
+            float vein = 0.5 + 0.5 * sin(t * 13.0 + u * 2.0 + vSeed * 17.0);
+            face *= 1.0 - 0.10 * vein * smoothstep(0.10, 0.92, u);
+            vec3 under = mix(vCol, vec3(1.0, 0.96, 0.94), 0.62) *
+              (0.40 + 0.32 * abs(ndv));
+            vec3 c = mix(face, under, back);
+            c += vec3(1.0, 0.95, 0.92) *
+              smoothstep(0.09, 0.0, abs(phi - 1.20)) * 0.28;
+            c *= mix(0.66, 1.0, vFlat);
             c *= 0.85 + 0.45 * vGlow;
             fragColor = vec4(c * a, a);
           }
@@ -1785,18 +2080,19 @@
             float auraW = texture(uAura, wp).r;
             float edgeM = smoothstep(0.16, 0.64,
               length((vUv - 0.5) * vec2(1.05, 1.0)));
-            float blotchF = smoothstep(0.34, 0.74, fbm4(vUv * ar * 2.2 + 13.0));
             // two break scales, so the photographic margin around the singer
             // shows up as PATCHES of the real room rather than as a contour glow
-            float brk = smoothstep(0.30, 0.78, fbm4(vUv * ar * 5.5 + 31.0));
-            float near = smoothstep(0.05, 0.50, auraW) *
-              (0.18 + 0.62 * blotchF + 0.42 * brk);
+            // (the fbm patch terms that used to mottle this veil are gone: on
+            // real footage they read as dirty black smudges drifting over the
+            // room, not as a garden. A smooth dusk falloff is what a dark room
+            // actually looks like.)
+            float near = smoothstep(0.05, 0.50, auraW) * 0.80;
             // the person's OWN pixels are the subject, not background: they stay
             // photographic, with the boundary torn by brush-scale noise so it can
             // never harden into a sticker edge (CRAFT §A2)
             float onBody = smoothstep(0.35, 0.82, m.r + ragged * 0.12);
-            float abst = clamp(uBgAbs * (0.30 + 0.55 * edgeM +
-              0.85 * blotchF * (0.35 + 0.65 * edgeM) - 0.62 * near), 0.0, 1.0);
+            float abst = clamp(uBgAbs * (0.42 + 0.72 * edgeM - 0.55 * near),
+              0.0, 1.0);
             abst *= 1.0 - 0.88 * onBody * uPresent;
 
             // ---- the ground: real footage, graded and dissolved -----------
@@ -1812,16 +2108,33 @@
             float gl0 = lumaf(camMix);
             // the night garden the background sinks into: a deep blue-violet
             // earth with a faint warm horizon, mottled so it is not a flat swatch
-            vec3 gardenA = vec3(0.014, 0.020, 0.036);
-            vec3 gardenB = vec3(0.040, 0.026, 0.052);
+            vec3 gardenA = vec3(0.008, 0.013, 0.030);
+            vec3 gardenB = vec3(0.028, 0.020, 0.055);
             vec3 garden = mix(gardenA, gardenB,
-              smoothstep(0.30, 0.70, fbm4(vUv * ar * 2.6 + 5.0)));
+              smoothstep(0.05, 0.95, vUv.y));      // smooth, not mottled
             garden += vec3(0.026, 0.017, 0.012) * (1.0 - smoothstep(0.0, 0.45, vUv.y));
             garden *= 0.45 + 0.85 * gl0;     // keep the footage's own light shape
             vec3 bg = mix(camMix, mix(vec3(gl0), camMix, 0.30) * 0.60, abst * 0.85);
             bg *= mix(1.0, 0.52, abst);      // dusk falloff away from the singer
             bg = mix(bg, garden, pow(abst, 1.05) * 0.95);
             bg = clamp(bg * uExposure, 0.0, 4.0);
+
+            // ---- the wet floor of a dark room: the garden repeats upside
+            // down below the horizon, softened and dimmed, with a slow ripple.
+            // 「大地を強く踏みしめて」— the ground is part of the picture.
+            float horizon = 0.235;
+            if (vUv.y < horizon) {
+              float t2 = 1.0 - vUv.y / horizon;             // 0 at horizon → 1 at bottom
+              float ry = horizon + (horizon - vUv.y) * 1.35;
+              float wob = 0.004 * sin(vUv.y * 46.0 + uTime * 0.55) * (0.3 + t2);
+              vec2 rv = vec2(vUv.x + wob, ry);
+              vec2 sp = vec2(0.0035 + 0.010 * t2, 0.0);
+              vec4 R = 0.25 * (texture(uField, rv + sp) + texture(uField, rv - sp) +
+                texture(uField, rv + sp.yx * 1.7) + texture(uField, rv - sp.yx * 1.7));
+              float fade = (1.0 - smoothstep(0.0, 1.0, t2)) * 0.72;
+              bg = bg * (1.0 - clamp(R.a, 0.0, 1.0) * fade) +
+                R.rgb * fade * vec3(0.80, 0.86, 1.05);
+            }
 
             // ---- the flower layer, premultiplied over the ground ----------
             vec3 col = bg * (1.0 - clamp(F.a, 0.0, 1.0)) + F.rgb;
@@ -1945,7 +2258,7 @@
             "uAlphaSlow", "uAlphaMot", "uReset", "uSource", "uMirror",
           ]),
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
-          plant: getLocations(programs.plant, [
+          plant: getLocations(programs.plant, ["uTime", 
             "uPlantA", "uPlantB", "uMask", "uSoft", "uAura", "uTexel", "uTexW",
             "uCount", "uDt", "uSeed", "uAspect", "uPresent", "uBloomAmt",
             "uGrowth", "uFall", "uHueMove", "uAudA", "uAudB",
@@ -2801,6 +3114,7 @@
             gl.uniform1f(u.uGrowth, state.growth);
             gl.uniform1f(u.uFall, state.fall);
             gl.uniform1f(u.uHueMove, state.hueMove);
+            gl.uniform1f(u.uTime, animTime);
             audioUniforms(u);
           });
 
