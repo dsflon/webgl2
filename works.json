@@ -1,5 +1,21 @@
 [
   {
+    "slug": "opus5_hana",
+    "file": "opus5_hana.html",
+    "title": "花",
+    "date": "2026-07-25",
+    "desc": "ギターでの弾き語りに合わせて、歌う人のまわりに花が育つ。声が続けば芽が出て茎が伸び、弦のアタックで蕾がほどけ、盛り上がりで一斉に開花し、静けさが続けば萎れて散る。声色が色相、音高が茎の高さ、息のノイズが綿毛になる。人物は実写のまま、背景は周縁から夜の花園へ溶ける。",
+    "model": "Opus 5",
+    "tags": [
+      "WebGL2",
+      "Audio",
+      "MediaPipe",
+      "GPU Particles"
+    ],
+    "series": "OPUS5",
+    "thumb": "thumbs/opus5_hana.jpg"
+  },
+  {
     "slug": "opus5_kiin-seido",
     "file": "opus5_kiin-seido.html",
     "title": "気韻生動",

@@ -336,5 +336,17 @@
     "audio": false,
     "note": "実機の実写キャプチャを thumbs/manual/ に置いた手置き差し替え(スクリプトは manual を上書きしない)。合成人型のキャプチャでは実背景が残る様式が伝わらないため。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
+  },
+  "opus5_hana": {
+    "query": "fakesource=1&prewarm=10",
+    "warmMs": 7000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "合成の歌+合成人型で全駆動。prewarm=12 で満開まで育てた絵を撮る。実機の実写キャプチャに差し替える場合は thumbs/manual/opus5_hana.jpg を置く。",
+    "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
