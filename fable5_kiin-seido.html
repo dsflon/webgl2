@@ -8,9 +8,12 @@
   fable5_uchimizu.html(にじみと乾き)/ fable5_senkohanabi.html(GPU エージェント)。
 
   様式解析(視覚的不変量。優先度 1>2>3>4>5>6):
-    1. 紙地 — 背景は実カメラ映像でなく生成りの紙(繊維のむら・不規則な余白)。純白でも
-       黒でもない warm gray。墨は画面を埋めず、余白が残る。
-    2. 具象→抽象の勾配 — 人物のコアは実写のまま鮮明に残り、輪郭から外へ向かうほど
+    1. 実写の地 + 不均一な紙化 — 背景は実カメラ映像を残す(バーチャル背景にしない)。
+       そこから画面の周縁と大きな不規則パッチで生成りの紙へ溶けていく。被写体の
+       すぐ周りは写真のまま残す。距離だけで紙化すると人型のハローが出る(=切り抜きの
+       再発)ので、周縁 + fbm パッチ − 近傍 で抽象度を作る。
+    2. 具象→抽象の勾配 — 人物のコアは実写のまま鮮明。背景は人物から離れるほど筆で
+       撫でたように滑り(方向性スメア)、彩度を失い、紙へ溶ける。輪郭から外へ向かうほど
        墨の抽象になる。可視の輪郭は検知マスクそのものではなく、乱流ワープ越しの
        サンプルとかすれゲートで破断させる(ステッカー輪郭の禁止)。
     3. 気の残像 — 遅い EMA のシルエット(=直前の身体)が濃紺の水墨として遅れて残り、
@@ -46,7 +49,9 @@
     [P26 splat] splatT RGBA8 ≤1024 も同じく 乗算減衰 → インスタンス+MAX blend で
                 ハードエッジの滴+衛星滴を刻む
     [P27 bleed] ink の分離ガウス(にじみ用の水染み)      bleedT★
-    [P28 composite] 紙(paperT に焼き込み済み。resize 時のみ再生成)→ にじみ(柔・雲状に
+    [P28 composite] 地 = 実写カメラ(パレットへグレーディング)→ 抽象度場
+                (周縁 + fbm パッチ − 人物近傍)で 方向性スメア/彩度落ち/紙(paperT。
+                resize 時のみ再生成)への溶け を強める → にじみ(柔・雲状に
                 破断+乾き縁)→ 筆致(硬)→ 人物(グレーディング済み実写。輪郭は
                 広い遷移帯を毛先ノイズで変調して破断。深部は不透明を保証)→ 筆致を
                 13% 前面に重ねて交差させる → 飛沫を最前面 → 紙の粒子と周辺減光
@@ -70,7 +75,8 @@
     かすれ    乾いた筆の破断の強さ
     金        金・銅のアクセント量
     人物の写実 人物のコアが実写として残る度合い
-    紙の明るさ 生成りの紙の露出
+    背景の抽象度 実写の背景が紙と墨へ溶ける度合い(0=実写のまま)
+    明るさ    紙と実写背景の露出
 
   依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
   WebGL2 / GLSL ES 3.00 単体。
@@ -316,6 +322,7 @@
           dry: 0.55,
           gold: 0.45,
           realism: 0.6,
+          bgAbstract: 0.35,
           paper: 1.0,
         };
 
@@ -336,7 +343,8 @@
           ["dry", "かすれ", "乾いた筆の破断の強さ", 0, 1, 0.01],
           ["gold", "金", "金・銅のアクセント量", 0, 1, 0.01],
           ["realism", "人物の写実", "人物のコアが実写として残る度合い", 0, 1, 0.01],
-          ["paper", "紙の明るさ", "生成りの紙の露出", 0.6, 1.3, 0.01],
+          ["bgAbstract", "背景の抽象度", "実写の背景が紙と墨へ溶ける度合い(0=実写のまま)", 0, 1, 0.01],
+          ["paper", "明るさ", "紙と実写背景の露出", 0.6, 1.3, 0.01],
         ];
 
         panel.innerHTML = `
@@ -344,9 +352,10 @@
           <div class="panel-body">
           <h1>FABLE5 · 気韻生動</h1>
           <p>
-            カメラの人物だけが実写のまま生成りの紙に残り、周囲は墨の飛沫・にじみ・
-            かすれた筆致へ変わります。動くと直前の身体が濃紺の水墨として遅れて追い、
-            軌道が払いの弧になって紙に残ります。止まれば墨は紙に吸われて薄れます。
+            実写の世界をそのまま映しながら、動きに合わせて墨の飛沫・にじみ・かすれた
+            筆致が加わります。人物のコアは実写のまま、背景は画面の周縁と不規則な
+            パッチから生成りの紙へ溶けていきます。動くと直前の身体が濃紺の水墨として
+            遅れて追い、軌道が払いの弧になって残ります。
           </p>
           <div class="select-row">
             <span>デバッグ表示</span>
@@ -648,12 +657,15 @@
             return d;
           }
           vec3 fakeScene(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
-            vec3 top = vec3(0.30, 0.31, 0.34);
-            vec3 bot = vec3(0.44, 0.40, 0.35);
+            // a lit room, not a dim gradient: the synthetic scene is the only
+            // proxy for a real background, so it must sit in a realistic
+            // exposure range or every judgement about the ink over it is wrong
+            vec3 top = vec3(0.44, 0.45, 0.48);
+            vec3 bot = vec3(0.58, 0.54, 0.48);
             vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
             bg += 0.03 * (0.5 + 0.5 * sin(uv.x * 30.0) - 0.5);
             float horizon = exp(-pow((uv.y - 0.42) * 6.0, 2.0));
-            bg = mix(bg, vec3(0.55, 0.52, 0.46), 0.16 * horizon);
+            bg = mix(bg, vec3(0.68, 0.65, 0.58), 0.16 * horizon);
             bg += 0.04 * (vnoise(uv * 5.0) - 0.5);
             vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
             float d = humanDist(p, cx, swing, sc);
@@ -1505,6 +1517,7 @@
           uniform float uDryAmt;
           uniform float uGoldAmt;
           uniform float uRealism;
+          uniform float uBgAbs;
           uniform float uSplatAmt;
           uniform float uFallback;
           uniform int uDebug;
@@ -1564,8 +1577,6 @@
             pig = mix(pig, pig * 0.72, rim * (0.35 + 0.5 * uBleedAmt));
             pig = mix(pig, mix(GOLD, COPPER, 0.35),
               clamp(ink.a * 2.4, 0.0, 1.0) * uGoldAmt);
-            vec3 col = mix(paper, pig, cov * 0.94);
-
             // --- the brush strokes: hard-edged, on top of the wash
             vec3 stk = texture(uStroke, vUv).rgb;
             float stkTot = max(stk.r, max(stk.g, stk.b));
@@ -1573,6 +1584,49 @@
               stk.b * mix(GOLD, COPPER, 0.30) * uGoldAmt +
               stk.b * SUMI * (1.0 - uGoldAmt)) / max(stkTot, 1e-4);
             float stkA = smoothstep(0.12, 0.48, stkTot);
+
+            // --- THE GROUND IS THE REAL WORLD (invariant 1). The camera is not
+            // replaced by paper — it is graded into the palette and then loses
+            // its grip on the real the FURTHER it is from the subject: smeared
+            // along the local stroke direction, flattened in contrast, and
+            // finally veiled toward paper. That is the 具象→抽象 gradient of the
+            // poster, done to the actual room instead of deleting it.
+            vec3 camRaw = texture(uScene, vUv).rgb;
+            vec2 smr = dirv * 0.0055 + warp * 0.5;
+            vec3 camS = 0.25 * (texture(uScene, vUv + smr).rgb +
+              texture(uScene, vUv - smr).rgb +
+              texture(uScene, vUv + smr * 2.3).rgb +
+              texture(uScene, vUv - smr * 2.3).rgb);
+            // The abstraction field. Deriving it from distance-to-body alone
+            // draws a BODY-SHAPED halo — the cut-out look returning as a soft
+            // glow. So paper takes over (a) toward the frame edges, like the
+            // margin of a print, and (b) in large irregular patches, while the
+            // subject's immediate surround stays photographic. The result is a
+            // real room dissolving into paper unevenly, not a silhouette.
+            float near = smoothstep(0.02, 0.42, aura);
+            float edgeM = smoothstep(0.20, 0.60,
+              length((vUv - 0.5) * vec2(1.05, 1.0)));
+            float blotchF = smoothstep(0.38, 0.72, fbm4(vUv * ar * 2.2 + 13.0));
+            float abst = clamp(uBgAbs * (0.55 * edgeM +
+              0.85 * blotchF * (0.35 + 0.65 * edgeM) - 0.85 * near), 0.0, 1.0);
+            vec3 camMix = mix(camRaw, camS, 0.15 + 0.70 * abst);
+            // Near the subject the ground is very nearly the photograph itself
+            // (only slightly desaturated); the palette ramp takes over as the
+            // abstraction grows. Grading the WHOLE frame turns any room sepia
+            // and the piece reads as mud rather than as a real place.
+            vec3 bgReal = mix(camMix, vec3(dot(camMix, vec3(0.299, 0.587, 0.114))),
+              0.42);
+            vec3 bg = mix(bgReal, gradePerson(camMix, uRealism * 0.50),
+              0.34 + 0.50 * abst);
+            bg = mix(bg, vec3(dot(bg, vec3(0.299, 0.587, 0.114))), 0.40 * abst);
+            bg = clamp(bg * mix(1.0, uPaper, 0.75), 0.0, 1.0);
+            // The ink brings a little of its own paper so a dark room cannot
+            // swallow the sumi — but ONLY under the hard stroke footprint, which
+            // the stroke then covers.
+            float backing = stkA * 0.55 * uBgAbs;
+            vec3 base = mix(bg, paper, clamp(max(abst * 0.90, backing), 0.0, 1.0));
+
+            vec3 col = mix(base, pig, cov * 0.94);
             col = mix(col, stkCol, stkA);
 
             // --- the person: real camera, graded into the palette. The core is
@@ -1600,7 +1654,7 @@
             // dense ink eats into the silhouette, so cloth passes INTO the stroke
             pa *= 1.0 - 0.22 * smoothstep(0.30, 0.85, ink.r) * (1.0 - deep);
             pa = clamp(mix(pa, 1.0, uFallback), 0.0, 1.0);
-            vec3 cam = gradePerson(texture(uScene, vUv).rgb, uRealism);
+            vec3 cam = gradePerson(camRaw, uRealism);
             vec3 camF = mix(cam, mix(SUMI, INDIGO, 0.55),
               (1.0 - deep) * 0.60 * (1.0 - uFallback));
             col = mix(col, camF, pa);
@@ -1743,7 +1797,8 @@
           composite: getLocations(programs.composite, [
             "uScene", "uMask", "uSoft", "uAura", "uInk", "uBleed", "uSplat",
             "uStroke", "uPaperTex", "uVel", "uResolution", "uAspect", "uTime", "uPaper", "uBleedAmt",
-            "uDryAmt", "uGoldAmt", "uRealism", "uSplatAmt", "uFallback", "uDebug",
+            "uDryAmt", "uGoldAmt", "uRealism", "uBgAbs", "uSplatAmt", "uFallback",
+            "uDebug",
           ]),
         };
 
@@ -2467,6 +2522,7 @@
             gl.uniform1f(u.uDryAmt, state.dry);
             gl.uniform1f(u.uGoldAmt, state.gold);
             gl.uniform1f(u.uRealism, state.realism);
+            gl.uniform1f(u.uBgAbs, state.bgAbstract);
             gl.uniform1f(u.uSplatAmt, state.splatter);
             gl.uniform1f(u.uFallback, det.fallback);
             gl.uniform1i(u.uDebug, state.debugView);
