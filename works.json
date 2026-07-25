@@ -16,8 +16,8 @@
     "thumb": "thumbs/fable5_kiin-seido.jpg"
   },
   {
-    "slug": "fable5_soumatou",
-    "file": "fable5_soumatou.html",
+    "slug": "opus5_soumatou",
+    "file": "opus5_soumatou.html",
     "title": "走馬灯",
     "date": "2026-07-25",
     "desc": "夜闇に浮かぶ回り灯籠。内側の絵筒が炎の上昇気流でゆっくり回り、切り絵の影が和紙に逆光のシルエットとして映って巡る。紙に近い影は鋭く、遠い影はぼけて淡い。触れている間だけ回転と灯がわずかに変わる。",
@@ -27,8 +27,8 @@
       "SDF",
       "Silhouette"
     ],
-    "series": "FABLE5",
-    "thumb": "thumbs/fable5_soumatou.jpg"
+    "series": "OPUS5",
+    "thumb": "thumbs/opus5_soumatou.jpg"
   },
   {
     "slug": "fable5_senkohanabi",

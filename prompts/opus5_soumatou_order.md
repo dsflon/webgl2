@@ -1,4 +1,4 @@
-# 発注書 — fable5_soumatou.html「走馬灯」
+# 発注書 — opus5_soumatou.html「走馬灯」
 
 > S1 で brief.json から生成。非カメラ入力プロファイル(無入力=時間のみ、ポインタは副入力)。
 > 構造の実物: prompts/fable5_senkohanabi_order.md / prompts/fable5_papercraft-cam_order.md。
@@ -15,7 +15,7 @@
 回転もわずかに揺らぎ、影は呼吸する。夜闇に灯籠だけが琥珀色に浮かぶ。**無操作で
 延々と巡り続ける情景そのものが主役**である。
 
-- ファイル名: `fable5_soumatou.html`
+- ファイル名: `opus5_soumatou.html`
 - リポジトリ: `dsflon/webgl2`(単一HTML作品集。GitHub Pages で配信)
 - **入力: 無入力(時間のみ)が主。ポインタは副入力(なくても完全に成立)**。カメラ・
   マイクは使わない。`<meta name="art-input" content="none">` を宣言する
