@@ -1,0 +1,3130 @@
+<!doctype html>
+<!--
+  opus5_hana.html — WebGL2 マイク+カメラ →「花 / Song of Flowers」
+  ギターでの弾き語りに合わせて、歌う人のまわりに花が育つ。マイクの声と弦の音が
+  「種→芽→茎→蕾→開花→満開→散華」のライフサイクルを進める唯一の動力で、
+  音量・声色(スペクトル重心)・音高・アタック(onset)・息のノイズ(ZCR)が
+  それぞれ別の視覚量に写る。人物のコアは実写のまま鮮明に残り(切り抜きにしない)、
+  背景は画面の周縁と大きな不規則パッチから夜の花園へ溶ける。歌が止まれば花は
+  萎れて散り、余白が戻る。
+  派生元エンジン: fable5_flower-being.html(花・花びらのスプライト表現と GPU
+  パーティクル)/ opus5_kiin-seido.html(人物周辺の抽象度場・実写の地・検知と
+  モバイル recipe・検証フック)/ fable5_kotonoha-shigure.html(マイク解析)。
+
+  様式解析(視覚的不変量。優先度 1>2>3>4>5>6):
+    1. 音が進めるライフサイクル — 花は舞うだけの花びらではなく、根を持つ株として
+       芽吹き、茎が伸び、蕾が膨らみ、開花し、やがて散る。段階を進めるのは音だけ
+       (持続音=伸長 / アタック=開花 / 無音=萎れ)。株は固定プールの状態機械で、
+       段階は連続量 stage∈[0,4.6] として GPU の状態テクスチャに持つ。
+    2. 人物は実写・周囲は花園 — 地はカメラ映像そのもの(バーチャル背景にしない)。
+       抽象度場 =(周縁 + fbm パッチ − 人物近傍)で背景だけが夜の花園へ溶ける。
+       距離だけで抽象化すると人型ハロー=切り抜きが再発する。花は人物の周縁帯と
+       画面下から芽吹き、体の外へ向かって咲く(向きは −grad(aura) と上方向の合成)。
+    3. 音の要素が別々の視覚量に写る — 音量=開き・発光・舞い上がり / 声色(重心)=
+       色相 / 音高=茎の伸びる高さ / アタック=一斉開花と花びらの射出 / 息のノイズ=
+       綿毛と花びら縁のかすれ / ビブラート=揺れ。ひとつの量に束ねない。
+    4. 花は離散した個体 — 丸いボケ玉にしない。深い花弁スキャロップ+花弁間の暗い
+       スリット+彩度のある花芯、茎・葉・蕾・穂を持つ。散った花びらは先の尖った
+       涙型で tumble する。3種(小花/大輪/穂)+綿毛。
+    5. 有界性 — 株と花びらは固定プール(=構造的に有界)。加算でなく前乗算アルファの
+       重ね合わせで、発光はブルーム+肩付きトーンマップに通す(白飛びしない)。
+       無音が続けば萎れて散り、余白が戻る。
+    6. 頑健性/モバイル — マイク拒否・カメラ拒否・MediaPipe 未ロードでも自走する
+       デモ呼吸で絵が成立する。検知は ImageSegmenter のみ、推論は 288px 縮小コピー、
+       33〜250ms の負荷適応間引き、GPU 破綻時 CPU 自動切替、presence はカバレッジ。
+       ?fakesource=1 で音まで含めた全パイプラインをオフライン駆動。
+
+  パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
+    入力: カメラ映像 / fakeScene(GLSL 室内+動く人型) / MediaPipe seg マスク(uint8 tex)
+          + マイク(AnalyserNode fft2048 → RMS/重心/ZCR/音高/onset) or 合成音
+    [P0 scene]  cover-fit+mirror                          sceneA/B RGBA8 長辺≤1280
+    [P1 mask]   seg tex or fake SDF → R=速い EMA マスク     maskA/B★ ≤448
+                G=遅い EMA(直前の身体) BA=運動場(フレーム差分の EMA)
+    [P2 soft]   マスク縁のソフト化(=芽吹きの帯)           softT★
+    [P3 aura]   soft の広いぼかし(近傍場・外向き勾配)      auraT★
+    [P4 plant]  株の状態 ping-pong(MRT 2枚, PLANT_W×PLANT_H)★
+                A=(根x, 根y, stage/5, wilt) B=(seed, 色相, 高さ/2, 向き)
+                休眠株は音のエネルギーで発芽(棄却サンプリング: 人物の縁帯 or 画面下)
+    [P5 petal]  花びらの状態 ping-pong(MRT 2枚, PETAL_W×PETAL_H)★
+                A=(x, y, encV(速度)) B=(年齢, 回転, seed, 色相)
+                満開の株の花冠からのみ発生(外れたら休眠。全画面ばら撒きはしない)
+    [P6 field]  fieldT★ を (0,0,0,0) にクリアし前乗算アルファで重ねる:
+                茎+葉 → 花冠(蕾/花/穂) → 花びら+綿毛(すべて instanced quad)
+    [P7 bloom]  fieldT の明部を抽出 → 2段ダウンサンプル+ぼかし        b1 b2
+    [P8 comp]   地=実写カメラ → 抽象度場(周縁+fbmパッチ−人物近傍)で方向性スメア/
+                彩度落ち/夜の花園へ沈める → field を前乗算合成 → 人物のコアを
+                45% 手前に戻す(歌う人が判読できること)→ ブルーム加算 →
+                肩付きトーンマップ・粒子・周辺減光
+
+  実行方法:
+    python3 -m http.server 8899 → http://localhost:8899/opus5_hana.html を開き
+    カメラとマイクを許可(どちらも端末内で処理。外部送信なし)。
+    (カメラ/マイク API はセキュアコンテキスト必須。file:// では動きません)
+    ?fakesource=1 … カメラ/マイク/MediaPipe 不使用。合成室内+動く人型+合成の歌
+                    (18秒ループ: 前奏→A メロ→サビ→間奏→余韻)で全パス駆動(検証用)
+    ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
+    ?prewarm=<秒> … 初回描画前に固定 dt で早送りし「育った花」を出す(検証用)
+    ?fakeseg=1   … 既知向きの合成マスクを実カメラ経路へ流し Y 反転を検査(検証用)
+    ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
+    デバッグ表示: 0=最終 1=マスク/運動 2=音の特徴量 3=芽吹き場 4=花・花びら層 5=配色標本
+
+  スライダーの説明:
+    咲きの量    同時に育つ株の数と発芽の勢い
+    音の感度    マイク入力のゲイン(小声でも咲かせたいとき上げる)
+    伸びる速さ  声でどれだけ速く芽吹き茎が伸びるか
+    風・渦      体の動きが生む突風とカールノイズの渦
+    散り        花びらの散る量と萎れの速さ
+    花の大きさ  花冠・花びらの大きさ
+    発光        花芯とブルームの光の強さ
+    色の移ろい  声色(スペクトル重心)が色相を動かす量
+    背景の抽象度 実写背景が夜の花園へ溶ける度合い(0=実写のまま)
+    明るさ      画面全体の露出
+    フィルム粒子 全面の静的グレイン
+
+  依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は
+  依存ゼロ)。WebGL2 / GLSL ES 3.00 単体。音声は WebAudio の AnalyserNode のみ。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>OPUS5 · 花 — WebGL2 mic+cam song of flowers</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05070a;
+        --ink: #f0e6ea;
+        --muted: rgba(240, 230, 236, 0.66);
+        --panel: rgba(14, 11, 18, 0.85);
+        --line: rgba(240, 230, 236, 0.16);
+        --accent: #e6849f;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #07070d, #0d0a12 55%, #05070a);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      video {
+        position: fixed; width: 1px; height: 1px; left: -10px; top: -10px;
+        opacity: 0; pointer-events: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(240, 230, 236, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(240, 230, 236, 0.14); }
+      #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
+      @media (pointer: coarse) { #flipCamera { display: block; } }
+      #statusChip {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 11; padding: 7px 12px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: var(--panel); font-size: 10px; letter-spacing: 0.1em;
+        pointer-events: none; transition: opacity 0.6s ease; white-space: nowrap;
+      }
+      #statusChip.hidden { opacity: 0; }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(240, 230, 236, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(240, 230, 236, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .meter {
+        margin-top: 10px; height: 5px; border-radius: 3px; overflow: hidden;
+        background: rgba(240, 230, 236, 0.10);
+      }
+      .meter i {
+        display: block; height: 100%; width: 0%;
+        background: linear-gradient(90deg, #7fd4c1, #e6849f, #f0c46a);
+        transition: width 0.08s linear;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(6, 5, 10, 0.76);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
+      .overlay-card button {
+        margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(240, 230, 236, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 song of flowers webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
+    <div id="statusChip">起動中</div>
+
+    <section id="panel" class="panel" aria-label="Song of flowers controls"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces BOTH inputs: a synthetic room + a full-body
+        // figure that drifts and swings its limbs stands in for the camera, and
+        // a scripted 18s song (intro / verse / chorus / bridge / fade) stands in
+        // for the microphone. Neither MediaPipe nor WebAudio is ever touched, so
+        // the whole growth pipeline runs offline and deterministically.
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: plant stages, petal physics, the audio EMAs,
+        // the fake figure and every mask EMA stop → deterministic still frame.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
+        // KNOWN orientation (person in the TOP ~60% of image space, top-left
+        // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
+        // With the Y-flip correct the flowers must sprout around the TOP figure;
+        // if they gather at the bottom the flip regressed (CRAFT §C1).
+        const FAKESEG = QUERY.get("fakeseg") === "1";
+        // ?fakescale=<f> scales the synthetic figure (real-scale divergence test,
+        // CRAFT §C2). f>1 = big/close, f<1 = far/small. Default 1.0.
+        const FAKESCALE = (() => {
+          const v = parseFloat(QUERY.get("fakescale"));
+          return Number.isFinite(v) && v > 0.05 ? Math.min(4, v) : 1.0;
+        })();
+        // ?prewarm=<sec> fast-forwards the simulation with a fixed dt before the
+        // first present, so a screenshot shows grown flowers instead of bare
+        // ground (the verification GPU is far too slow to warm in real time —
+        // CRAFT §C4). Chunked + glSync'd so the compositor is never parked.
+        const PREWARM = (() => {
+          const v = parseFloat(QUERY.get("prewarm"));
+          return Number.isFinite(v) && v > 0 ? Math.min(30, v) : 0;
+        })();
+        const PREWARM_DT = 1 / 24;
+
+        const DEBUG_MODES = [
+          "最終",
+          "マスク/運動",
+          "音の特徴量",
+          "芽吹き場",
+          "花・花びら層",
+          "配色標本",
+        ];
+
+        const DEFAULTS = {
+          bloomAmt: 0.62,
+          micGain: 0.55,
+          growth: 0.55,
+          wind: 0.5,
+          fall: 0.5,
+          headSize: 0.5,
+          glow: 0.6,
+          hueMove: 0.6,
+          bgAbstract: 0.55,
+          exposure: 1.0,
+          filmGrain: 0.18,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["bloomAmt", "咲きの量", "同時に育つ株の数と発芽の勢い", 0, 1, 0.01],
+          ["micGain", "音の感度", "マイク入力のゲイン(小声でも咲かせるなら上げる)", 0, 1, 0.01],
+          ["growth", "伸びる速さ", "声で芽吹き茎が伸びる速さ", 0, 1, 0.01],
+          ["wind", "風・渦", "体の動きが生む突風とカールノイズの渦", 0, 1, 0.01],
+          ["fall", "散り", "花びらの散る量と萎れの速さ", 0, 1, 0.01],
+          ["headSize", "花の大きさ", "花冠・花びらの大きさ", 0, 1, 0.01],
+          ["glow", "発光", "花芯とブルームの光の強さ", 0, 1, 0.01],
+          ["hueMove", "色の移ろい", "声色(スペクトル重心)が色相を動かす量", 0, 1, 0.01],
+          ["bgAbstract", "背景の抽象度", "実写背景が夜の花園へ溶ける度合い(0=実写のまま)", 0, 1, 0.01],
+          ["exposure", "明るさ", "画面全体の露出", 0.6, 1.4, 0.01],
+          ["filmGrain", "フィルム粒子", "全面の静的グレイン", 0, 1, 0.01],
+        ];
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>OPUS5 · 花</h1>
+          <p>
+            歌とギターの音で花が育ちます。声が続くと芽が出て茎が伸び、弦のアタックで
+            蕾がほどけ、盛り上がりで一斉に開花し、静けさが続けば萎れて散ります。
+            声色が色相、音高が茎の高さ、息のノイズが綿毛になります。人物は実写のまま、
+            背景は周縁から夜の花園へ溶けます。マイクとカメラは端末内で処理されます。
+          </p>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>左右反転(鏡)</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>ゆらぎを停止</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="meter" aria-label="入力音量"><i id="levelBar"></i></div>
+          <div class="buttons">
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
+            <button id="micRetry" type="button">マイク再試行</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 解像度 -- / 株 -- / 花びら -- / 音 -- / 検知 --</div>
+            <span class="badge">WebGL2 · Mic + MediaPipe · GPU Plants</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode = state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `opus5-hana-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the plant/petal state and the HDR flower
+        // layer from stalling in 8 bits. Signed velocity is offset-encoded into
+        // [0,1] (encV) so the RGBA8 fallback runs the same shaders, coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        // Renderer probe → pool sizing. Software (SwiftShader in the verifier)
+        // and coarse-pointer (mobile) devices get smaller pools.
+        const dbgRI = gl.getExtension("WEBGL_debug_renderer_info");
+        const RENDERER = dbgRI ? gl.getParameter(dbgRI.UNMASKED_RENDERER_WEBGL) : "";
+        const IS_SOFT = /swiftshader|llvmpipe|software|basic|subzero/i.test(RENDERER);
+        const COARSE = window.matchMedia("(pointer: coarse)").matches;
+
+        // Rooted plants live in a tiny state texture (one texel per plant, two
+        // MRT attachments). The pool is FIXED, which is what bounds the picture
+        // (invariant 5): flowers can never accumulate past PLANT_N.
+        const PLANT_W = IS_SOFT ? 14 : (COARSE ? 16 : 28);
+        const PLANT_H = IS_SOFT ? 6 : (COARSE ? 7 : 10);
+        const PLANT_N = PLANT_W * PLANT_H;      // 84 / 112 / 280
+        const STEM_SEGS = 7;                    // quads per stem
+        const LEAF_N = 3;                       // leaves per plant
+        const STEM_PER = STEM_SEGS + LEAF_N;    // instances per plant
+
+        // Free-flying petals / seed fluff. Sized to the expected live population
+        // (shed rate x lifetime), not to a huge spray: each petal must be big
+        // enough to read as a petal (CRAFT §B1).
+        const PETAL_SIDE = IS_SOFT ? 56 : (COARSE ? 64 : 96);
+        const PETAL_W = PETAL_SIDE;
+        const PETAL_H = PETAL_SIDE;
+        const PETAL_N = PETAL_W * PETAL_H;      // 3136 / 4096 / 9216
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hashes + value noise + fbm + curl noise (unit
+        // scaled) + the 2D SDF helpers. Grain, mottle and every placement seed
+        // are derived from POSITION or INDEX only — never from uTime (repo rule)
+        // so they stay deterministic under ?freeze=1.
+        const CHUNK_NOISE = `
+          const float PI2 = 6.28318530718;
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          vec2 hash22(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            p3 += dot(p3, p3.yxz + 33.33);
+            return fract((p3.xx + p3.yz) * p3.zy);
+          }
+          float h11(float p) {
+            p = fract(p * 0.1031);
+            p *= p + 33.33;
+            p *= p + p;
+            return fract(p);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm4(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 4; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          float fbm(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 5; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          // curl of value noise, normalised to ≈ unit scale (a raw finite
+          // difference divided by 2e reaches ~20 and turns a "small" coefficient
+          // into a 200px warp — CRAFT / kiin-seido §8-3).
+          vec2 curlN(vec2 p) {
+            float e = 0.35;
+            float n1 = vnoise(p + vec2(0.0, e)) - vnoise(p - vec2(0.0, e));
+            float n2 = vnoise(p + vec2(e, 0.0)) - vnoise(p - vec2(e, 0.0));
+            return vec2(n1, -n2) * 1.6;
+          }
+          float sdSeg(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+        `;
+
+        // Shared: [0,1] offset encoding for signed fields. The clamp doubles as
+        // the mandatory velocity clamp (no NaN blow-ups).
+        const CHUNK_ENC = `
+          const float VMAX = 2.4;
+          vec2 encV(vec2 v) { return clamp(v, -VMAX, VMAX) / (2.0 * VMAX) + 0.5; }
+          vec2 decV(vec2 e) { return (e - 0.5) * (2.0 * VMAX); }
+        `;
+
+        // Shared: the ?fakesource=1 synthetic scene — a lit room (never black)
+        // with a full-body figure that drifts, bobs and swings its limbs. The
+        // swing is what makes the motion field, the gusts and the edge-band
+        // sprouting testable offline. uScale is ?fakescale= (CRAFT §C2).
+        const CHUNK_FAKE = `
+          float humanDist(vec2 p, float cx, float swing, float sc) {
+            vec2 anchor = vec2(cx, 0.46);
+            p = (p - anchor) / max(sc, 0.05) + anchor;
+            float d = 1e9;
+            vec2 head = vec2(cx, 0.80);
+            d = min(d, length((p - head) / vec2(1.0, 1.14)) - 0.062);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.745), vec2(cx, 0.685)) - 0.024, 0.018);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.685), vec2(cx, 0.40)) - 0.098, 0.045);
+            d = smin2(d, sdSeg(p, vec2(cx - 0.115, 0.665), vec2(cx + 0.115, 0.665)) - 0.052, 0.04);
+            // arms: shoulder → elbow → hand, driven by the swing phase (the
+            // strumming/fretting arm of the singer)
+            float aL = 2.55 + 0.62 * swing;
+            vec2 shL = vec2(cx - 0.115, 0.655);
+            vec2 elL = shL + 0.135 * vec2(cos(aL), sin(aL) * 0.7 - 0.35);
+            vec2 haL = elL + 0.125 * vec2(cos(aL - 0.55 - 0.5 * swing),
+                                          sin(aL - 0.55 - 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shL, elL) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elL, haL) - 0.028, 0.028);
+            float aR = 0.59 - 0.62 * swing;
+            vec2 shR = vec2(cx + 0.115, 0.655);
+            vec2 elR = shR + 0.135 * vec2(cos(aR), sin(aR) * 0.7 - 0.35);
+            vec2 haR = elR + 0.125 * vec2(cos(aR + 0.55 + 0.5 * swing),
+                                          sin(aR + 0.55 + 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shR, elR) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elR, haR) - 0.028, 0.028);
+            // legs: hip → knee → foot
+            vec2 hipL = vec2(cx - 0.05, 0.405);
+            vec2 knL = hipL + vec2(-0.028 - 0.05 * swing, -0.15);
+            vec2 ftL = knL + vec2(-0.012 + 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipL, knL) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knL, ftL) - 0.034, 0.03);
+            vec2 hipR = vec2(cx + 0.05, 0.405);
+            vec2 knR = hipR + vec2(0.028 + 0.05 * swing, -0.15);
+            vec2 ftR = knR + vec2(0.012 - 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipR, knR) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knR, ftR) - 0.034, 0.03);
+            // the guitar: a body ellipse across the lap plus a neck to the left
+            vec2 gc = vec2(cx + 0.055, 0.44);
+            float gd = length((p - gc) / vec2(1.25, 1.0)) - 0.085;
+            vec2 nk0 = gc + vec2(-0.09, 0.045);
+            vec2 nk1 = gc + vec2(-0.30, 0.130);
+            gd = min(gd, sdSeg(p, nk0, nk1) - 0.016);
+            d = min(d, gd);
+            return d;
+          }
+          vec3 fakeScene(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            // a lit room, not a dim gradient: the synthetic scene is the only
+            // proxy for a real background, so it must sit in a realistic
+            // exposure range or every judgement about the flowers over it is wrong
+            vec3 top = vec3(0.30, 0.31, 0.36);
+            vec3 bot = vec3(0.46, 0.42, 0.37);
+            vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
+            bg += 0.03 * (0.5 + 0.5 * sin(uv.x * 30.0) - 0.5);
+            float horizon = exp(-pow((uv.y - 0.40) * 6.0, 2.0));
+            bg = mix(bg, vec3(0.55, 0.51, 0.45), 0.16 * horizon);
+            bg += 0.04 * (vnoise(uv * 5.0) - 0.5);
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            float d = humanDist(p, cx, swing, sc);
+            float m = 1.0 - smoothstep(-0.004, 0.008, d);
+            // body-local coords (same transform humanDist uses) so the costume
+            // regions ride with ?fakescale=. The figure needs INTERNAL tonal
+            // structure — a flat silhouette makes the grading and the
+            // figure/flower interplay impossible to judge offline.
+            vec2 q = (p - vec2(cx, 0.46)) / max(sc, 0.05) + vec2(cx, 0.46);
+            float folds = 0.86 + 0.30 * fbm(q * vec2(34.0, 20.0));
+            float upper = smoothstep(0.40, 0.46, q.y);
+            vec3 person = mix(vec3(0.24, 0.26, 0.33), vec3(0.68, 0.64, 0.58), upper);
+            person = mix(person, vec3(0.16, 0.19, 0.29),
+              smoothstep(0.01, -0.05, q.x - cx) * upper * 0.75);
+            person = mix(person, vec3(0.15, 0.18, 0.27),
+              smoothstep(0.60, 0.69, q.y) * 0.85);
+            person = mix(person, vec3(0.36, 0.25, 0.16),
+              exp(-pow((q.y - 0.44) * 55.0, 2.0)));            // the guitar body
+            person *= folds;
+            float headM = 1.0 - smoothstep(0.050, 0.070,
+              length((q - vec2(cx, 0.80)) / vec2(1.0, 1.14)));
+            vec3 skin = vec3(0.62, 0.49, 0.42);
+            skin *= 1.0 - 0.45 * exp(-pow((q.y - 0.815) * 240.0, 2.0));  // brow
+            skin *= 1.0 - 0.28 * exp(-pow((q.y - 0.772) * 190.0, 2.0));  // mouth
+            person = mix(person, skin, headM);
+            person *= 0.78 + 0.34 * smoothstep(0.05, 0.80, q.y);
+            return clamp(mix(bg, person, m), 0.0, 1.0);
+          }
+          float fakeMask(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            return 1.0 - smoothstep(-0.006, 0.010, humanDist(p, cx, swing, sc));
+          }
+        `;
+
+        // Shared: the flower palette. A CONTINUOUS ramp (not bands) because the
+        // hue is a continuous function of the singing timbre: dark-warm at the
+        // low end (chest voice / bass strings) → bright-cool at the high end
+        // (falsetto / bright strum). Deterministic; no time anywhere.
+        const CHUNK_PALETTE = `
+          const vec3 LEAF_D = vec3(0.035, 0.105, 0.058);
+          const vec3 LEAF_L = vec3(0.185, 0.400, 0.205);
+          vec3 flowerHue(float t) {
+            t = clamp(fract(t), 0.0, 1.0) * 8.0;
+            vec3 c0 = vec3(0.80, 0.05, 0.22);   // 0 深紅
+            vec3 c1 = vec3(1.00, 0.18, 0.40);   // 1 紅薔薇
+            vec3 c2 = vec3(1.00, 0.36, 0.66);   // 2 紅梅
+            vec3 c3 = vec3(1.00, 0.60, 0.60);   // 3 桃
+            vec3 c4 = vec3(1.00, 0.80, 0.32);   // 4 金
+            vec3 c5 = vec3(1.00, 0.95, 0.74);   // 5 淡黄
+            vec3 c6 = vec3(0.99, 0.97, 0.95);   // 6 白
+            vec3 c7 = vec3(0.58, 0.88, 1.00);   // 7 淡青
+            vec3 c8 = vec3(0.56, 0.38, 1.00);   // 8 菫
+            float i = floor(t);
+            float f = smoothstep(0.0, 1.0, fract(t));
+            if (i < 1.0) return mix(c0, c1, f);
+            if (i < 2.0) return mix(c1, c2, f);
+            if (i < 3.0) return mix(c2, c3, f);
+            if (i < 4.0) return mix(c3, c4, f);
+            if (i < 5.0) return mix(c4, c5, f);
+            if (i < 6.0) return mix(c5, c6, f);
+            if (i < 7.0) return mix(c6, c7, f);
+            return mix(c7, c8, f);
+          }
+        `;
+
+        // Shared by the plant update AND every draw pass, so all three agree on
+        // a plant's species, size and the exact shape of its stem without extra
+        // state. Everything is derived from the per-plant seed.
+        const CHUNK_PLANT = `
+          // 0 = 小花 (a small many-flowered stem), 1 = 大輪 (one big bloom),
+          // 2 = 穂 (a spike of tiny florets)
+          float plantSpecies(float seed) {
+            float h = h11(seed * 31.7 + 0.3);
+            return h < 0.52 ? 0.0 : (h < 0.85 ? 1.0 : 2.0);
+          }
+          float plantPetals(float seed) {
+            return 5.0 + floor(h11(seed * 41.0 + 0.7) * 4.0);
+          }
+          // head radius in ASPECT space (fraction of screen height)
+          float plantHeadSize(float seed, float species) {
+            float base = species > 1.5 ? 0.030 : (species > 0.5 ? 0.044 : 0.023);
+            return base * (0.75 + 0.55 * h11(seed * 13.7 + 1.3));
+          }
+          float plantStemW(float seed, float species) {
+            float base = species > 1.5 ? 0.0021 : (species > 0.5 ? 0.0036 : 0.0026);
+            return base * (0.8 + 0.5 * h11(seed * 23.3 + 2.1));
+          }
+          // visible stem length for a growth stage: a shoot first (stage 0→1),
+          // then the stem extends to its full height (stage 1→2)
+          float plantLen(float stage, float hgt) {
+            float e = clamp(stage, 0.0, 2.0);
+            float f = e < 1.0 ? 0.13 * e : 0.13 + 0.87 * (e - 1.0);
+            return hgt * f;
+          }
+          // The stem: a curved line rooted at rootA (ASPECT space), leaning along
+          // ang, permanently bent by its seed and swaying with the music. s runs
+          // 0 at the root → 1 at the tip.
+          vec2 stemPoint(vec2 rootA, float ang, float len, float s,
+                         float seed, float t, float swayAmt) {
+            vec2 d = vec2(cos(ang), sin(ang));
+            vec2 pp = vec2(-d.y, d.x);
+            float bend = (h11(seed * 7.7 + 3.1) - 0.5) * 0.42;
+            float sw = sin(t * (0.55 + 0.75 * h11(seed * 3.3 + 4.7)) + seed * 19.0) *
+              swayAmt;
+            float lat = (bend + sw) * s * s;
+            return rootA + d * (s * len) + pp * (lat * len);
+          }
+          // petal / fluff traits from the particle index (freeze-safe)
+          //   x = life (s), y = size (px), z = kind (0 petal, 1 seed fluff),
+          //   w = tumble speed
+          vec4 petalTraits(float idx) {
+            float s0 = h11(idx * 0.017 + 0.11);
+            float s1 = h11(idx * 0.017 + 5.70);
+            float s2 = h11(idx * 0.017 + 13.3);
+            float kind = step(0.955, s1);
+            float life = mix(3.4, 8.5, s0) * (1.0 + 0.5 * kind);
+            // a wide size spread: mostly small drifting petals with a few big
+            // ones close to camera, so the fall reads as depth not confetti
+            float sizePx = mix(11.0, 22.0, s2 * s2) * (1.0 + 0.45 * kind);
+            sizePx = mix(sizePx, mix(26.0, 38.0, s0), step(0.88, s2));
+            return vec4(life, sizePx, kind, (h11(idx * 0.017 + 31.0) - 0.5) * 1.1);
+          }
+        `;
+
+        // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
+        // working scene buffer. Everything downstream is screen-aligned to it.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeScene(vUv, uCx, uCy, uSwing, uAspect, uScale), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.10, 0.10, 0.13),
+                vec3(0.20, 0.18, 0.24), vUv.y), 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scale = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scale + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — the mask / motion field:
+        //   R = fast person-mask EMA (the body as it is NOW; the sprouting band
+        //       and the "keep the singer legible" core come from this)
+        //   G = slow person-mask EMA (the body a moment ago; R-G is where the
+        //       body just moved, which is where sprouting is favoured)
+        //   BA = motion field (frame-difference pseudo flow, EMA-smoothed) — the
+        //       gust that blows petals around when the performer moves
+        const maskFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uScenePrev;
+          uniform sampler2D uPrev;
+          uniform sampler2D uSeg;
+          uniform vec2 uTexel;
+          uniform vec2 uSegScale;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform float uDt;
+          uniform float uAlphaFast;
+          uniform float uAlphaSlow;
+          uniform float uAlphaMot;
+          uniform int uReset;
+          uniform int uSource;
+          uniform int uMirror;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_FAKE}
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            float rawMask = 0.0;
+            if (uSource == 0) {
+              rawMask = fakeMask(vUv, uCx, uCy, uSwing, uAspect, uScale);
+            } else if (uSource == 1) {
+              // Real-camera segmentation mask. Coordinate convention matched to
+              // kiin-seido / gas-head so the mask overlaps the real person
+              // pixel-for-pixel with the P0 background:
+              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
+              //     to the P0 scene, so scene and mask stay in register.
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — the same crop as P0.
+              //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
+              //     image-space (top-left origin) and segTexture is uploaded
+              //     UNPACK_FLIP_Y=false, while the video texture is uploaded
+              //     UNPACK_FLIP_Y=true (upright). Without the explicit flip the
+              //     mask lands upside-down (CRAFT §C1: "only the face" bug).
+              vec2 uv = vUv;
+              if (uMirror == 1) uv.x = 1.0 - uv.x;
+              vec2 suv = (uv - 0.5) * uSegScale + 0.5;
+              float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              // firm the soft confidence mask toward 0/1 so the real body is a
+              // solid figure (the singer must stay legible inside it)
+              rawMask = smoothstep(0.32, 0.70, rawSeg);
+            }
+            vec4 prev = texture(uPrev, vUv);
+            float fastM = uReset == 1 ? rawMask : mix(prev.r, rawMask, uAlphaFast);
+            float slowM = uReset == 1 ? rawMask : mix(prev.g, rawMask, uAlphaSlow);
+
+            // pseudo optical flow from the scene frame difference
+            vec3 cur = texture(uScene, vUv).rgb;
+            float l0 = lumaf(texture(uScenePrev, vUv).rgb);
+            float l1 = lumaf(cur);
+            float lx = lumaf(texture(uScene, vUv + vec2(uTexel.x, 0.0)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(uTexel.x, 0.0)).rgb);
+            float ly = lumaf(texture(uScene, vUv + vec2(0.0, uTexel.y)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(0.0, uTexel.y)).rgb);
+            vec2 grd = vec2(lx / (2.0 * uTexel.x), ly / (2.0 * uTexel.y));
+            float it = (l1 - l0) / max(uDt, 1e-3);
+            vec2 flowRaw = -it * grd / (dot(grd, grd) + 40.0);
+            flowRaw = clamp(flowRaw, vec2(-VMAX), vec2(VMAX));
+            vec2 flow = uReset == 1 ? vec2(0.0)
+              : mix(decV(prev.ba), flowRaw, uAlphaMot);
+
+            fragColor = vec4(clamp(fastM, 0.0, 1.0), clamp(slowM, 0.0, 1.0), encV(flow));
+          }
+        `;
+
+        // Separable Gaussian (all channels). Softens the mask edge into the
+        // sprouting band (P2), builds the wide proximity aura (P3) and blurs the
+        // flower layer for the bloom (P7).
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -10; i <= 10; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P4 — the PLANTS. One texel per plant, two MRT attachments, ping-pong:
+        //   A = (root.x, root.y, stage/5, wilt)
+        //   B = (seed, hue, height/2, direction angle normalised)
+        // A plant is DORMANT while wilt >= 0.999 (the initial state of the whole
+        // pool). Sound germinates it: the probability is a per-second rate spread
+        // over the pool, so density never depends on the frame rate or on the
+        // ?prewarm= step size. A dormant plant rejection-samples a root either on
+        // the person's soft edge band or on the bottom of the frame; if every
+        // candidate misses it simply stays dormant — it never falls back to
+        // sprouting somewhere random (CRAFT §B3).
+        //
+        // stage is the whole drama, and only sound advances it:
+        //   0→1 芽   sustained voice pushes a shoot out of the ground
+        //   1→2 茎   sustained voice + pitch extend the stem (higher = taller)
+        //   2→3 蕾   the bud swells; string attacks (onsets) help it along
+        //   3→4 開花 loudness and attacks unfold the petals
+        //   wilt    silence dries the plant at any stage; after full bloom it
+        //           ages anyway and sheds (that is what keeps the picture bounded)
+        const plantFS = `#version 300 es
+          precision highp float;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform sampler2D uPlantA;
+          uniform sampler2D uPlantB;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform sampler2D uAura;
+          uniform vec2 uTexel;
+          uniform float uTexW;
+          uniform float uCount;
+          uniform float uDt;
+          uniform float uSeed;
+          uniform float uAspect;
+          uniform float uPresent;
+          uniform float uBloomAmt;
+          uniform float uGrowth;
+          uniform float uFall;
+          uniform float uHueMove;
+          uniform vec4 uAudA;   // rms, centroid, zcr, onset envelope
+          uniform vec4 uAudB;   // sustain, pitch, vibrato, arc
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_PLANT}
+          void main() {
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexW + float(tc.x);
+            vec4 A = texelFetch(uPlantA, tc, 0);
+            vec4 B = texelFetch(uPlantB, tc, 0);
+            if (uDt <= 0.0) {           // frozen: hold the state exactly
+              outA = A;
+              outB = B;
+              return;
+            }
+            vec2 root = A.xy;
+            float stage = A.z * 5.0;
+            float wilt = A.w;
+            float seed = B.x;
+            float hue = B.y;
+            float hgt = B.z * 0.5;
+            float ang = (B.w - 0.5) * PI2;
+
+            float rms = uAudA.x;
+            float cen = uAudA.y;
+            float ons = uAudA.w;
+            float sus = uAudB.x;
+            float pit = uAudB.y;
+            float arc = uAudB.w;
+
+            if (wilt >= 0.999) {
+              // ---- dormant slot: try to germinate --------------------------
+              // plants per SECOND for the whole field, spread over the pool.
+              // The arc term is the dramatic build: a few shoots during the
+              // intro, a full bed by the chorus.
+              float rate = (1.0 + 17.0 * uBloomAmt) *
+                (0.04 + 0.85 * sus + 1.5 * ons + 0.35 * rms) *
+                (0.35 + 0.95 * arc);
+              float pr = rate * uDt / max(uCount, 1.0);
+              if (hash12(vec2(idx * 1.71, uSeed * 0.93)) < pr) {
+                bool wantEdge = uPresent > 0.25 &&
+                  hash12(vec2(idx * 3.31, uSeed * 1.77)) < 0.66;
+                bool got = false;
+                vec2 cand = vec2(0.5);
+                for (int k = 0; k < 10; k++) {
+                  vec2 c = hash22(vec2(idx * 5.13 + float(k) * 7.31,
+                    uSeed * 2.11 + float(k) * 3.70));
+                  float m = texture(uMask, c).r;
+                  float sf = texture(uSoft, c).r;
+                  // the soft edge band: just OUTSIDE the silhouette (mask low,
+                  // blurred mask still high) — flowers hug the performer without
+                  // ever being drawn from the mask contour itself (CRAFT §A2)
+                  float band = clamp(sf - m, 0.0, 1.0);
+                  if (!got && wantEdge && band > 0.045 && m < 0.42 && sf > 0.05) {
+                    got = true;
+                    cand = c;
+                  }
+                  if (!got && !wantEdge) {
+                    // the flower bed along the bottom of the frame, clumped by a
+                    // static fbm so there are gaps instead of a uniform lawn
+                    float ground = 1.0 - smoothstep(0.03, 0.34, c.y);
+                    if (ground > 0.25 && m < 0.14 &&
+                        fbm(c * vec2(uAspect, 1.0) * 3.5) > 0.40) {
+                      got = true;
+                      cand = c;
+                    }
+                  }
+                }
+                if (got) {
+                  root = cand;
+                  // grow AWAY from the body: -grad(aura) points outward. Blended
+                  // with straight up so nothing grows downward off the shoulders.
+                  float aL = texture(uAura, cand - vec2(uTexel.x, 0.0)).r;
+                  float aR = texture(uAura, cand + vec2(uTexel.x, 0.0)).r;
+                  float aB = texture(uAura, cand - vec2(0.0, uTexel.y)).r;
+                  float aT = texture(uAura, cand + vec2(0.0, uTexel.y)).r;
+                  vec2 gA = vec2(aR - aL, aT - aB) * 0.5;
+                  float gLen = length(gA);
+                  vec2 outw = gLen > 1e-5 ? -gA / gLen : vec2(0.0, 1.0);
+                  float lean = hash12(vec2(idx * 11.7, uSeed * 5.19)) - 0.5;
+                  vec2 d = normalize(vec2(0.0, 1.0) +
+                    outw * (wantEdge ? 0.85 : 0.12) + vec2(lean * 0.55, 0.0));
+                  ang = atan(d.y, d.x);
+                  seed = hash12(vec2(idx * 9.13, uSeed * 4.31));
+                  // TIMBRE → HUE. The centroid moves the CENTRE of the
+                  // distribution (a dark chest voice or a bass string opens
+                  // crimson flowers, a bright falsetto opens white / pale blue /
+                  // violet ones) while a wide per-plant spread keeps the bed
+                  // varied — a single hue for the whole field looks synthetic.
+                  float hj = (h11(seed * 17.0 + 0.9) - 0.5) * 0.40;
+                  float centre = mix(0.30, clamp(0.02 + 0.94 * cen, 0.0, 1.0),
+                    0.15 + 0.85 * uHueMove);
+                  hue = clamp(centre + hj + 0.05 * arc, 0.0, 1.0);
+                  // ~1 plant in 6 is an ACCENT drawn from the far end of the
+                  // ramp (deep crimson or violet), so the bed never turns into
+                  // one flat hue even while the singer holds one timbre
+                  if (h11(seed * 53.0 + 4.4) < 0.17) {
+                    hue = clamp(hue > 0.5 ? hue - 0.42 : hue + 0.46, 0.0, 1.0);
+                  }
+                  // PITCH → HEIGHT. A high sustained note grows a tall stem.
+                  hgt = clamp((0.070 + 0.135 * h11(seed * 7.7 + 2.3)) *
+                    (0.55 + 0.95 * pit), 0.045, 0.30);
+                  stage = 0.0;
+                  wilt = 0.0;
+                }
+              }
+            } else {
+              // ---- living plant: sound advances the life cycle --------------
+              // ~3s from shoot to open flower while the singer holds a voice at
+              // the default 伸びる速さ (≈9s at 0, ≈2s at 1) — slow enough that
+              // the sprout → stem → bud → bloom progression is READABLE, which
+              // is the whole point of the piece
+              float ds;
+              if (stage < 1.0) {
+                ds = 0.14 + 0.85 * sus + 0.25 * rms;
+              } else if (stage < 2.0) {
+                ds = 0.05 + 0.80 * sus + 0.25 * pit;
+              } else if (stage < 3.0) {
+                ds = 0.04 + 0.55 * sus + 1.10 * ons;
+              } else {
+                ds = 0.06 + 1.00 * rms + 1.40 * ons;
+              }
+              stage = min(stage + ds * uDt * (0.35 + 1.6 * uGrowth), 4.6);
+              // 有界性: silence dries any plant; a fully open flower ages anyway
+              // and sheds faster on attacks late in the song (一斉散華)
+              float quiet = 1.0 - smoothstep(0.02, 0.26, sus);
+              float bloomed = smoothstep(3.5, 4.2, stage);
+              wilt += uDt * ((0.010 + 0.115 * quiet) +
+                bloomed * (0.022 + 0.16 * uFall + 0.55 * ons * uFall * arc));
+              if (wilt >= 0.999) {
+                wilt = 1.0;
+                stage = 0.0;
+              }
+            }
+            outA = vec4(root, stage * 0.2, clamp(wilt, 0.0, 1.0));
+            outB = vec4(seed, hue, hgt * 2.0, ang / PI2 + 0.5);
+          }
+        `;
+
+        // P5 — the PETALS (and seed fluff). Free particles, two MRT attachments,
+        // ping-pong:
+        //   A = (pos.x, pos.y, encV(vel))
+        //   B = (ageFraction, rotation turns, seed, hue inherited from the flower)
+        // A petal is DORMANT while ageF >= 0.999 (the initial state). It can only
+        // come into being by DETACHING from a plant that is actually in bloom —
+        // there are no petals before the first flower opens, and a failed search
+        // leaves the slot dormant instead of scattering a bright dot somewhere
+        // random (CRAFT §B3). Each petal then integrates its OWN acceleration
+        // (air, not water advection — CRAFT §A4): gravity pulls it down, a loud
+        // passage lifts it, the performer's motion field gusts it, curl noise
+        // wafts it, and it tumbles.
+        const petalFS = `#version 300 es
+          precision highp float;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform sampler2D uPlantA;
+          uniform sampler2D uPlantB;
+          uniform sampler2D uMask;
+          uniform float uTexW;
+          uniform float uCount;
+          uniform float uPlantW;
+          uniform float uPlantN;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uSeed;
+          uniform float uAspect;
+          uniform float uWind;
+          uniform float uFall;
+          uniform float uSway;
+          uniform vec4 uAudA;
+          uniform vec4 uAudB;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_PLANT}
+          void main() {
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexW + float(tc.x);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            if (uDt <= 0.0) {           // frozen: hold the state exactly
+              outA = A;
+              outB = B;
+              return;
+            }
+            vec2 pos = A.xy;
+            vec2 vel = decV(A.zw);
+            float ageF = B.x;
+            float rot = B.y;
+            float seed = B.z;
+            float hue = B.w;
+            vec4 tr = petalTraits(idx);
+            float kind = tr.z;
+
+            float rms = uAudA.x;
+            float zcr = uAudA.z;
+            float ons = uAudA.w;
+
+            if (ageF >= 0.999) {
+              // ---- dormant: try to detach from a blooming flower ------------
+              // petals per SECOND for the whole field, spread over the pool.
+              // Breathy singing (high ZCR) sends up more seed fluff.
+              float rate = (3.0 + 85.0 * uFall) *
+                (0.10 + 0.70 * rms + 1.8 * ons + 0.5 * zcr * kind);
+              float pr = rate * uDt / max(uCount, 1.0);
+              if (hash12(vec2(idx * 2.13, uSeed * 1.31)) < pr) {
+                for (int k = 0; k < 6; k++) {
+                  float pick = floor(hash12(vec2(idx * 7.70 + float(k) * 3.31,
+                    uSeed * 5.11 + float(k) * 1.97)) * uPlantN);
+                  ivec2 ptc = ivec2(int(mod(pick, uPlantW)),
+                    int(floor(pick / uPlantW)));
+                  vec4 PA = texelFetch(uPlantA, ptc, 0);
+                  vec4 PB = texelFetch(uPlantB, ptc, 0);
+                  float pstage = PA.z * 5.0;
+                  if (PA.w < 0.999 && pstage > 3.35) {
+                    vec2 ar = vec2(uAspect, 1.0);
+                    float pseed = PB.x;
+                    float plen = plantLen(pstage, PB.z * 0.5);
+                    vec2 headA = stemPoint(PA.xy * ar, (PB.w - 0.5) * PI2, plen,
+                      1.0, pseed, uTime, uSway);
+                    vec2 head = headA / ar;
+                    vec2 jit = (hash22(vec2(idx * 3.7, uSeed * 9.1)) - 0.5);
+                    float spread = plantHeadSize(pseed, plantSpecies(pseed));
+                    pos = head + jit * spread * 1.4 / ar;
+                    hue = PB.y;
+                    seed = hash12(vec2(idx * 4.31, uSeed * 7.13));
+                    // thrown outward from the flower, then physics takes over
+                    float a0 = hash12(vec2(seed * 21.0, 3.1)) * PI2;
+                    vel = vec2(cos(a0), sin(a0)) * (0.02 + 0.10 * rms + 0.16 * ons);
+                    vel.y += kind > 0.5 ? 0.05 : -0.02;
+                    ageF = 0.0;
+                    rot = hash12(vec2(seed * 5.0, 11.3));
+                    break;
+                  }
+                }
+              }
+            } else {
+              // ---- living petal: its own acceleration -----------------------
+              ageF += uDt / tr.x;
+              vec4 mk = texture(uMask, pos);
+              vec2 flow = decV(mk.ba);
+              vec2 cn = curlN(pos * vec2(uAspect, 1.0) * 3.0 +
+                        vec2(0.0, -uTime * 0.05)) +
+                        0.5 * curlN(pos * vec2(uAspect, 1.0) * 7.0 +
+                        vec2(uTime * 0.03, 0.0));
+              vel += cn * (0.014 + 0.070 * uWind) * uDt;
+              // GUST: the performer's movement blows the petals around
+              vel += flow * (1.8 + 8.0 * uWind) * uDt;
+              if (kind > 0.5) {
+                vel.y += (0.045 + 0.10 * rms) * uDt;      // seed fluff rises
+                vel *= exp(-uDt * 1.25);
+              } else {
+                // petals FALL — unless the song lifts them (声が大きいと舞い上がる)
+                vel.y += (-0.175 + 0.34 * rms + 0.45 * ons) * uDt;
+                vel *= exp(-uDt * 0.85);
+              }
+              vel = clamp(vel, vec2(-VMAX), vec2(VMAX));
+              pos += vel * uDt;
+              rot = fract(rot + tr.w * uDt * (0.6 + length(vel) * 5.0));
+              bool gone = pos.x < -0.15 || pos.x > 1.15 ||
+                          pos.y < -0.18 || pos.y > 1.25;
+              if (ageF >= 1.0 || gone) ageF = 1.0;
+            }
+            outA = vec4(pos, encV(vel));
+            outB = vec4(ageF, rot, seed, hue);
+          }
+        `;
+
+        // P6a — stems and leaves. One instanced quad per stem segment plus a few
+        // per plant for leaves; the segment endpoints are computed from the plant
+        // state with the SHARED stemPoint(), so the drawn stem is exactly the
+        // curve the petals detach from. Drawn with PREMULTIPLIED-ALPHA over
+        // blending, which is what lets dark green stems sit on the real footage
+        // (an additive layer can only ever brighten).
+        const stemVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uPlantA;
+          uniform sampler2D uPlantB;
+          uniform float uPlantW;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uSway;
+          uniform float uSize;
+          uniform vec4 uAudB;
+          out vec2 vP;
+          out vec4 vSeg;
+          out vec4 vAttr;    // kind(0 stem / 1 leaf), half width, wilt, s
+          out vec3 vCol;
+          out vec2 vLocal;
+          out float vSeed;
+          ${CHUNK_NOISE}
+          ${CHUNK_PALETTE}
+          ${CHUNK_PLANT}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
+          const float SEGS = ${STEM_SEGS}.0;
+          const float PER = ${STEM_PER}.0;
+          void main() {
+            vP = vec2(0.0);
+            vSeg = vec4(0.0);
+            vAttr = vec4(0.0);
+            vCol = vec3(0.0);
+            vLocal = vec2(0.0);
+            vSeed = 0.0;
+            float inst = float(gl_InstanceID);
+            float pid = floor(inst / PER);
+            float part = inst - pid * PER;
+            ivec2 tc = ivec2(int(mod(pid, uPlantW)), int(floor(pid / uPlantW)));
+            vec4 A = texelFetch(uPlantA, tc, 0);
+            vec4 B = texelFetch(uPlantB, tc, 0);
+            float stage = A.z * 5.0;
+            float wilt = A.w;
+            if (wilt >= 0.999 || stage <= 0.03) {
+              gl_Position = vec4(3.0, 3.0, 0.0, 1.0);   // dormant: park offscreen
+              return;
+            }
+            vec2 ar = vec2(uAspect, 1.0);
+            float seed = B.x;
+            float hue = B.y;
+            float hgt = B.z * 0.5;
+            float ang = (B.w - 0.5) * PI2;
+            float species = plantSpecies(seed);
+            float len = plantLen(stage, hgt);
+            vec2 rootA = A.xy * ar;
+            vSeed = seed;
+            // a wilting stem browns and thins
+            vec3 green = mix(LEAF_D, LEAF_L, 0.35 + 0.5 * h11(seed * 3.7 + 5.1));
+            green = mix(green, vec3(0.185, 0.130, 0.070), 0.75 * wilt);
+            vec2 P;
+            if (part < SEGS) {
+              float s0 = part / SEGS;
+              float s1 = (part + 1.0) / SEGS;
+              vec2 a = stemPoint(rootA, ang, len, s0, seed, uTime, uSway);
+              vec2 b = stemPoint(rootA, ang, len, s1, seed, uTime, uSway);
+              float w = plantStemW(seed, species) * (0.70 + 0.6 * uSize) *
+                (1.0 - 0.45 * s0) * (1.0 - 0.25 * wilt);
+              vec2 axis = b - a;
+              float L = length(axis);
+              vec2 ax = L > 1e-6 ? axis / L : vec2(0.0, 1.0);
+              vec2 pv = vec2(-ax.y, ax.x);
+              vec2 q = QUAD[gl_VertexID];
+              P = 0.5 * (a + b) + ax * q.x * (0.5 * L + w * 1.6) + pv * q.y * w * 1.8;
+              vSeg = vec4(a, b);
+              vAttr = vec4(0.0, w, wilt, s0);
+              vCol = green * (0.75 + 0.5 * s0);
+              vLocal = q;
+            } else {
+              float j = part - SEGS;
+              float s = 0.24 + 0.21 * j;
+              if (len < 0.012) {          // no stem yet: no leaves on it
+                gl_Position = vec4(3.0, 3.0, 0.0, 1.0);
+                return;
+              }
+              vec2 c = stemPoint(rootA, ang, len, s, seed, uTime, uSway);
+              vec2 t0 = stemPoint(rootA, ang, len, max(0.0, s - 0.06), seed, uTime, uSway);
+              vec2 tang = normalize(c - t0 + vec2(1e-5, 1e-5));
+              // leaves alternate sides and lift toward the light
+              float side = mod(j, 2.0) < 0.5 ? 1.0 : -1.0;
+              float la = atan(tang.y, tang.x) + side * (0.85 + 0.35 * h11(seed * 9.1 + j));
+              float ls = (0.013 + 0.017 * h11(seed * 5.3 + j * 3.1)) *
+                (0.7 + 0.7 * uSize) * clamp(stage, 0.0, 1.4) / 1.4 *
+                (0.55 + 0.9 * hgt / 0.30);
+              vec2 ld = vec2(cos(la), sin(la));
+              vec2 lp = vec2(-ld.y, ld.x);
+              vec2 q = QUAD[gl_VertexID];
+              P = c + ld * (q.x * 0.5 + 0.5) * ls * 2.0 + lp * q.y * ls * 0.44;
+              vSeg = vec4(c, ld);
+              vAttr = vec4(1.0, ls, wilt, s);
+              vCol = green * (0.85 + 0.35 * h11(seed * 7.1 + j));
+              vLocal = q;
+            }
+            vP = P;
+            gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const stemFS = `#version 300 es
+          precision highp float;
+          in vec2 vP;
+          in vec4 vSeg;
+          in vec4 vAttr;
+          in vec3 vCol;
+          in vec2 vLocal;
+          in float vSeed;
+          out vec4 fragColor;
+          ${CHUNK_NOISE}
+          void main() {
+            float kind = vAttr.x;
+            float wilt = vAttr.z;
+            float cov;
+            vec3 col = vCol;
+            if (kind < 0.5) {
+              // --- stem: a tapered line with a lit edge on one side so it reads
+              // as a round stalk instead of a flat stroke
+              float d = sdSeg(vP, vSeg.xy, vSeg.zw);
+              float w = vAttr.y;
+              cov = 1.0 - smoothstep(w * 0.55, w, d);
+              float across = clamp(vLocal.y * 0.5 + 0.5, 0.0, 1.0);
+              col *= 0.65 + 0.85 * pow(1.0 - abs(vLocal.y), 0.8);
+              col += vec3(0.10, 0.16, 0.10) * smoothstep(0.55, 1.0, across);
+            } else {
+              // --- leaf: a slender pointed blade with a central vein
+              vec2 p = vLocal;
+              float ty = clamp(p.x * 0.5 + 0.5, 0.0, 1.0);
+              float prof = pow(clamp(sin(ty * 3.14159265), 0.0, 1.0), 0.72);
+              float halfw = 0.86 * prof;
+              cov = smoothstep(1.0, 0.55, abs(p.y) / max(halfw, 1e-3));
+              float vein = smoothstep(0.13, 0.0, abs(p.y)) * prof;
+              col *= 0.72 + 0.55 * prof;
+              col += vCol * 0.55 * vein;
+              cov *= 1.0 - 0.35 * wilt;
+            }
+            float a = clamp(cov, 0.0, 1.0) * 0.96;
+            if (a <= 0.01) discard;
+            fragColor = vec4(col * a, a);      // premultiplied over
+          }
+        `;
+
+        // P6b — the flower heads: bud → open flower → wilt, one instanced quad
+        // per plant. The shape is CARVED (deep petal scallops, dark seams between
+        // the petals, a saturated stamen, a green calyx while it is still a bud,
+        // a stacked spike for the 穂 species) — never a round bokeh dot, which on
+        // any ground reads as "light" rather than "flower" (CRAFT §B1).
+        const headVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uPlantA;
+          uniform sampler2D uPlantB;
+          uniform float uPlantW;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uSway;
+          uniform float uSize;
+          uniform float uGlow;
+          uniform vec4 uAudA;
+          uniform vec4 uAudB;
+          out vec2 vLocal;
+          out vec4 vAttr;    // bloom, petals, wilt, species
+          out vec3 vCol;
+          out float vSeed;
+          out float vGlow;
+          ${CHUNK_NOISE}
+          ${CHUNK_PALETTE}
+          ${CHUNK_PLANT}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
+          void main() {
+            vLocal = vec2(0.0);
+            vAttr = vec4(0.0);
+            vCol = vec3(0.0);
+            vSeed = 0.0;
+            vGlow = 0.0;
+            float pid = float(gl_InstanceID);
+            ivec2 tc = ivec2(int(mod(pid, uPlantW)), int(floor(pid / uPlantW)));
+            vec4 A = texelFetch(uPlantA, tc, 0);
+            vec4 B = texelFetch(uPlantB, tc, 0);
+            float stage = A.z * 5.0;
+            float wilt = A.w;
+            if (wilt >= 0.999 || stage <= 0.05) {
+              gl_Position = vec4(3.0, 3.0, 0.0, 1.0);
+              return;
+            }
+            vec2 ar = vec2(uAspect, 1.0);
+            float seed = B.x;
+            float hue = B.y;
+            float hgt = B.z * 0.5;
+            float ang = (B.w - 0.5) * PI2;
+            float species = plantSpecies(seed);
+            float len = plantLen(stage, hgt);
+            vec2 rootA = A.xy * ar;
+            vec2 c = stemPoint(rootA, ang, len, 1.0, seed, uTime, uSway);
+            vec2 c0 = stemPoint(rootA, ang, len, 0.90, seed, uTime, uSway);
+            vec2 tang = normalize(c - c0 + vec2(1e-5, 1e-5));
+            // stage → geometry: a shoot tip, then a swelling bud, then the open
+            // flower. The last loud passage is what actually opens it.
+            float shoot = smoothstep(0.0, 1.0, stage);
+            float budT = smoothstep(1.55, 2.95, stage);
+            float bloomT = smoothstep(3.05, 4.25, stage);
+            // the three stage weights SUM TO 1, so a fully open flower is exactly
+            // plantHeadSize and never twice it
+            float scale = plantHeadSize(seed, species) * (0.55 + 1.35 * uSize) *
+              (0.14 * shoot + 0.26 * budT + 0.60 * bloomT) * (1.0 - 0.20 * wilt);
+            // a bloom breathes with the loudness of the voice
+            scale *= 1.0 + 0.10 * uAudA.x * bloomT;
+            vec3 col = flowerHue(hue);
+            // late in the song the whole field warms and deepens
+            col = mix(col, col * vec3(1.05, 0.90, 0.94), 0.35 * uAudB.w);
+            col = mix(col, col * vec3(0.72, 0.55, 0.52), 0.55 * wilt);
+            vCol = col;
+            vAttr = vec4(bloomT, plantPetals(seed), wilt, species);
+            vSeed = seed;
+            vGlow = uGlow;
+            vLocal = QUAD[gl_VertexID];
+            // the flower faces along the stem: rotate the quad so local +Y is
+            // the stem tangent (spikes and small florets read as "growing")
+            float rot = atan(tang.y, tang.x) - 1.57079633;
+            float cs = cos(rot), sn = sin(rot);
+            vec2 q = vLocal;
+            vec2 rq = vec2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
+            vec2 P = c + rq * scale;
+            gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const headFS = `#version 300 es
+          precision highp float;
+          in vec2 vLocal;
+          in vec4 vAttr;
+          in vec3 vCol;
+          in float vSeed;
+          in float vGlow;
+          out vec4 fragColor;
+          ${CHUNK_NOISE}
+          ${CHUNK_PALETTE}
+          void main() {
+            float bloomT = vAttr.x;
+            float petals = vAttr.y;
+            float wilt = vAttr.z;
+            float species = vAttr.w;
+            vec2 p = vLocal;
+            float r = length(p);
+            if (r > 1.02) discard;
+            float ang = atan(p.y, p.x);
+            vec3 col;
+            float cov;
+
+            if (species > 1.5) {
+              // ---- 穂: a spike of tiny florets stacked along the stem
+              float sp = 0.0;
+              float coreS = 0.0;
+              for (int i = 0; i < 7; i++) {
+                float fi = float(i);
+                vec2 c = vec2(0.17 * sin(fi * 2.4 + vSeed * 9.0) * (0.4 + 0.6 * bloomT),
+                  -0.80 + 0.26 * fi);
+                float rr = (0.10 + 0.07 * h11(vSeed * 13.0 + fi)) *
+                  (0.45 + 0.75 * bloomT);
+                float d = length(p - c);
+                sp = max(sp, 1.0 - smoothstep(rr * 0.72, rr, d));
+                coreS = max(coreS, 1.0 - smoothstep(rr * 0.18, rr * 0.42, d));
+              }
+              cov = sp;
+              col = vCol * (0.55 + 0.55 * sp);
+              col += mix(vCol, vec3(1.0, 0.92, 0.68), 0.55) * coreS *
+                (0.35 + 1.1 * vGlow) * bloomT;
+            } else {
+              // ---- bud: a slim teardrop calyx with sepal ribs, the petal colour
+              // just showing at the tip as it swells (not a green ball)
+              vec2 bp = p * vec2(1.85, 0.98);
+              float taper = 0.72 - 0.30 * smoothstep(-0.2, 1.0, p.y);
+              float budCov = 1.0 - smoothstep(taper * 0.86, taper, length(bp));
+              float ribs = 0.5 + 0.5 * cos(atan(bp.y, bp.x) * 6.0 + vSeed * 9.0);
+              vec3 budCol = mix(LEAF_D, LEAF_L, 0.30 + 0.45 * ribs);
+              budCol = mix(budCol, vCol, smoothstep(0.25, 0.95, p.y) * 0.62);
+
+              // ---- open flower: WIDE rounded petals with dark seams between
+              // them, a lighter tip and a small saturated stamen. Wide lobes and
+              // a restrained core are what keep it from reading as a star or a
+              // sparkle (CRAFT §B1).
+              float k = 0.5 + 0.5 * cos(ang * petals + vSeed * 6.0);
+              float petal = pow(k, 0.30);
+              float ragged = 1.0 - 0.07 * vnoise(vec2(ang * 6.0, vSeed * 30.0));
+              float rad = mix(0.60, 1.0, petal) * ragged * (1.0 - 0.14 * wilt);
+              rad *= mix(0.34, 1.0, bloomT);          // petals unfold outward
+              float edge = smoothstep(rad, rad * 0.90, r);
+              // the seam only bites the OUTER half of the petal, so the flower
+              // keeps a continuous disc near the middle instead of splitting
+              // into separate rays
+              float seam = mix(1.0, smoothstep(0.02, 0.34, petal),
+                smoothstep(0.30, 0.95, r / max(rad, 1e-3)));
+              // petal shading: darker at the throat, lighter toward the tip
+              float shade = 0.62 + 0.55 * smoothstep(0.10, 0.95, r / max(rad, 1e-3));
+              float vein = smoothstep(0.65, 1.0, k) *
+                (0.5 + 0.5 * sin(r * 22.0 + vSeed * 12.0)) * 0.08;
+              float core = smoothstep(0.30 * mix(1.4, 1.0, bloomT), 0.02, r);
+              vec3 fCol = vCol * (edge * seam * shade * (0.95 - 0.32 * wilt) + vein);
+              // the stamen is the only emissive part; it can exceed 1.0 so the
+              // bloom pass gives the flower a lamp instead of a halo
+              fCol += mix(vCol, vec3(1.0, 0.84, 0.42), 0.50) * core *
+                (0.22 + 0.62 * vGlow) * (0.30 + 0.85 * bloomT);
+              float fCov = clamp(edge * seam + core * 0.35, 0.0, 1.0);
+
+              float mixT = smoothstep(0.10, 0.62, bloomT);
+              cov = mix(budCov, fCov, mixT);
+              col = mix(budCol * budCov, fCol, mixT);
+            }
+            float a = clamp(cov, 0.0, 1.0) * (1.0 - 0.35 * wilt);
+            if (a <= 0.012) discard;
+            fragColor = vec4(col, a);   // col is already coverage-weighted
+          }
+        `;
+
+        // P6c — the fallen petals and the seed fluff. Instanced quads (chosen
+        // over gl.POINTS for mobile robustness: no point-size clamp and no
+        // whole-sprite clipping) with true per-petal rotation. A petal is an
+        // almond with a centre vein that STRETCHES with speed; fluff is a soft
+        // filamented puff. Premultiplied over, like the rest of the layer.
+        const petalDrawVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform float uTexW;
+          uniform vec2 uResolution;
+          uniform float uAspect;
+          uniform float uSize;
+          uniform float uGlow;
+          out vec2 vLocal;
+          out vec3 vCol;
+          out float vAlpha;
+          out float vKind;
+          out float vSeed;
+          out float vGlow;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_PALETTE}
+          ${CHUNK_PLANT}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
+          void main() {
+            vLocal = vec2(0.0);
+            vCol = vec3(0.0);
+            vAlpha = 0.0;
+            vKind = 0.0;
+            vSeed = 0.0;
+            vGlow = 0.0;
+            int i = gl_InstanceID;
+            int tw = int(uTexW);
+            ivec2 tc = ivec2(i % tw, i / tw);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            float ageF = B.x;
+            if (ageF >= 0.999) {
+              gl_Position = vec4(3.0, 3.0, 0.0, 1.0);   // dormant
+              return;
+            }
+            vec4 tr = petalTraits(float(i));
+            vec2 pos = A.xy;
+            vec2 vel = decV(A.zw);
+            float rot = B.y * PI2;
+            float halfSz = 0.5 * (tr.y / max(uResolution.y, 1.0)) *
+              (0.55 + 1.5 * uSize);
+            vKind = tr.z;
+            vSeed = B.z;
+            vGlow = uGlow;
+            vCol = flowerHue(B.w) * (tr.z > 0.5 ? 0.55 : 1.0);
+            // fades in as it detaches and out as it dies
+            vAlpha = smoothstep(0.0, 0.06, ageF) * (1.0 - smoothstep(0.72, 1.0, ageF));
+            vec2 q = QUAD[gl_VertexID];
+            vLocal = q;
+            vec2 shape = q;
+            if (tr.z < 0.5) {
+              float stretch = 1.20 + 0.55 * clamp(length(vel) * 1.4, 0.0, 1.6);
+              shape = vec2(q.x * 0.52, q.y * stretch);
+            }
+            float cs = cos(rot), sn = sin(rot);
+            vec2 rq = vec2(shape.x * cs - shape.y * sn, shape.x * sn + shape.y * cs);
+            vec2 ar = vec2(uAspect, 1.0);
+            vec2 P = pos * ar + rq * halfSz;
+            gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const petalDrawFS = `#version 300 es
+          precision highp float;
+          in vec2 vLocal;
+          in vec3 vCol;
+          in float vAlpha;
+          in float vKind;
+          in float vSeed;
+          in float vGlow;
+          out vec4 fragColor;
+          ${CHUNK_NOISE}
+          void main() {
+            vec2 p = vLocal;
+            if (vKind > 0.5) {
+              // ---- seed fluff: a soft dandelion puff carried by the breath.
+              // Few, long, soft filaments — a many-spoked star reads as a
+              // snowflake instead of down (CRAFT §B1).
+              float r = length(p);
+              if (r > 1.0) discard;
+              float ang = atan(p.y, p.x);
+              float fil = pow(0.5 + 0.5 * sin(ang * 6.0 + vSeed * 30.0), 1.6);
+              float body = 1.0 - smoothstep(0.10, 0.98, r);
+              float a = (body * (0.16 + 0.34 * fil)) * vAlpha * 0.42;
+              if (a <= 0.005) discard;
+              vec3 c = mix(vec3(0.94, 0.96, 1.0), vCol, 0.22) * (0.80 + 0.4 * vGlow);
+              fragColor = vec4(c * a, a);
+              return;
+            }
+            // ---- petal: almond, pointed at both ends, with a centre vein
+            float ty = clamp(p.y * 0.5 + 0.5, 0.0, 1.0);
+            float prof = pow(clamp(sin(ty * 3.14159265), 0.0, 1.0), 0.62);
+            float halfw = 0.90 * prof;
+            float dx = abs(p.x) / max(halfw, 1e-3);
+            float body = smoothstep(1.0, 0.40, dx);
+            float vein = smoothstep(0.15, 0.0, abs(p.x)) * prof;
+            float a = body * vAlpha * 0.95;
+            if (a <= 0.006) discard;
+            // curl: one flank catches the light as the petal tumbles
+            vec3 c = vCol * (0.62 + 0.55 * smoothstep(-0.6, 0.9, p.x) + 0.30 * vein);
+            c *= 0.85 + 0.45 * vGlow;
+            fragColor = vec4(c * a, a);
+          }
+        `;
+
+        // P7 — bloom bright pass: only the parts of the flower layer that are
+        // genuinely luminous (the stamens, the brightest petal flanks) are
+        // allowed to glow. Downsamples at the same time.
+        const brightFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          void main() {
+            vec3 c = texture(uSrc, vUv).rgb;
+            float l = dot(c, vec3(0.299, 0.587, 0.114));
+            // only the genuinely emissive parts (stamens, the hottest petal
+            // flanks — the ones written above 1.0) are allowed to glow. A low
+            // threshold makes every petal halo and the field reads as sparkles.
+            fragColor = vec4(c * smoothstep(0.80, 1.60, l), 1.0);
+          }
+        `;
+
+        // P8 — composite. The ground is the REAL WORLD: the camera is not
+        // replaced, it is graded and then loses its grip on the real the further
+        // it is from the performer — smeared along the local flow, desaturated,
+        // and finally sunk into a night garden. The abstraction field is
+        // (frame margin + fbm patches − person proximity): deriving it from
+        // distance-to-body alone paints a BODY-SHAPED halo, which is the cut-out
+        // look returning as a soft glow (kiin-seido invariant 1).
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform sampler2D uAura;
+          uniform sampler2D uField;
+          uniform sampler2D uB1;
+          uniform sampler2D uB2;
+          uniform vec2 uResolution;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uExposure;
+          uniform float uBgAbs;
+          uniform float uGlow;
+          uniform float uFilmGrain;
+          uniform float uPresent;
+          uniform vec4 uAudA;
+          uniform vec4 uAudB;
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_PALETTE}
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            vec2 ar = vec2(uAspect, 1.0);
+            vec4 m = texture(uMask, vUv);
+            vec2 flow = decV(m.ba);
+            float soft = texture(uSoft, vUv).r;
+            float aura = texture(uAura, vUv).r;
+            vec4 F = texture(uField, vUv);
+
+            // ---- the abstraction field -----------------------------------
+            // The proximity term (which keeps the singer's surround
+            // photographic) must NOT be a clean function of distance-to-body:
+            // against a dark garden a smooth "protected" bubble reads as a
+            // spotlight halo — the cut-out returning as a glow. So the aura is
+            // sampled through a turbulent warp and then broken by the same fbm
+            // patches that dissolve the rest of the frame, and a floor of
+            // abstraction applies everywhere (no perfectly untouched bubble).
+            float ragged = fbm4(vUv * ar * 26.0 + 9.0) - 0.5;
+            vec2 wp = vUv + curlN(vUv * ar * 3.6 + 21.0) * 0.022;
+            float auraW = texture(uAura, wp).r;
+            float edgeM = smoothstep(0.16, 0.64,
+              length((vUv - 0.5) * vec2(1.05, 1.0)));
+            float blotchF = smoothstep(0.34, 0.74, fbm4(vUv * ar * 2.2 + 13.0));
+            // two break scales, so the photographic margin around the singer
+            // shows up as PATCHES of the real room rather than as a contour glow
+            float brk = smoothstep(0.30, 0.78, fbm4(vUv * ar * 5.5 + 31.0));
+            float near = smoothstep(0.05, 0.50, auraW) *
+              (0.18 + 0.62 * blotchF + 0.42 * brk);
+            // the person's OWN pixels are the subject, not background: they stay
+            // photographic, with the boundary torn by brush-scale noise so it can
+            // never harden into a sticker edge (CRAFT §A2)
+            float onBody = smoothstep(0.35, 0.82, m.r + ragged * 0.12);
+            float abst = clamp(uBgAbs * (0.30 + 0.55 * edgeM +
+              0.85 * blotchF * (0.35 + 0.65 * edgeM) - 0.62 * near), 0.0, 1.0);
+            abst *= 1.0 - 0.88 * onBody * uPresent;
+
+            // ---- the ground: real footage, graded and dissolved -----------
+            vec3 camRaw = texture(uScene, vUv).rgb;
+            vec2 dirv = normalize(flow + vec2(1e-4, 1e-4));
+            vec2 smr = dirv * 0.0045 +
+              curlN(vUv * ar * 3.0 + vec2(0.0, uTime * 0.03)) * 0.004;
+            vec3 camS = 0.25 * (texture(uScene, vUv + smr).rgb +
+              texture(uScene, vUv - smr).rgb +
+              texture(uScene, vUv + smr * 2.4).rgb +
+              texture(uScene, vUv - smr * 2.4).rgb);
+            vec3 camMix = mix(camRaw, camS, 0.10 + 0.72 * abst);
+            float gl0 = lumaf(camMix);
+            // the night garden the background sinks into: a deep blue-violet
+            // earth with a faint warm horizon, mottled so it is not a flat swatch
+            vec3 gardenA = vec3(0.014, 0.020, 0.036);
+            vec3 gardenB = vec3(0.040, 0.026, 0.052);
+            vec3 garden = mix(gardenA, gardenB,
+              smoothstep(0.30, 0.70, fbm4(vUv * ar * 2.6 + 5.0)));
+            garden += vec3(0.026, 0.017, 0.012) * (1.0 - smoothstep(0.0, 0.45, vUv.y));
+            garden *= 0.45 + 0.85 * gl0;     // keep the footage's own light shape
+            vec3 bg = mix(camMix, mix(vec3(gl0), camMix, 0.30) * 0.60, abst * 0.85);
+            bg *= mix(1.0, 0.52, abst);      // dusk falloff away from the singer
+            bg = mix(bg, garden, pow(abst, 1.05) * 0.95);
+            bg = clamp(bg * uExposure, 0.0, 4.0);
+
+            // ---- the flower layer, premultiplied over the ground ----------
+            vec3 col = bg * (1.0 - clamp(F.a, 0.0, 1.0)) + F.rgb;
+
+            // ---- keep the singer legible: the person's CORE comes back ~half
+            // in front of the flowers, so blossoms crossing the body read as a
+            // translucent foreground instead of erasing the face. The boundary
+            // is broken with the same brush-scale noise.
+            float deep = smoothstep(0.62, 0.96, m.r + ragged * 0.14);
+            col = mix(col, bg, deep * 0.50 * uPresent);
+
+            // ---- bloom: the flowers' own light ---------------------------
+            vec3 b1 = texture(uB1, vUv).rgb;
+            vec3 b2 = texture(uB2, vUv).rgb;
+            col += (b1 * 0.42 + b2 * 0.66) * (0.22 + 1.05 * uGlow);
+
+            // ---- shoulder tonemap: tames the glow WITHOUT crushing the
+            // photograph (a global filmic curve would darken the whole room)
+            float l = lumaf(col);
+            float lt = l < 0.72 ? l : 0.72 + (l - 0.72) / (1.0 + (l - 0.72) * 1.7);
+            col *= l > 1e-4 ? lt / l : 1.0;
+
+            // ---- static grain + vignette (seeded by pixel only) ----------
+            float h1 = hash12(floor(gl_FragCoord.xy));
+            col += (h1 - 0.5) * uFilmGrain * (0.045 +
+              0.075 * (1.0 - smoothstep(0.05, 0.6, lumaf(col))));
+            float vig = 1.0 - 0.16 * pow(clamp(
+              length((vUv - 0.5) * vec2(1.04, 1.0)) * 1.42, 0.0, 1.0), 2.0);
+            col *= vig;
+
+            if (uDebug == 1) {
+              col = vec3(m.r, m.g, clamp(length(flow) * 2.0, 0.0, 1.0));
+            } else if (uDebug == 2) {
+              // audio meters: rms / sustain / centroid / zcr / pitch / arc
+              float vals[6];
+              vals[0] = uAudA.x; vals[1] = uAudB.x; vals[2] = uAudA.y;
+              vals[3] = uAudA.z; vals[4] = uAudB.y; vals[5] = uAudB.w;
+              col = vec3(0.03, 0.035, 0.05);
+              for (int i = 0; i < 6; i++) {
+                float y0 = 0.14 + 0.115 * float(i);
+                float band = 1.0 - smoothstep(0.030, 0.038, abs(vUv.y - y0));
+                float fill = step(vUv.x, 0.08 + 0.84 * clamp(vals[i], 0.0, 1.0));
+                col = mix(col, flowerHue(0.08 + 0.13 * float(i)),
+                  band * fill * 0.95);
+                col = mix(col, vec3(0.16), band * (1.0 - fill) * 0.6);
+              }
+              col = mix(col, vec3(1.0, 0.85, 0.5),
+                (1.0 - smoothstep(0.02, 0.05, length((vUv - vec2(0.94, 0.88)) *
+                vec2(uAspect, 1.0)))) * clamp(uAudA.w, 0.0, 1.0));
+            } else if (uDebug == 3) {
+              float band = clamp(soft - m.r, 0.0, 1.0);
+              col = vec3(band * 3.0, clamp(F.a, 0.0, 1.0), aura * 1.6);
+            } else if (uDebug == 4) {
+              col = F.rgb + vec3(0.10) * clamp(F.a, 0.0, 1.0);
+            } else if (uDebug == 5) {
+              float row = floor(vUv.y * 3.0);
+              col = row < 1.0 ? mix(LEAF_D, LEAF_L, vUv.x)
+                : (row < 2.0 ? flowerHue(vUv.x)
+                : mix(vec3(0.020, 0.028, 0.046), vec3(0.052, 0.036, 0.062), vUv.x));
+            }
+            col = min(col, vec3(0.985));      // hard whiteout guard
+            fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program / target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgramVS(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function createProgram(fsSource) {
+          return createProgramVS(fullscreenVS, fsSource);
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          mask: createProgram(maskFS),
+          blur: createProgram(blurFS),
+          plant: createProgram(plantFS),
+          petal: createProgram(petalFS),
+          stem: createProgramVS(stemVS, stemFS),
+          head: createProgramVS(headVS, headFS),
+          petalDraw: createProgramVS(petalDrawVS, petalDrawFS),
+          bright: createProgram(brightFS),
+          composite: createProgram(compositeFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uCx", "uCy",
+            "uSwing", "uScale", "uMirror", "uFake", "uHasVideo",
+          ]),
+          mask: getLocations(programs.mask, [
+            "uScene", "uScenePrev", "uPrev", "uSeg", "uTexel", "uSegScale",
+            "uAspect", "uCx", "uCy", "uSwing", "uScale", "uDt", "uAlphaFast",
+            "uAlphaSlow", "uAlphaMot", "uReset", "uSource", "uMirror",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          plant: getLocations(programs.plant, [
+            "uPlantA", "uPlantB", "uMask", "uSoft", "uAura", "uTexel", "uTexW",
+            "uCount", "uDt", "uSeed", "uAspect", "uPresent", "uBloomAmt",
+            "uGrowth", "uFall", "uHueMove", "uAudA", "uAudB",
+          ]),
+          petal: getLocations(programs.petal, [
+            "uStateA", "uStateB", "uPlantA", "uPlantB", "uMask", "uTexW",
+            "uCount", "uPlantW", "uPlantN", "uDt", "uTime", "uSeed", "uAspect",
+            "uWind", "uFall", "uSway", "uAudA", "uAudB",
+          ]),
+          stem: getLocations(programs.stem, [
+            "uPlantA", "uPlantB", "uPlantW", "uAspect", "uTime", "uSway",
+            "uSize", "uAudB",
+          ]),
+          head: getLocations(programs.head, [
+            "uPlantA", "uPlantB", "uPlantW", "uAspect", "uTime", "uSway",
+            "uSize", "uGlow", "uAudA", "uAudB",
+          ]),
+          petalDraw: getLocations(programs.petalDraw, [
+            "uStateA", "uStateB", "uTexW", "uResolution", "uAspect", "uSize",
+            "uGlow",
+          ]),
+          bright: getLocations(programs.bright, ["uSrc"]),
+          composite: getLocations(programs.composite, [
+            "uScene", "uMask", "uSoft", "uAura", "uField", "uB1", "uB2",
+            "uResolution", "uAspect", "uTime", "uExposure", "uBgAbs", "uGlow",
+            "uFilmGrain", "uPresent", "uAudA", "uAudB", "uDebug",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type, filter) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          const f = filter || gl.LINEAR;
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          return tex;
+        }
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type, gl.LINEAR);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+        // A ping-pong-able STATE set: two data textures (NEAREST — pure state,
+        // read with texelFetch) sharing one MRT framebuffer.
+        function createStateSet(width, height) {
+          const internal = floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const texA = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const texB = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, texB, 0);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { texA, texB, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          if (target.tex) gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        // Empty VAO for attributeless draws (fullscreen tri + instanced quads).
+        const vao = gl.createVertexArray();
+
+        // Plant + petal state ping-pong (allocated once; canvas-size independent).
+        const plantSets = [
+          createStateSet(PLANT_W, PLANT_H),
+          createStateSet(PLANT_W, PLANT_H),
+        ];
+        const petalSets = [
+          createStateSet(PETAL_W, PETAL_H),
+          createStateSet(PETAL_W, PETAL_H),
+        ];
+        let plantPing = false;
+        let petalPing = false;
+
+        // Video texture (DOM source → UNPACK_FLIP_Y). The segmentation texture is
+        // a plain R8 upload from MediaPipe (image space, no flip on upload).
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const segTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, segTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        // 8 bytes, not 4: R8 rows are padded to UNPACK_ALIGNMENT (4) so a 2x2
+        // upload needs 4 bytes per row
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 2, 2, 0, gl.RED, gl.UNSIGNED_BYTE,
+          new Uint8Array(8));
+        let segSize = [2, 2];
+
+        let targets = null;
+        let paintW = 2, paintH = 2, fieldW = 2, fieldH = 2, glowW = 2, glowH = 2;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          const b1W = Math.max(4, Math.round(glowW / 2));
+          const b1H = Math.max(4, Math.round(glowH / 2));
+          const b2W = Math.max(4, Math.round(glowW / 4));
+          const b2H = Math.max(4, Math.round(glowH / 4));
+          targets = {
+            sceneA: createTarget(paintW, paintH, false),
+            sceneB: createTarget(paintW, paintH, false),
+            maskA: createTarget(fieldW, fieldH, true),
+            maskB: createTarget(fieldW, fieldH, true),
+            softT: createTarget(fieldW, fieldH, true),
+            softTmp: createTarget(fieldW, fieldH, true),
+            auraT: createTarget(fieldW, fieldH, true),
+            auraTmp: createTarget(fieldW, fieldH, true),
+            field: createTarget(paintW, paintH, true),
+            b1Src: createTarget(b1W, b1H, true),
+            b1Tmp: createTarget(b1W, b1H, true),
+            b1: createTarget(b1W, b1H, true),
+            b2Tmp: createTarget(b2W, b2H, true),
+            b2: createTarget(b2W, b2H, true),
+          };
+          needsReset = true;
+        }
+
+        // Encoded targets must clear to encoded zero (0.5) for the flow channel.
+        // The plant / petal pools clear to DORMANT (wilt = 1, ageF = 1).
+        function clearSimTargets() {
+          clearTarget(targets.sceneA, 0.22, 0.22, 0.25, 1);
+          clearTarget(targets.sceneB, 0.22, 0.22, 0.25, 1);
+          clearTarget(targets.maskA, 0, 0, 0.5, 0.5);
+          clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softTmp, 0, 0, 0.5, 0.5);
+          clearTarget(targets.auraT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.auraTmp, 0, 0, 0.5, 0.5);
+          clearTarget(targets.field, 0, 0, 0, 0);
+          clearTarget(targets.b1Src, 0, 0, 0, 1);
+          clearTarget(targets.b1, 0, 0, 0, 1);
+          clearTarget(targets.b2, 0, 0, 0, 1);
+        }
+
+        // Dormant pools. attachment 0 (A) = (root/pos, stage/vel), attachment 1
+        // (B) = (seed, hue, ...). wilt / ageF live in A.w / B.x respectively, so
+        // the two attachments need DIFFERENT clear values → clear them one at a
+        // time with drawBuffers masking.
+        function clearStateSet(set, aClear, bClear) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, set.fbo);
+          gl.viewport(0, 0, set.width, set.height);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.NONE]);
+          gl.clearColor(aClear[0], aClear[1], aClear[2], aClear[3]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawBuffers([gl.NONE, gl.COLOR_ATTACHMENT1]);
+          gl.clearColor(bClear[0], bClear[1], bClear[2], bClear[3]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+        }
+        function resetPools() {
+          // plants: A = (root 0.5,0.5, stage 0, wilt 1 = dormant), B = zeros
+          plantSets.forEach((s) => clearStateSet(s, [0.5, 0.5, 0, 1], [0, 0, 0, 0.5]));
+          // petals: A = (pos 0.5,0.5, vel encoded 0 = 0.5), B.x = ageF 1 = dormant
+          petalSets.forEach((s) => clearStateSet(s, [0.5, 0.5, 0.5, 0.5], [1, 0, 0, 0]));
+          plantPing = false;
+          petalPing = false;
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            const paintScale = Math.min(1, 1280 / maxSide);
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            const fieldScale = Math.min(1, 448 / maxSide);
+            fieldW = Math.max(8, Math.round(width * fieldScale));
+            fieldH = Math.max(8, Math.round(height * fieldScale));
+            const glowScale = Math.min(0.5, 960 / maxSide);
+            glowW = Math.max(8, Math.round(width * glowScale));
+            glowH = Math.max(8, Math.round(height * glowScale));
+            rebuildTargets();
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        // stride lets a 21-tap kernel reach far (the proximity aura) without
+        // turning into a truncated, boxy blur.
+        function blurPass(src, tmp, dst, sigma, stride) {
+          const st = stride || 1;
+          renderPass(tmp, programs.blur, () => {
+            bindTexture(0, src.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, st / tmp.width, 0);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 0, st / dst.height);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+        }
+        // True GPU sync for this environment: gl.finish() is effectively
+        // non-blocking under swiftshader, a 1x1 readPixels is not (CRAFT §C4).
+        const syncPixel = new Uint8Array(4);
+        function glSync() {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+        }
+
+        /* ------------------------------------------------------------------
+           Detection state (person mask + presence). Everything lives in SCREEN
+           UV so fakesource and MediaPipe drive the exact same shader path, and
+           every quantity is EMA-smoothed. Only ImageSegmenter is loaded — no
+           pose model, because nothing here needs landmarks (CRAFT §C3).
+        ------------------------------------------------------------------ */
+
+        const det = {
+          cx: 0.5, cy: 0, present: 0,
+          tcx: 0.5, tcy: 0, tpresent: 0,
+          swing: 0,
+          segScale: [1, 1],
+          segReady: false,
+        };
+
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+
+        let mpSegmenter = null;
+        let mpState = "idle"; // idle | loading | ready | error
+        let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
+        let segU8 = new Uint8Array(4);
+        // Inference reads a SMALL offscreen copy of the video, never the full
+        // frame: the mask is consumed at field resolution (≤448) anyway, and a
+        // ~288px input is 10-20x cheaper (CRAFT §C3).
+        const SEG_MAX_SIDE = 288;
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;   // EMA of inference ms → adaptive cadence + readout
+        let segBadRun = 0;  // consecutive degenerate masks (GPU-health check)
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
+
+        async function loadMediaPipe() {
+          if (FAKE || mpState === "loading" || mpState === "ready") return;
+          mpState = "loading";
+          mpProgress = 0.05;
+          try {
+            const mod = await import(/* @vite-ignore */ MP_PKG);
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
+            try {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
+            } catch (_e) {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
+            }
+            mpProgress = 1;
+            mpState = "ready";
+          } catch (error) {
+            console.error("MediaPipe load failed", error);
+            mpState = "error";
+          }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("hana: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
+        }
+
+        // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
+        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
+        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the real
+        // mask. The person occupies the TOP ~60% of the image, so a correct
+        // Y-flip sprouts the flowers around a figure in the TOP of the screen.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const inTop = y < h * 0.6;
+              const inBand = x > w * 0.22 && x < w * 0.78;
+              arr[y * w + x] = inTop && inBand ? 255 : 0;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+          det.tpresent = 1;
+        }
+
+        // Uploads the confidence mask and returns its mean coverage (0..1).
+        function uploadSegMask(mask) {
+          const w = mask.width, h = mask.height;
+          const f = mask.getAsFloat32Array();
+          if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
+          let sum = 0;
+          for (let i = 0; i < w * h; i++) {
+            const v = Math.max(0, Math.min(255, (f[i] * 255) | 0));
+            segU8[i] = v;
+            sum += v;
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (segSize[0] !== w || segSize[1] !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, segU8);
+            segSize = [w, h];
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, segU8);
+          }
+          det.segReady = true;
+          return sum / (w * h * 255);
+        }
+
+        // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
+        function runDetection(now) {
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
+          try {
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
+            const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
+            if (cm) {
+              const cover = uploadSegMask(cm);
+              // presence from real coverage — sprouting around the body stops
+              // when nobody is in frame instead of clinging to a stale mask
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
+            if (seg && seg.close) seg.close();
+          } catch (_e) {
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
+          }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
+        }
+
+        let detTimer = 0;
+        function detectionTick() {
+          if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
+            runDetection(performance.now());
+          }
+          // Adaptive cadence: inference must never own the main thread.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
+        }
+
+        /* ------------------------------------------------------------------
+           SOUND → the growth signals. Three drivers behind ONE meter set:
+             mic  — AnalyserNode: RMS (fast + slow EMA), spectral centroid,
+                    zero-crossing rate, dominant-pitch estimate, and an onset
+                    detector (hysteresis + refractory) for string attacks.
+             fake — ?fakesource=1: a deterministic 18s song. WebAudio and the
+                    microphone are NEVER opened, so verification is offline.
+             demo — mic denied / unavailable: a slow procedural breath so the
+                    piece still grows flowers instead of standing empty.
+           Every meter is normalised to 0..1 and all smoothing is dt-driven, so
+           ?freeze=1 (dt = 0) holds them exactly and ?prewarm= is deterministic.
+        ------------------------------------------------------------------ */
+
+        const aud = {
+          mode: FAKE ? "fake" : "demo",
+          ctx: null, analyser: null, stream: null,
+          timeData: null, freqData: null,
+          rmsF: 0, rmsS: 0, cen: 0.3, zcr: 0.2, pitF: 0.4, pitS: 0.4,
+          armed: true, refr: 0, level: 0,
+          err: "",
+        };
+        // rms = instant loudness, sus = sustained voice (the growth fuel),
+        // cen = spectral centroid (timbre → hue), zcr = breathiness,
+        // pitch = dominant pitch (→ stem height), vib = vibrato, onset = attack
+        const meters = {
+          rms: 0, sus: 0, cen: 0.3, zcr: 0.2, pitch: 0.4, vib: 0, onset: 0,
+        };
+        let arc = 0;          // 楽章: the accumulated arc of the song (0..1)
+        let fakeOnsetK = 0;
+        let demoOnsetT = 1.4;
+
+        // The scripted song for ?fakesource=1 — 18s: 前奏 / A メロ / サビ /
+        // 間奏 / 余韻. A pure function of the (frozen-able) art clock.
+        function fakeSong(t) {
+          const T = t % 18;
+          let vol, cen, pit, zcr;
+          if (T < 1.1) {                       // 前奏: almost silent
+            vol = 0.05 + 0.03 * Math.sin(T * 3.0);
+            cen = 0.22; pit = 0.30; zcr = 0.30;
+          } else if (T < 6.6) {                // A メロ
+            const u = (T - 1.1) / 5.5;
+            vol = 0.30 + 0.13 * Math.sin(T * 2.3) + 0.08 * u;
+            cen = 0.30 + 0.08 * Math.sin(T * 0.7);
+            pit = 0.34 + 0.10 * Math.sin(T * 1.1);
+            zcr = 0.26;
+          } else if (T < 12.6) {               // サビ
+            const u = (T - 6.6) / 6.0;
+            vol = 0.60 + 0.20 * Math.sin(T * 1.7) * (0.6 + 0.4 * u);
+            cen = 0.52 + 0.14 * Math.sin(T * 0.9);
+            pit = 0.62 + 0.14 * Math.sin(T * 1.4);
+            zcr = 0.22;
+          } else if (T < 15.4) {               // 間奏: breathy, quiet
+            vol = 0.20 + 0.07 * Math.sin(T * 2.9);
+            cen = 0.40; pit = 0.45; zcr = 0.58;
+          } else {                             // 余韻
+            const u = (T - 15.4) / 2.6;
+            vol = 0.16 * (1.0 - u);
+            cen = 0.30; pit = 0.35; zcr = 0.34;
+          }
+          return { vol: Math.max(0, vol), cen, pit, zcr, playing: T > 1.05 && T < 15.4 };
+        }
+
+        // A gentle self-driven breath for visitors with no microphone: slow
+        // swells with a soft attack, so the piece still opens flowers.
+        function demoSong(t) {
+          const s = 0.5 + 0.5 * Math.sin(t * 0.42);
+          const s2 = 0.5 + 0.5 * Math.sin(t * 0.17 + 1.3);
+          const vol = 0.10 + 0.26 * Math.pow(s, 1.6) * (0.5 + 0.5 * s2);
+          return {
+            vol,
+            cen: 0.30 + 0.22 * s2,
+            pit: 0.34 + 0.24 * s,
+            zcr: 0.24 + 0.14 * (1 - s),
+            playing: true,
+          };
+        }
+
+        function micFeatures(dt) {
+          const an = aud.analyser;
+          an.getFloatTimeDomainData(aud.timeData);
+          const N = aud.timeData.length;
+          let sum = 0;
+          let zc = 0;
+          let prev = aud.timeData[0];
+          for (let i = 1; i < N; i++) {
+            const v = aud.timeData[i];
+            sum += v * v;
+            if ((v >= 0) !== (prev >= 0)) zc++;
+            prev = v;
+          }
+          const rms = Math.sqrt(sum / N);
+          const zcrRaw = Math.min(1, (zc / N) * 2.4);
+          an.getByteFrequencyData(aud.freqData);
+          const bins = aud.freqData.length;
+          const binHz = (aud.ctx ? aud.ctx.sampleRate : 48000) / (2 * bins);
+          let msum = 0;
+          let mw = 0;
+          let peak = 0;
+          let peakBin = 0;
+          const lo = Math.max(1, Math.floor(70 / binHz));
+          const hi = Math.min(bins - 1, Math.ceil(1200 / binHz));
+          for (let i = 0; i < bins; i++) {
+            const v = aud.freqData[i];
+            msum += v;
+            mw += v * i;
+            if (i >= lo && i <= hi && v > peak) { peak = v; peakBin = i; }
+          }
+          const cenRaw = msum > 4 ? (mw / msum) / (bins * 0.5) : 0;
+          // dominant pitch → a log-scale 0..1 (80Hz..1200Hz)
+          const f0 = peakBin * binHz;
+          const pitRaw = peak > 24 && f0 > 60
+            ? Math.min(1, Math.max(0, Math.log2(f0 / 80) / Math.log2(1200 / 80)))
+            : aud.pitS;
+          const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
+          aud.rmsF += (rms - aud.rmsF) * k(0.05);
+          aud.rmsS += (rms - aud.rmsS) * k(1.8);
+          aud.cen += (cenRaw - aud.cen) * k(0.20);
+          aud.zcr += (zcrRaw - aud.zcr) * k(0.20);
+          aud.pitF += (pitRaw - aud.pitF) * k(0.06);
+          aud.pitS += (pitRaw - aud.pitS) * k(0.9);
+          aud.level = aud.rmsF;
+          // sensitivity: a lower reference makes a quiet room fill with flowers
+          const ref = 0.030 + 0.190 * (1 - state.micGain);
+          meters.rms = Math.min(1, aud.rmsF / ref);
+          meters.sus = Math.min(1, aud.rmsS / (ref * 0.95));
+          meters.cen = Math.min(1, aud.cen * 1.15);
+          meters.zcr = aud.zcr;
+          meters.pitch = aud.pitF;
+          meters.vib = Math.min(1, Math.abs(aud.pitF - aud.pitS) * 9);
+          // onset (string attack / consonant): the fast RMS crossing a threshold
+          // above the slow one, with hysteresis and a refractory period
+          aud.refr = Math.max(0, aud.refr - dt);
+          const thHi = aud.rmsS * 1.75 + 0.008 * (1.4 - state.micGain);
+          const thLo = aud.rmsS * 1.12 + 0.003;
+          if (aud.armed && aud.refr <= 0 && aud.rmsF > thHi && aud.rmsF > 0.006) {
+            aud.armed = false;
+            aud.refr = 0.13;
+            meters.onset = Math.min(1, 0.55 + meters.rms * 0.7);
+          } else if (!aud.armed && aud.rmsF < thLo) {
+            aud.armed = true;
+          }
+        }
+
+        function scriptedFeatures(dt, song, onsetPeriod, seedBase) {
+          const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
+          aud.rmsF += (song.vol - aud.rmsF) * k(0.06);
+          aud.rmsS += (song.vol - aud.rmsS) * k(1.6);
+          aud.cen += (song.cen - aud.cen) * k(0.25);
+          aud.zcr += (song.zcr - aud.zcr) * k(0.25);
+          aud.pitF += (song.pit - aud.pitF) * k(0.08);
+          aud.pitS += (song.pit - aud.pitS) * k(0.9);
+          aud.level = aud.rmsF;
+          meters.rms = Math.min(1, aud.rmsF / 0.55);
+          meters.sus = Math.min(1, aud.rmsS / 0.30);
+          meters.cen = aud.cen;
+          meters.zcr = aud.zcr;
+          meters.pitch = aud.pitF;
+          meters.vib = Math.min(1, Math.abs(aud.pitF - aud.pitS) * 7);
+          // strums on a fixed grid (deterministic; frozen art clock = no onsets)
+          if (song.playing) {
+            while (seedBase.next <= animTime) {
+              meters.onset = Math.min(1, 0.5 + meters.rms * 0.8);
+              seedBase.next += onsetPeriod;
+            }
+          } else {
+            seedBase.next = Math.max(seedBase.next, animTime + onsetPeriod);
+          }
+        }
+
+        const fakeClock = { next: 1.2 };
+        const demoClock = { next: 1.4 };
+
+        function updateAudio(dt) {
+          // ?freeze=1: hold every meter exactly. The flower head breathes with
+          // the loudness, so letting the EMAs creep at dt=0 would make a frozen
+          // frame drift (the determinism check would catch it eventually — this
+          // makes it bit-exact by construction).
+          if (dt <= 0) return;
+          if (aud.mode === "mic" && aud.analyser) {
+            micFeatures(dt);
+          } else if (aud.mode === "fake") {
+            scriptedFeatures(dt, fakeSong(animTime), 0.52, fakeClock);
+          } else {
+            const song = demoSong(animTime);
+            scriptedFeatures(dt, song, 1.7, demoClock);
+            // the demo breath must stay gentle: it is a holding pattern
+            meters.rms *= 0.85;
+            meters.sus *= 0.9;
+          }
+          // the attack is consumed as a short envelope by every shader
+          meters.onset *= Math.exp(-dt * 5.5);
+          // 楽章: the song's accumulated arc. It rises while there is real
+          // singing and falls back in silence, and it biases hue, shedding and
+          // the density of the field — the piece has a beginning and an end.
+          const drive = meters.sus * 0.75 + meters.rms * 0.35;
+          arc += dt * (drive - 0.16) * 0.085;
+          arc = Math.max(0, Math.min(1, arc));
+        }
+
+        let micStarted = false;
+        async function startMic() {
+          if (FAKE || micStarted) return;
+          micStarted = true;
+          if (!window.isSecureContext ||
+              !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            aud.err = "非対応";
+            micStarted = false;
+            return;
+          }
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            if (!stream.getAudioTracks || stream.getAudioTracks().length === 0) {
+              throw new Error("no audio track");
+            }
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!aud.ctx) aud.ctx = new Ctx();
+            try { await aud.ctx.resume(); } catch (_e) { /* needs a gesture */ }
+            const src = aud.ctx.createMediaStreamSource(stream);
+            aud.analyser = aud.ctx.createAnalyser();
+            aud.analyser.fftSize = 2048;
+            aud.analyser.smoothingTimeConstant = 0;
+            src.connect(aud.analyser);
+            aud.stream = stream;
+            aud.timeData = new Float32Array(aud.analyser.fftSize);
+            aud.freqData = new Uint8Array(aud.analyser.frequencyBinCount);
+            aud.mode = "mic";
+            aud.err = "";
+          } catch (error) {
+            // A missing microphone is never fatal: the demo breath keeps the
+            // piece alive and the panel offers a retry.
+            aud.analyser = null;
+            aud.mode = "demo";
+            micStarted = false;
+            const name = error && error.name ? error.name : "";
+            aud.err = name === "NotAllowedError" ? "許可なし"
+              : (name === "NotFoundError" ? "見つからない" : "使用不可");
+          }
+        }
+
+        function stopMic() {
+          if (aud.stream) {
+            aud.stream.getTracks().forEach((t) => t.stop());
+            aud.stream = null;
+          }
+          aud.analyser = null;
+          if (aud.mode === "mic") aud.mode = "demo";
+        }
+
+        document.getElementById("micRetry").addEventListener("click", () => {
+          stopMic();
+          micStarted = false;
+          aud.err = "";
+          startMic();
+        });
+        // browsers suspend a fresh AudioContext until a user gesture
+        const resumeAudio = () => {
+          if (aud.ctx && aud.ctx.state === "suspended") aud.ctx.resume();
+          if (!FAKE && !micStarted && aud.mode !== "mic") startMic();
+        };
+        window.addEventListener("pointerdown", resumeAudio, { passive: true });
+        window.addEventListener("keydown", resumeAudio);
+
+        /* ------------------------------------------------------------------
+           Simulation + present
+        ------------------------------------------------------------------ */
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let seedCounter = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let scenePing = false, maskPing = false;
+        let haveVideo = false;
+        let readyStamped = false;
+        let poolsReady = false;
+        let prewarmLeft = Math.min(480, Math.round(PREWARM / PREWARM_DT));
+
+        const readout = document.getElementById("readout");
+        const levelBar = document.getElementById("levelBar");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        function updateDetection(dt) {
+          const canvasAspect = canvas.width / Math.max(canvas.height, 1);
+          const videoAspect = (video.videoWidth && video.videoHeight)
+            ? video.videoWidth / video.videoHeight : 4 / 3;
+          det.segScale = videoAspect > canvasAspect
+            ? [canvasAspect / videoAspect, 1]
+            : [1, videoAspect / canvasAspect];
+
+          if (FAKE) {
+            // sway + bob + limb swing so the mask moves like a real performer:
+            // this is what feeds the motion field, the gusts and the moving
+            // sprouting band offline (verify_runtime --motion depends on it).
+            det.tcx = 0.5 + 0.075 * Math.sin(animTime * 0.42);
+            det.tcy = 0.022 * Math.sin(animTime * 0.71 + 1.0);
+            det.swing = Math.sin(animTime * 1.25);
+            det.tpresent = 1;
+          } else if (FAKESEG) {
+            det.tpresent = 1;
+          } else if (mpState !== "ready") {
+            det.tpresent = 0;
+          }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
+          const k = FREEZE ? 0 : 1 - Math.exp(-dt * 6);
+          det.cx += (det.tcx - det.cx) * k;
+          det.cy += (det.tcy - det.cy) * k;
+          det.present += (det.tpresent - det.present) * k;
+        }
+
+        function audioUniforms(u) {
+          gl.uniform4f(u.uAudA, meters.rms, meters.cen, meters.zcr, meters.onset);
+          gl.uniform4f(u.uAudB, meters.sus, meters.pitch, meters.vib, arc);
+        }
+
+        // One simulation step: every pass except the final composite. Called once
+        // per frame, or repeatedly with a fixed dt while ?prewarm= fast-forwards.
+        function stepSim(dt) {
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+          if (!poolsReady || doReset) {
+            resetPools();
+            poolsReady = true;
+          }
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          // FAKESEG forces the real-camera seg path (uSource==1) with the
+          // synthetic mask so the Y-flip can be validated offline.
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
+          seedCounter = (seedCounter + 1) % 65536;
+          const seed = dt > 0 ? seedCounter * 0.017 + 0.31 : 0.31;
+          // stems sway with the vibrato of the voice and the wind slider
+          const sway = 0.020 + 0.055 * meters.vib + 0.045 * state.wind +
+            0.030 * meters.rms;
+
+          const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
+          const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
+          const maskOut = maskPing ? targets.maskA : targets.maskB;
+          const maskPrev = maskPing ? targets.maskB : targets.maskA;
+          const plantSrc = plantPing ? plantSets[1] : plantSets[0];
+          const plantDst = plantPing ? plantSets[0] : plantSets[1];
+          const petalSrc = petalPing ? petalSets[1] : petalSets[0];
+          const petalDst = petalPing ? petalSets[0] : petalSets[1];
+          const fieldTexel = [1 / fieldW, 1 / fieldH];
+
+          // P0 — scene (camera cover-fit / synthetic room)
+          renderPass(sceneCur, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize,
+              Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+          });
+
+          // P1 — mask (fast + slow EMA) and motion field
+          renderPass(maskOut, programs.mask, () => {
+            const u = locations.mask;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, scenePrev.tex);
+            bindTexture(2, maskPrev.tex);
+            bindTexture(3, segTexture);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uScenePrev, 1);
+            gl.uniform1i(u.uPrev, 2);
+            gl.uniform1i(u.uSeg, 3);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAlphaFast, 1 - Math.exp(-Math.max(dt, 1e-4) * 16));
+            gl.uniform1f(u.uAlphaSlow, 1 - Math.exp(-Math.max(dt, 1e-4) * 2.3));
+            gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+            gl.uniform1i(u.uSource, source);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // P2 — soft mask (the sprouting band) and P3 — the wide proximity aura
+          blurPass(maskOut, targets.softTmp, targets.softT, 3.2, 1);
+          blurPass(targets.softT, targets.auraTmp, targets.auraT, 3.2, 8);
+
+          // P4 — plants: germinate / grow / bud / bloom / wilt
+          renderPass(plantDst, programs.plant, () => {
+            const u = locations.plant;
+            bindTexture(0, plantSrc.texA);
+            bindTexture(1, plantSrc.texB);
+            bindTexture(2, maskOut.tex);
+            bindTexture(3, targets.softT.tex);
+            bindTexture(4, targets.auraT.tex);
+            gl.uniform1i(u.uPlantA, 0);
+            gl.uniform1i(u.uPlantB, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1i(u.uSoft, 3);
+            gl.uniform1i(u.uAura, 4);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uTexW, PLANT_W);
+            gl.uniform1f(u.uCount, PLANT_N);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uSeed, seed);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uPresent, det.present);
+            gl.uniform1f(u.uBloomAmt, state.bloomAmt);
+            gl.uniform1f(u.uGrowth, state.growth);
+            gl.uniform1f(u.uFall, state.fall);
+            gl.uniform1f(u.uHueMove, state.hueMove);
+            audioUniforms(u);
+          });
+
+          // P5 — petals: detach from open flowers, then fall / lift / tumble
+          renderPass(petalDst, programs.petal, () => {
+            const u = locations.petal;
+            bindTexture(0, petalSrc.texA);
+            bindTexture(1, petalSrc.texB);
+            bindTexture(2, plantDst.texA);
+            bindTexture(3, plantDst.texB);
+            bindTexture(4, maskOut.tex);
+            gl.uniform1i(u.uStateA, 0);
+            gl.uniform1i(u.uStateB, 1);
+            gl.uniform1i(u.uPlantA, 2);
+            gl.uniform1i(u.uPlantB, 3);
+            gl.uniform1i(u.uMask, 4);
+            gl.uniform1f(u.uTexW, PETAL_W);
+            gl.uniform1f(u.uCount, PETAL_N);
+            gl.uniform1f(u.uPlantW, PLANT_W);
+            gl.uniform1f(u.uPlantN, PLANT_N);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uSeed, seed);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uWind, state.wind);
+            gl.uniform1f(u.uFall, state.fall);
+            gl.uniform1f(u.uSway, sway);
+            audioUniforms(u);
+          });
+
+          // P6 — the flower layer. Cleared to transparent black and built up with
+          // PREMULTIPLIED-ALPHA over blending, back to front: stems and leaves,
+          // then the heads, then the fallen petals. Emissive parts write rgb > a,
+          // which the bloom pass turns into light.
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.field.fbo);
+          gl.viewport(0, 0, targets.field.width, targets.field.height);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.enable(gl.BLEND);
+          gl.blendEquation(gl.FUNC_ADD);
+          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+          gl.bindVertexArray(vao);
+
+          gl.useProgram(programs.stem);
+          bindTexture(0, plantDst.texA);
+          bindTexture(1, plantDst.texB);
+          gl.uniform1i(locations.stem.uPlantA, 0);
+          gl.uniform1i(locations.stem.uPlantB, 1);
+          gl.uniform1f(locations.stem.uPlantW, PLANT_W);
+          gl.uniform1f(locations.stem.uAspect, aspect);
+          gl.uniform1f(locations.stem.uTime, animTime);
+          gl.uniform1f(locations.stem.uSway, sway);
+          gl.uniform1f(locations.stem.uSize, state.headSize);
+          gl.uniform4f(locations.stem.uAudB, meters.sus, meters.pitch, meters.vib, arc);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, PLANT_N * STEM_PER);
+
+          gl.useProgram(programs.head);
+          bindTexture(0, plantDst.texA);
+          bindTexture(1, plantDst.texB);
+          gl.uniform1i(locations.head.uPlantA, 0);
+          gl.uniform1i(locations.head.uPlantB, 1);
+          gl.uniform1f(locations.head.uPlantW, PLANT_W);
+          gl.uniform1f(locations.head.uAspect, aspect);
+          gl.uniform1f(locations.head.uTime, animTime);
+          gl.uniform1f(locations.head.uSway, sway);
+          gl.uniform1f(locations.head.uSize, state.headSize);
+          gl.uniform1f(locations.head.uGlow, state.glow);
+          audioUniforms(locations.head);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, PLANT_N);
+
+          gl.useProgram(programs.petalDraw);
+          bindTexture(0, petalDst.texA);
+          bindTexture(1, petalDst.texB);
+          gl.uniform1i(locations.petalDraw.uStateA, 0);
+          gl.uniform1i(locations.petalDraw.uStateB, 1);
+          gl.uniform1f(locations.petalDraw.uTexW, PETAL_W);
+          gl.uniform2f(locations.petalDraw.uResolution,
+            targets.field.width, targets.field.height);
+          gl.uniform1f(locations.petalDraw.uAspect, aspect);
+          gl.uniform1f(locations.petalDraw.uSize, state.headSize);
+          gl.uniform1f(locations.petalDraw.uGlow, state.glow);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, PETAL_N);
+
+          gl.bindVertexArray(null);
+          gl.disable(gl.BLEND);
+
+          // P7 — bloom: threshold + downsample, then two blur stages
+          renderPass(targets.b1Src, programs.bright, () => {
+            bindTexture(0, targets.field.tex);
+            gl.uniform1i(locations.bright.uSrc, 0);
+          });
+          blurPass(targets.b1Src, targets.b1Tmp, targets.b1, 2.6, 1);
+          blurPass(targets.b1, targets.b2Tmp, targets.b2, 2.6, 1);
+
+          scenePing = !scenePing;
+          maskPing = !maskPing;
+          plantPing = !plantPing;
+          petalPing = !petalPing;
+        }
+
+        // P8 — composite to the canvas.
+        function present() {
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const sceneCur = scenePing ? targets.sceneB : targets.sceneA;
+          const maskCur = maskPing ? targets.maskB : targets.maskA;
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, maskCur.tex);
+            bindTexture(2, targets.softT.tex);
+            bindTexture(3, targets.auraT.tex);
+            bindTexture(4, targets.field.tex);
+            bindTexture(5, targets.b1.tex);
+            bindTexture(6, targets.b2.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uMask, 1);
+            gl.uniform1i(u.uSoft, 2);
+            gl.uniform1i(u.uAura, 3);
+            gl.uniform1i(u.uField, 4);
+            gl.uniform1i(u.uB1, 5);
+            gl.uniform1i(u.uB2, 6);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uExposure, state.exposure);
+            gl.uniform1f(u.uBgAbs, state.bgAbstract);
+            gl.uniform1f(u.uGlow, state.glow);
+            gl.uniform1f(u.uFilmGrain, state.filmGrain);
+            gl.uniform1f(u.uPresent, det.present);
+            audioUniforms(u);
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+        }
+
+        function detectionLabel() {
+          if (FAKE) return "合成";
+          if (FAKESEG) return "合成マスク";
+          if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
+          if (mpState === "error") return "検知エラー";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
+          return "待機";
+        }
+
+        function audioLabel() {
+          if (aud.mode === "fake") return "合成の歌";
+          if (aud.mode === "mic") {
+            const db = aud.level > 1e-5 ? Math.round(20 * Math.log10(aud.level)) : -99;
+            const susp = aud.ctx && aud.ctx.state === "suspended" ? "·要タップ" : "";
+            return `マイク ${db}dB${susp}`;
+          }
+          return `デモ呼吸${aud.err ? `(マイク:${aud.err})` : ""}`;
+        }
+
+        function updateChip() {
+          statusChip.textContent = FAKE
+            ? "入力 · 合成 (fakesource=1)"
+            : `音 · ${audioLabel()} / 検知 · ${detectionLabel()}`;
+          statusChip.classList.toggle(
+            "hidden", FAKE ? performance.now() - bootWall > 4000 : false);
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          const dt = FREEZE ? 0 : rawDt;
+
+          haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || FAKESEG || haveVideo || mpState === "ready";
+
+          if (!state.pauseAnim) animTime += dt;
+          updateAudio(dt);
+          updateDetection(dt);
+
+          // ?prewarm=<sec>: deterministic fast-forward before __artReady, spread
+          // over several rAF frames and synced with a 1x1 readPixels so the
+          // preroll never parks the compositor for tens of seconds — under
+          // swiftshader a single blocking preroll stalls everything (CRAFT §C4).
+          if (prewarmLeft > 0) {
+            const n = Math.min(12, prewarmLeft);
+            for (let i = 0; i < n; i++) {
+              if (!state.pauseAnim) animTime += PREWARM_DT;
+              updateAudio(PREWARM_DT);
+              updateDetection(PREWARM_DT);
+              stepSim(PREWARM_DT);
+            }
+            prewarmLeft -= n;
+            glSync();
+          }
+
+          stepSim(dt);
+          present();
+
+          if (!readyStamped && hasInput && prewarmLeft <= 0) {
+            glSync();               // the first REAL frame has completed
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
+              canvas.height} / 株 ${PLANT_N} / 花びら ${PETAL_N.toLocaleString()} / 音 ${
+              audioLabel()} / 楽章 ${arc.toFixed(2)} / 検知 ${detectionLabel()}`;
+            levelBar.style.width = `${Math.round(Math.min(1, meters.rms) * 100)}%`;
+            updateChip();
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. With ?fakesource=1 the synthetic scene and the scripted
+           song drive the pipeline and neither MediaPipe nor the microphone is
+           touched, but getUserMedia still runs so the three camera error paths
+           stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay("requesting", "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.");
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay("error", "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8899) or HTTPS, then reload.");
+            retryCamera.disabled = false;
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.");
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 }, height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            retryCamera.disabled = false;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+            if (!FAKE) {
+              loadMediaPipe();
+              startMic();     // the microphone is opened separately (never fatal)
+            }
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay("error", "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true });
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay("error", "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true });
+            } else {
+              setOverlay("error", "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true });
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => { startCamera(); });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+        window.addEventListener("beforeunload", () => { stopCamera(); stopMic(); });
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
+          // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
+          // scene drives the whole pipeline regardless of the camera (the video
+          // texture is never sampled, MediaPipe and the mic stay untouched), so
+          // the camera is only exercised to keep the three error overlays
+          // observable: on success the overlay hides and the fake art shows; on
+          // denial / no-camera the matching error overlay appears over the
+          // still-rendering art.
+          startCamera();
+          detectionTick();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay("error", "WEBGL SETUP ERROR",
+            error && error.message ? error.message : "Could not initialize the renderer.");
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
