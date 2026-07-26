@@ -13,13 +13,19 @@
        映る。遅れは連続的に流れ、境界は見えない。**消印は無い**: 何秒前かを示す
        表示・色分け・輪郭を一切出さない(至急速達で届いた荷物/消印はなぜに消されている)。
        動いているところは「いま」に近く、動かないところほど古い(亡き人は動かない)。
-    2. 統合と離散 — 声が続く間、遅れた像が寄り集まって一つになる(時間が許す限り
-       抱き締めて)。無音になると統合をやめ、静かに離れていく。山場を作らない。
+    2. 統合と離散、そして再会 — 声が続く間、遅れた像が寄り集まって一つになる
+       (時間が許す限り抱き締めて)。無音になると統合をやめ、静かに離れていく。
+       人が自分の残像の立つ場所へ戻って重なり、声が保たれているとき — 更新前の
+       深い遅れ×いまの身体×二つの像の一致 — その一角の止まった時間がほどけ、
+       淡い暖色の息が数秒だけ通る。作品で唯一の肯定の身振り(さもありなん)。
+       瞬間に紐づく演出であり、古さに紐づく消印ではない。山場は作らない。
     3. ひとつの法則、二つのスケール — 遅延クラスタと泡が同じ生成則(黄金角の
        葉序配置)で配置される。曲の一点でだけ二つが同時に同じ形へ重なり、また
        隠れる(「フラクタル=(統合)愛」の理論)。
     4. 泡はバブルアート — 石鹸玉ではない。ストローで吹いた泡が紙に触れて残す
-       跡: 乾いた輪郭線、内側の薄い滲み、密なところは小さな泡室の網。平面で、
+       跡: 乾いた輪郭線、内側の滲み、密なところは小さな泡室の網。滲みは飾りでは
+       なく**その場が抱えている最も古い光そのもの**(彩度が抜けていく途中の像)。
+       泡は像だった言葉である(泡と化す宇宙の言葉)。平面で、
        ハイライトの白点も硬い光る縁も付けない(この2つが「雑に描いたシャボン玉」
        の正体だった)。漂わず、その場で咲いてその場で消える。
     5. 泡は声で決まる — 音量が大きさと数を、声色(スペクトル重心)が色相を決める。
@@ -40,6 +46,7 @@
                 固定 HIST_HZ で層を進めるので遅れは「秒」で扱える(可変フレームレート
                 に依存しない)。上限 = HIST_N / HIST_HZ 秒
     [P4 delay]  遅延の場 ping-pong★ ≤448。R=遅れ(秒) G=泡量 B=速達の envelope
+                A=再会の温度(更新前の遅れ×いまの動き×像の一致×持続音)
                 遅れは目標値へ寄せるのではなく積む: 動きが止まった点では毎フレーム
                 遅れが増え(=時間が止まる)、動いている点では「いま」へ引き戻される。
                 止まった瞬間だけ反動が掛かるので、去った直後の姿がその場に残る。
@@ -65,7 +72,7 @@
     ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
     ?prewarm=<秒> … 初回描画前に固定 dt で早送りし「遅れが育った」絵を出す(検証用)
     ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
-    デバッグ表示: 0=最終 1=運動と静止 2=遅延の場 3=音の特徴量 4=泡 5=配色標本
+    デバッグ表示: 0=最終 1=運動と静止 2=遅延の場(B=再会の温度) 3=音の特徴量 4=泡 5=配色標本
 
   スライダーの説明:
     遅れの深さ  最も古い光が何秒前まで遡るか
@@ -922,6 +929,9 @@
         //   R = the delay in SECONDS at this point
         //   G = foam amount (how far past the end of the history it has gone)
         //   B = the "express parcel" envelope (至急速達で届いた荷物)
+        //   A = 再会の温度 — set where the held past and the present AGREE while
+        //       the voice sustains (you have walked back into your own light and
+        //       held it: ただ時間が許す限り抱き締めて), then it breathes out
         // The delay is smoothed in time so its boundaries never appear as edges:
         // there is no postmark anywhere in the picture telling you what is old.
         const delayFS = `#version 300 es
@@ -931,10 +941,11 @@
           uniform sampler2D uPrev;
           uniform sampler2D uMotion;
           uniform sampler2D uMotionRaw;
+          uniform sampler2D uScene;
           uniform float uDt;
           uniform float uTime;
           uniform float uAspect;
-          uniform float uMaxDelay;
+          // uMaxDelay は CHUNK_HIST が宣言する
           uniform float uDepth;
           uniform float uConverge;
           uniform float uGrain;
@@ -947,6 +958,7 @@
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
           ${CHUNK_FRACTAL}
+          ${CHUNK_HIST}
           void main() {
             vec2 ar = vec2(uAspect, 1.0);
             vec4 prev = texture(uPrev, vUv);
@@ -1010,8 +1022,40 @@
             // past the end of the history the light has lost its picture
             float foam = smoothstep(0.80, 1.0, d / max(uMaxDelay, 1e-3)) *
               (0.35 + 0.75 * arc);
-            fragColor = vec4(d, clamp(foam, 0.0, 1.0),
-              clamp(parcel, 0.0, 1.0), 1.0);
+
+            // ---- 再会. The one affirming gesture in the piece. It must fire
+            // only where a PERSON has walked back into their own held light —
+            // and "old light agrees with now" alone cannot detect that: on a
+            // still wall the two agree forever (the same trap the bubbles fell
+            // into). Nor can it be measured after the update: arriving motion
+            // pulls d to zero, erasing the held past in the same frame the
+            // body reaches it. So the test runs on the delay AS IT STOOD
+            // (prev.r) and requires the body to be arriving (motion, or the
+            // recoil of having just stopped): deep held past + the living body
+            // over it + the two images agreeing + a truly held note.
+            // Keyed to a MOMENT, not to age: this is not a postmark.
+            float dHeld = prev.r;
+            vec3 came = lightFrom(vUv, dHeld);
+            vec3 here = texture(uScene, vUv).rgb;
+            float agree = 1.0 - smoothstep(0.030, 0.12,
+              dot(abs(came - here), vec3(0.36, 0.42, 0.22)));
+            float presence = max(smoothstep(0.03, 0.18, mo.r), kick);
+            float meet = agree * presence *
+              smoothstep(0.18, 0.45, dHeld / max(uMaxDelay, 1e-3)) *
+              smoothstep(0.55, 0.90, sus);
+            // 不応期: a breath must be exhaled before the next one can be
+            // drawn. Without this, a body that keeps moving in place (the
+            // verification figure, or anyone swaying) re-ignites every frame
+            // and the breath becomes a steady glow — measured +30/255 on the
+            // torso, which is exactly the 山場 this piece must not have.
+            meet *= 1.0 - smoothstep(0.04, 0.20, prev.a);
+            // the embrace resolves that pocket of stopped time, and the warmth
+            // it leaves breathes out over a few seconds — never a steady glow
+            d -= uDt * 1.6 * meet * d;
+            float warmth = max(prev.a * (1.0 - uDt * 0.30), meet);
+
+            fragColor = vec4(max(d, 0.0), clamp(foam, 0.0, 1.0),
+              clamp(parcel, 0.0, 1.0), clamp(warmth, 0.0, 1.0));
           }
         `;
 
@@ -1077,7 +1121,7 @@
               // たくさん弾け、画面が明滅して曲の儚さから遠かった。数そのもの
               // より、生まれる頻度を落とすことのほうが効く。
               // 音量での変動も浅くする(2.45倍まで振ると小節ごとに湧く)。
-              float rate = (0.10 + 0.85 * uFoam) * (0.70 + 0.80 * loud) *
+              float rate = (0.08 + 0.68 * uFoam) * (0.70 + 0.80 * loud) *
                 uDt / max(uTexW * uTexW, 1.0);
               if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate) {
                 for (int k = 0; k < 6; k++) {
@@ -1200,6 +1244,7 @@
           uniform sampler2D uDelay;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
+          ${CHUNK_HIST}
 
           // the web of borders in a raft of small bubbles: F2 - F1 of a jittered
           // Worley lattice is small exactly along the walls between cells
@@ -1253,20 +1298,36 @@
               web *= smoothstep(0.95, 0.25, length(p - off));
             }
 
+            // ---- what the wash inside the ring is MADE OF: the oldest light
+            // this place still holds, bent a little by the film. 泡と化す宇宙の
+            // 言葉 — the bubble is a word that used to be an image, so the image
+            // has to be in it, going. (An earlier rework dropped this and the
+            // bubbles fell back to being decoration.)
+            vec2 radUv = vec2(vCen.z, vCen.z);
+            float bulge = 0.55 + 0.50 * d * d;
+            vec2 suv = clamp(vCen.xy + p * radUv * bulge * 0.9, 0.0, 1.0);
+            float hsec = texture(uDelay, vCen.xy).r;
+            vec3 held = lightFrom(suv, max(hsec, uMaxDelay * 0.55));
+            // already going: thinned toward grey, more so as the bubble ages
+            held = mix(held, vec3(dot(held, vec3(0.30, 0.59, 0.11))),
+              0.45 + 0.40 * age);
+
             // ---- colour. Washed to the point of being barely there.
             vec3 pure = bubbleHue(hue);
             // paper first, pigment second — this is the whole reason it reads
             // as 儚い instead of as a children's toy
             vec3 tint = mix(PAPER, pure, 0.32);
+            vec3 wash = mix(held, tint, 0.30);
             // the wall holds a little more pigment, as ink does when it dries
             // at an edge, but it goes DARKER rather than more colourful
             vec3 line = mix(tint, pure, 0.22) * 0.70;
 
             float aRing = ring * 0.42;
-            float aWash = inside * 0.085;
+            // the wash carries the image, so it needs enough presence to read
+            float aWash = inside * 0.20;
             float aWeb  = web * 0.30;
             float a = (aRing + aWash + aWeb) * fade;
-            vec3 col = (line * (aRing + aWeb) + tint * aWash) / max(a, 1e-4);
+            vec3 col = (line * (aRing + aWeb) + wash * aWash) / max(a, 1e-4);
 
             // ---- stay off the figure. The subject of the picture is the
             // person and the afterimage they leave; bubbles are the ground it
@@ -1274,7 +1335,6 @@
             // figure — where someone stands still the two agree exactly — so
             // read the delay field instead: deep means still ground and is
             // safe, shallow means the living body and its recent wake.
-            vec2 suv = clamp(vCen.xy + p * vec2(vCen.z, vCen.z), 0.0, 1.0);
             float ground = texture(uDelay, suv).g;
             a *= 0.14 + 0.86 * smoothstep(0.04, 0.42, ground);
 
@@ -1355,6 +1415,13 @@
             float g2 = pow(clamp(gl0, 0.0, 1.0), 1.05);
             vec3 col = mix(img, vec3(g2), 0.62);
             col = mix(col, NIGHT + vec3(g2) * 0.78, 0.22);
+            // 再会の温度: where someone has walked back into their own held
+            // light while the voice sustains, a pale warmth breathes through —
+            // the one affirming gesture (さもありなん = 優しい肯定) in an
+            // otherwise unresisting picture. Event-keyed, not age-keyed.
+            float wmth = smoothstep(0.12, 0.65, dl.a);
+            col += (vec3(0.93, 0.86, 0.74) - col) * wmth * 0.20;
+            col *= 1.0 + 0.06 * wmth;
             col = (col - 0.5) * 1.10 + 0.5;
 
             // NOTHING is drawn here for the foam. Any tint keyed to the age
@@ -1393,7 +1460,7 @@
             if (uDebug == 1) {
               col = vec3(mo.r * 2.0, mo.g, clamp(length(decV(mo.ba)), 0.0, 1.0));
             } else if (uDebug == 2) {
-              col = vec3(ageN, foam, dl.b);
+              col = vec3(ageN, foam, dl.a);   // B = 再会の温度(速達は目視で分かる)
             } else if (uDebug == 3) {
               float vals[6];
               vals[0] = uAudA.x; vals[1] = uAudB.x; vals[2] = uAudA.y;
@@ -1477,10 +1544,11 @@
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
           histCopy: getLocations(programs.histCopy, ["uSrc"]),
           delay: getLocations(programs.delay, [
-            "uPrev", "uMotion", "uMotionRaw", "uDt", "uTime", "uAspect",
+            "uPrev", "uMotion", "uMotionRaw", "uScene", "uDt", "uTime", "uAspect",
             "uMaxDelay", "uDepth",
             "uConverge", "uGrain", "uParcel", "uReveal", "uSeed", "uReset",
             "uAudA", "uAudB",
+            "uHist", "uHistHz", "uHistN", "uWrite",
           ]),
           foam: getLocations(programs.foam, [
             "uStateA", "uStateB", "uDelay", "uMotion", "uScene", "uTexW", "uDt",
@@ -1489,6 +1557,7 @@
           ]),
           foamDraw: getLocations(programs.foamDraw, [
             "uStateA", "uStateB", "uTexW", "uAspect", "uDelay",
+            "uHist", "uHistHz", "uHistN", "uWrite", "uMaxDelay",
           ]),
           bright: getLocations(programs.bright, ["uSrc", "uThreshold"]),
           composite: getLocations(programs.composite, [
@@ -2158,9 +2227,16 @@
             bindTexture(0, delayPrev.tex);
             bindTexture(1, targets.softT.tex);
             bindTexture(2, motOut.tex);
+            bindTexture(3, sceneCur.tex);
+            bindHistory(4);
             gl.uniform1i(u.uPrev, 0);
             gl.uniform1i(u.uMotion, 1);
             gl.uniform1i(u.uMotionRaw, 2);
+            gl.uniform1i(u.uScene, 3);
+            gl.uniform1i(u.uHist, 4);
+            gl.uniform1f(u.uHistHz, HIST_HZ);
+            gl.uniform1f(u.uHistN, HIST_N);
+            gl.uniform1f(u.uWrite, histWrite);
             gl.uniform1f(u.uDt, dt);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uAspect, aspect);
@@ -2227,9 +2303,16 @@
             gl.uniform1i(u.uStateB, 1);
             gl.uniform1f(u.uTexW, FOAM_W);
             gl.uniform1f(u.uAspect, aspect);
-            // it reads the delay field so it can step back off the figure
+            // it reads the delay field so it can step back off the figure,
+            // and the history so its wash can be the old light itself
             bindTexture(2, delayOut.tex);
+            bindHistory(3);
             gl.uniform1i(u.uDelay, 2);
+            gl.uniform1i(u.uHist, 3);
+            gl.uniform1f(u.uHistHz, HIST_HZ);
+            gl.uniform1f(u.uHistN, HIST_N);
+            gl.uniform1f(u.uWrite, histWrite);
+            gl.uniform1f(u.uMaxDelay, MAX_DELAY);
           }
           gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, FOAM_N);
           gl.disable(gl.BLEND);
