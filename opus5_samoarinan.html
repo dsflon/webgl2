@@ -21,8 +21,11 @@
     4. 石楠花は在るが主役でない — 2〜4株。見切れ・手前のピンボケ・暗がり。十数個の
        小花が一点から放射して半球をなす花房(=多が一に見える実物)、浅く5裂の漏斗形、
        上裂片の蜜標、反り返る雄しべ、革質の輪生葉。音に派手に反応しない。
-    5. 泡化 — 遅れが上限に達した領域は像を失い、薄膜干渉色の泡になって漂い、割れて
-       消える(泡と化す宇宙の言葉)。固定プール=構造的に有界。
+       画面外から伸びる枝の先に付き(=宙に浮いた毬にしない)、小花は時折ほどけて
+       翻りながら落ちる。
+    5. 泡化 — 像を失った光は薄膜の泡になって漂い、割れて消える(泡と化す宇宙の言葉)。
+       泡が湧くのは「届く光といまの部屋が食い違う場所」= 亡き人が立っている所で、
+       泡の中にはその古い光そのものが入る(空の玉を浮かべない)。固定プール=有界。
     6. 抵抗しない色 — 無着色透明が基調。実写は淡いモノクロ寄り。彩度は雨・泡の
        干渉色・蜜標にだけ宿る。
 
@@ -41,12 +44,15 @@
                 分布の基準は黄金角の葉序フラクタル場、アタックで「速達」の円が届く
     [P5 foam]   泡の状態 ping-pong(MRT 2枚, FOAM_W×FOAM_H)★
                 A=(x, y, encV(速度)) B=(齢, 半径, seed, 干渉位相)
-                遅延が飽和した領域からのみ発生(外れたら休眠)。割れて消える
+                遅延が飽和し、かつ「届く光 ≠ いまの部屋」= 残像がある場所から
+                のみ発生(外れたら休眠)。割れて消える
     [P6 layer]  layerT★ を透明にクリアし前乗算アルファで重ねる:
-                石楠花(葉→花房の小花)→ 泡(instanced quad)
+                石楠花(枝→葉→花房の小花→落花)→ 泡(instanced quad。履歴配列を
+                読み、泡の中に古い光を映す)
     [P7 bloom]  layerT の明部を抽出 → 2段ダウンサンプル+ぼかし        b1 b2
     [P8 comp]   遅延の場で履歴配列を2層サンプルして補間 → 実写(いま)を運動量で
-                僅かに戻す → 無着色透明雨のレンズ(粒の中だけ大きく古い時刻)→
+                僅かに戻す → 無着色透明雨のレンズ(粒の中だけ大きく古い時刻。
+                粒は小さく縦長で、縁が暗い)→
                 layer を前乗算合成 → ブルーム → 肩付きトーンマップ・粒子・周辺減光
 
   実行方法:
@@ -522,7 +528,10 @@
         const TRUSS_N = 3;                      // 石楠花の株
         const FLORET_N = 22;                    // 小花/株(密な花房)
         const LEAF_N = 6;
-        const TRUSS_PER = FLORET_N + LEAF_N;
+        const STEM_N = 1;                       // 花房を枝に繋ぐ木質の茎
+        const FALL_N = 8;                       // 落ちてゆく小花
+        // 描画順 = インスタンス順。茎→葉→小花→落花 の順に手前へ重なる
+        const TRUSS_PER = STEM_N + LEAF_N + FLORET_N + FALL_N;
 
         const fullscreenVS = `#version 300 es
           precision highp float;
@@ -780,6 +789,28 @@
           }
         `;
 
+        // 履歴配列の読み出し。合成パスと泡の描画パスの両方が「何秒前の光か」を
+        // 引くので、宣言ごと共有する(片方だけ直して食い違うのを避ける)。
+        const CHUNK_HIST = `
+          precision highp sampler2DArray;   // GLSL ES 3.00 has no default for it
+          uniform sampler2DArray uHist;
+          uniform float uHistHz;
+          uniform float uHistN;
+          uniform float uWrite;
+          uniform float uMaxDelay;
+          // sample the light that left this point sec seconds ago
+          vec3 lightFrom(vec2 uv, float sec) {
+            float lf = clamp(sec, 0.0, uMaxDelay) * uHistHz;
+            float l0 = floor(lf);
+            float fr = lf - l0;
+            float a0 = mod(uWrite - l0 + uHistN * 2.0, uHistN);
+            float a1 = mod(uWrite - l0 - 1.0 + uHistN * 2.0, uHistN);
+            vec3 c0 = texture(uHist, vec3(uv, a0)).rgb;
+            vec3 c1 = texture(uHist, vec3(uv, a1)).rgb;
+            return mix(c0, c1, fr);
+          }
+        `;
+
         // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
         // working scene buffer. Everything downstream is screen-aligned to it.
         const sceneFS = `#version 300 es
@@ -1005,8 +1036,14 @@
         `;
 
         // P5 — the FOAM. 「泡と化す宇宙の言葉」. Free particles in a fixed pool
-        // (structurally bounded), spawned only where the delay has saturated.
-        // They drift, thin, and pop — nothing accumulates.
+        // (structurally bounded). They drift, thin, and pop — nothing accumulates.
+        //
+        // WHERE they form matters more than anything else about them. Spawning
+        // wherever the delay had saturated meant spawning on the still wall,
+        // so every bubble carried a scrap of blank wall and the screen filled
+        // with grey discs. A bubble has to take something. So it forms where
+        // the light that ARRIVES differs from what is actually there — which is
+        // exactly where a ghost is standing. The foam carries the person off.
         const foamFS = `#version 300 es
           precision highp float;
           layout(location = 0) out vec4 outA;
@@ -1015,6 +1052,7 @@
           uniform sampler2D uStateB;
           uniform sampler2D uDelay;
           uniform sampler2D uMotion;
+          uniform sampler2D uScene;
           uniform float uTexW;
           uniform float uDt;
           uniform float uSeed;
@@ -1026,6 +1064,14 @@
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
           ${CHUNK_FRACTAL}
+          ${CHUNK_HIST}
+          // how much of a ghost is standing at c: the gap between the light
+          // that arrives and the room as it is now
+          float ghostAt(vec2 c, float sec) {
+            vec3 old = lightFrom(c, sec);
+            vec3 now = texture(uScene, c).rgb;
+            return dot(abs(old - now), vec3(0.36, 0.42, 0.22));
+          }
           void main() {
             ivec2 tc = ivec2(gl_FragCoord.xy);
             float idx = float(tc.y) * uTexW + float(tc.x);
@@ -1041,7 +1087,10 @@
 
             if (age >= 0.999) {
               // dormant: look for a place where the light has gone to foam
-              float rate = (4.0 + 34.0 * uFoam) * uDt / max(uTexW * uTexW, 1.0);
+              // fewer and bigger. At the old rate the screen filled with small
+              // bubbles and the picture went to chaos; the dissolve has to be
+              // something you notice happening, not a texture over everything.
+              float rate = (1.0 + 7.0 * uFoam) * uDt / max(uTexW * uTexW, 1.0);
               if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate) {
                 for (int k = 0; k < 6; k++) {
                   vec2 c = hash22(vec2(idx * 4.17 + float(k) * 9.13,
@@ -1050,13 +1099,18 @@
                   vec2 cr = 0.5 + phyllo(floor(hash12(vec2(idx, float(k))) * 15.0),
                     15.0, uSeed) * 0.42;
                   c = mix(c, cr, uReveal * 0.85);
-                  if (age >= 0.999 && texture(uDelay, c).g > 0.55) {
+                  vec4 dl = texture(uDelay, c);
+                  // saturated AND holding someone who is not there any more
+                  float gh = ghostAt(c, dl.r);
+                  if (age >= 0.999 && dl.g > 0.55 &&
+                      hash12(vec2(idx * 5.1, float(k) * 3.9)) <
+                        smoothstep(0.030, 0.16, gh)) {
                     pos = c;
                     vel = vec2((hash12(vec2(idx * 7.7, float(k))) - 0.5) * 0.03,
                       0.010 + 0.030 * hash12(vec2(idx * 2.3, float(k) * 5.0)));
                     age = 0.0;
                     seed = hash12(vec2(idx * 13.1, uSeed * 6.7));
-                    rad = 0.009 + 0.032 * pow(hash12(vec2(seed * 21.0, 3.3)), 1.7);
+                    rad = 0.018 + 0.068 * pow(hash12(vec2(seed * 21.0, 3.3)), 2.0);
                     // 声色: the timbre at the moment a bubble forms is baked
                     // into its film thickness, so a bright voice makes cool
                     // bubbles and a chest voice makes gold ones
@@ -1099,9 +1153,9 @@
           uniform vec4 uAudA;
           uniform vec4 uAudB;
           out vec2 vLocal;
-          out vec4 vAttr;   // kind(0 floret / 1 leaf / 2 bud), depth, seed, open
+          out vec4 vAttr;   // kind(0 floret/1 leaf/2 bud/3 stem), depth, seed, open
           out vec4 vFace;   // cosTilt, sinTilt, roll, farness
-          out vec3 vCol;
+          out vec4 vCol;    // rgb + an extra fade (a falling floret runs out)
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
           ${CHUNK_FRACTAL}
@@ -1115,7 +1169,7 @@
             vLocal = vec2(0.0);
             vAttr = vec4(0.0);
             vFace = vec4(1.0, 0.0, 0.0, 0.0);
-            vCol = vec3(0.0);
+            vCol = vec4(0.0);
             float inst = float(gl_InstanceID);
             float tid = floor(inst / PER);
             float part = inst - tid * PER;
@@ -1145,12 +1199,61 @@
             vec2 q = QUAD[gl_VertexID];
             vLocal = q;
             float cr = cos(roll), sr = sin(roll);
+            // every truss sits on the end of a twig that runs off the frame.
+            // A branch comes up from BELOW — pointing it radially outward from
+            // the frame centre hid it behind the truss on every edge-anchored
+            //株, which is why the truss still read as a ball in mid-air.
+            vec2 outward = normalize(vec2((anchor.x - 0.5) * 0.9, -1.0));
 
-            if (part >= ${LEAF_N}.0) {
+            if (part < ${STEM_N}.0) {
+              // ---- the twig. Without it the truss is a ball hanging in the
+              // air; with it the whole thing belongs to a shrub that is simply
+              // out of shot. It runs from the truss to well past the frame edge.
+              float sway = 0.035 * sin(uTime * 0.22 + tseed * 6.28);
+              vec2 sd = normalize(outward + vec2(-outward.y, outward.x) * sway);
+              vec2 sp2 = vec2(-sd.y, sd.x);
+              float slen = 1.35;
+              float st = q.x * 0.5 + 0.5;                    // 0 truss … 1 far
+              // a branch thickens away from the tip, and it is never straight
+              float thick = scale * (0.085 + 0.16 * st);
+              float bow = (tseed - 0.5) * 0.24 * st * (1.0 - st) * 4.0;
+              vec2 P = c + sd * st * slen + sp2 * (q.y * thick + bow * scale);
+              vAttr = vec4(3.0, depth, tseed, st);
+              vFace = vec4(cosT, sinT, roll, 0.0);
+              vCol = vec4(mix(vec3(0.16, 0.13, 0.10), LEAF_D, 0.45), 1.0);
+              gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+            } else if (part >= ${STEM_N + LEAF_N + FLORET_N}.0) {
+              // ---- 散る: a floret lets go of the truss and turns over as it
+              // falls. 「時間が許す限り抱き締めて」— it is held, and then it
+              // is not. The cycle is per-floret and never synchronised.
+              float fi = part - ${STEM_N + LEAF_N + FLORET_N}.0;
+              float fseed = hash12(vec2(fi * 3.3 + tid * 11.0, 5.5));
+              float per = 7.0 + 6.0 * fseed;
+              float t01 = fract(uTime / per + fseed * 0.97);
+              // released from a seat on the rim, then gravity and a slow sway
+              vec2 rel = phyllo(floor(fseed * FLORETS), FLORETS, tseed);
+              vec2 P0 = c + vec2(rel.x, rel.y * cosT) * scale * 0.66;
+              float drop = (0.55 + 0.45 * fseed) * t01 * t01;
+              float swayx = 0.075 * sin(t01 * 7.0 + fseed * 6.28) * t01;
+              // it tumbles, so it keeps turning edge-on and nearly vanishing
+              float spin = t01 * (5.0 + 7.0 * fseed) + fseed * 6.28;
+              float squash = max(abs(cos(spin * 0.7)), 0.16);
+              float fs = scale * (0.26 + 0.13 * fseed);
+              vec2 P = P0 + vec2(swayx * uAspect, -drop) + q * fs;
+              vAttr = vec4(0.0, depth, fseed, 1.0);
+              vFace = vec4(squash, sqrt(1.0 - squash * squash), spin, 0.0);
+              vec3 warm = mix(PETAL_P, vec3(0.90, 0.55, 0.62), 0.35);
+              vec3 cool = mix(PETAL_P, vec3(0.86, 0.80, 0.92), 0.35);
+              // a fallen floret browns at the edge and fades out near the ground
+              vCol = vec4(mix(mix(warm, cool, clamp(uAudA.y, 0.0, 1.0)),
+                vec3(0.78, 0.68, 0.60), 0.35 * t01),
+                smoothstep(0.0, 0.10, t01) * (1.0 - smoothstep(0.72, 1.0, t01)));
+              gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+            } else if (part >= ${STEM_N + LEAF_N}.0) {
               // pack the florets into the dome by the golden angle, then FLATTEN
               // the packing along the tilt axis: that is what turns a flat rosette
               // of blossoms into a dome you are looking at from the side
-              vec2 site = phyllo(part - ${LEAF_N}.0, FLORETS, tseed);
+              vec2 site = phyllo(part - ${STEM_N + LEAF_N}.0, FLORETS, tseed);
               float far = 0.5 + 0.5 * site.y;              // 0 near … 1 far side
               vec2 sq = vec2(site.x, site.y * cosT);
               vec2 srot = vec2(sq.x * cr - sq.y * sr, sq.x * sr + sq.y * cr);
@@ -1172,8 +1275,8 @@
               vec3 warm = mix(PETAL_P, vec3(0.90, 0.55, 0.62), 0.35);
               vec3 cool = mix(PETAL_P, vec3(0.86, 0.80, 0.92), 0.35);
               vec3 base = mix(warm, cool, clamp(uAudA.y, 0.0, 1.0));
-              vCol = isBud > 0.5 ? mix(vec3(0.60, 0.24, 0.34), base, 0.45)
-                : mix(base * 0.92, PETAL_W, 0.30 * open);
+              vCol = vec4(isBud > 0.5 ? mix(vec3(0.60, 0.24, 0.34), base, 0.45)
+                : mix(base * 0.92, PETAL_W, 0.30 * open), 1.0);
               gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
             } else {
               // the leaf whorl. On a real shrub the leaves hang BELOW and
@@ -1181,7 +1284,7 @@
               // evenly all the way round, and a full circle of them is exactly
               // the pinwheel/star failure of CRAFT §B1. So: a downward arc,
               // jittered, rotated only a little by the truss attitude.
-              float li = part;
+              float li = part - ${STEM_N}.0;
               float lu = (li + 0.5) / ${LEAF_N}.0;
               float la = -3.14159265 + 0.24 + lu * 2.66 +
                 (hash12(vec2(li * 4.4, tid * 6.1)) - 0.5) * 0.55 +
@@ -1203,7 +1306,7 @@
                 lp * (q.y * ls * 0.55 * lTilt + bend * ls * lt * lt);
               vAttr = vec4(1.0, depth, hash12(vec2(li * 11.1, tid * 2.2)), lTilt);
               vFace = vec4(cosT, sinT, roll, 0.0);
-              vCol = mix(LEAF_D, LEAF_L, 0.38 + 0.42 * hash12(vec2(li, tid)));
+              vCol = vec4(mix(LEAF_D, LEAF_L, 0.38 + 0.42 * hash12(vec2(li, tid))), 1.0);
               gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
             }
           }
@@ -1214,7 +1317,7 @@
           in vec2 vLocal;
           in vec4 vAttr;
           in vec4 vFace;
-          in vec3 vCol;
+          in vec4 vCol;
           out vec4 fragColor;
           uniform float uReveal;
           ${CHUNK_NOISE}
@@ -1226,7 +1329,7 @@
             float open = vAttr.w;
             vec2 p = vLocal;
             float cov = 0.0;
-            vec3 col = vCol;
+            vec3 col = vCol.rgb;
 
             if (kind < 0.5) {
               // ---- an open floret: a broad funnel with five FRILLED lobes.
@@ -1249,7 +1352,7 @@
               float u = clamp(r / max(rad, 1e-3), 0.0, 1.0);
               // cream throat → rose margin
               col = mix(mix(PETAL_W, vec3(1.0, 0.98, 0.96), 0.5),
-                mix(vCol, vec3(0.86, 0.42, 0.55), 0.35), smoothstep(0.06, 0.98, u));
+                mix(vCol.rgb, vec3(0.86, 0.42, 0.55), 0.35), smoothstep(0.06, 0.98, u));
               col *= 0.66 + 0.52 * u;
               // the corolla is a funnel: the throat is in shadow and sits off
               // centre on a tilted floret
@@ -1278,13 +1381,24 @@
               cov = max(cov, max(st, anth) * 0.95);
               col = mix(col, mix(PETAL_W, vec3(1.0, 0.93, 0.86), 0.5), st * 0.72);
               col = mix(col, mix(FRECKLE, vec3(0.42, 0.24, 0.16), 0.45), anth * 0.85);
+            } else if (kind > 2.5) {
+              // ---- the twig: a round woody stem, lit down one side, with the
+              // bark roughening as it thickens away from the truss
+              float st2 = vAttr.w;
+              float across2 = p.y;
+              cov = smoothstep(1.0, 0.66, abs(across2));
+              // round, so one flank catches the light and the other is in shade
+              col *= 0.58 + 0.62 * smoothstep(1.0, -0.4, across2);
+              float bark = fbm(vec2(st2 * 26.0, across2 * 3.0) + seed * 17.0);
+              col *= 0.82 + 0.34 * bark;
+              col *= 0.80 + 0.30 * st2;
             } else if (kind > 1.5) {
               // ---- an unopened bud: a furled carmine cone with sepal ribs
               vec2 bp = p * vec2(1.55, 0.94);
               float taper = 0.80 - 0.26 * smoothstep(-0.3, 1.0, p.y);
               cov = 1.0 - smoothstep(taper * 0.88, taper, length(bp));
               float ribs = 0.5 + 0.5 * cos(atan(bp.y, bp.x) * 5.0 + seed * 9.0);
-              col = mix(vCol * 0.78, vCol, 0.35 + 0.55 * ribs);
+              col = mix(vCol.rgb * 0.78, vCol.rgb, 0.35 + 0.55 * ribs);
               col *= 0.70 + 0.45 * smoothstep(-0.8, 0.9, p.y);
             } else {
               // ---- a leathery leaf: heavy pale midrib, a glossy sheen band, and
@@ -1299,9 +1413,9 @@
               float rib = smoothstep(0.065, 0.0, abs(across));
               float sec = 0.5 + 0.5 * sin(abs(across) * 2.6 - ty * 22.0 + seed * 7.0);
               col *= 0.52 + 0.34 * prof + 0.30 * (1.0 - abs(across));
-              col += vCol * 0.22 * sec * smoothstep(0.15, 0.9, abs(across));
+              col += vCol.rgb * 0.22 * sec * smoothstep(0.15, 0.9, abs(across));
               // the midrib is pale, but it is a thread, not a stripe of paint
-              col = mix(col, mix(vCol, vec3(0.40, 0.50, 0.38), 0.50), rib * 0.38);
+              col = mix(col, mix(vCol.rgb, vec3(0.40, 0.50, 0.38), 0.50), rib * 0.38);
               // the rolled margin is the darkest line on the blade
               col *= 1.0 - 0.45 * smoothstep(0.74, 0.99, abs(across));
               // wax: one narrow specular band down the length
@@ -1316,16 +1430,22 @@
             cov *= smoothstep(0.0, soft + 0.05, cov);
             // the far side of a tilted truss falls away into shade
             col *= 1.0 - 0.34 * vFace.w;
-            float a2 = clamp(cov, 0.0, 1.0) * (0.42 + 0.38 * depth);
+            float a2 = clamp(cov, 0.0, 1.0) * (0.42 + 0.38 * depth) * vCol.a;
             if (a2 <= 0.012) discard;
             col *= 1.0 + 0.30 * uReveal;
             fragColor = vec4(col * a2, a2);         // premultiplied over
           }
         `;
 
-        // P6b — the foam, drawn as instanced quads. A bubble is a thin film: a
-        // bright rim, a nearly transparent middle, and interference colour that
-        // slides with the viewing angle. It must not read as a solid ball.
+        // P6b — the foam, drawn as instanced quads.
+        //
+        // 「泡と化す宇宙の言葉」。The first version drew a soap bubble: a hard
+        // bright ring and a white specular dot, with NOTHING inside it. That is
+        // a cartoon, and worse, it contradicts the premise — a bubble is
+        // supposed to be light that has lost its image, so it has to be made of
+        // that light. Now each bubble carries the oldest frame it can reach,
+        // magnified and pulled apart by the curve of the film. What is inside
+        // the bubble is the person who was there, coming undone.
         const foamDrawVS = `#version 300 es
           precision highp float;
           uniform sampler2D uStateA;
@@ -1334,6 +1454,7 @@
           uniform float uAspect;
           out vec2 vLocal;
           out vec3 vAttr;   // age, seed, phase
+          out vec3 vCen;    // bubble centre in uv + its uv radius (x scaled)
           ${CHUNK_ENC}
           const vec2 QUAD[6] = vec2[6](
             vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
@@ -1342,6 +1463,7 @@
           void main() {
             vLocal = vec2(0.0);
             vAttr = vec3(1.0, 0.0, 0.0);
+            vCen = vec3(0.0);
             int i = gl_InstanceID;
             int tw = int(uTexW);
             ivec2 tc = ivec2(i % tw, i / tw);
@@ -1351,6 +1473,7 @@
             vec2 q = QUAD[gl_VertexID];
             vLocal = q;
             vAttr = vec3(B.x, B.z, B.w);
+            vCen = vec3(A.xy, B.y);
             vec2 P = A.xy * vec2(uAspect, 1.0) + q * B.y;
             gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
           }
@@ -1360,9 +1483,13 @@
           precision highp float;
           in vec2 vLocal;
           in vec3 vAttr;
+          in vec3 vCen;
           out vec4 fragColor;
+          uniform float uAspect;
+          uniform sampler2D uDelay;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
+          ${CHUNK_HIST}
           void main() {
             float age = vAttr.x;
             float seed = vAttr.y;
@@ -1370,20 +1497,40 @@
             vec2 p = vLocal;
             float r = length(p);
             if (r > 1.0) discard;
-            // the film gets thinner as the bubble ages, so its colour marches
+            float pop = 1.0 - smoothstep(0.88, 1.0, age);   // it simply stops
+            vec2 radUv = vec2(vCen.z / uAspect, vCen.z);
+
+            // what is INSIDE: the oldest light this place still holds, bent by
+            // the curve of the film so it magnifies at the centre and shears
+            // apart at the rim
+            float bulge = 0.52 + 0.62 * r * r;
+            vec2 suv = clamp(vCen.xy + p * radUv * bulge, 0.0, 1.0);
+            // the delay HERE, not some fixed depth: a bubble shows the ghost
+            // it actually formed on, which is the whole reason it exists
+            float sec = texture(uDelay, vCen.xy).r * (0.90 + 0.16 * phase);
+            vec3 held = lightFrom(suv, sec);
+            // and it is already going: the image thins toward grey as it ages
+            held = mix(held, vec3(dot(held, vec3(0.30, 0.59, 0.11))),
+              0.25 + 0.55 * age);
+
+            // the film itself is only a faint iridescent breath over that
             float thick = (1.0 - 0.75 * age) * (0.55 + 0.9 * phase);
             float grazing = pow(clamp(r, 0.0, 1.0), 2.2);
             vec3 film = filmColour(thick + grazing * 0.55, grazing);
-            // a thin film shows almost nothing face-on and everything at the rim
-            float rim = smoothstep(0.50, 0.99, r) * (1.0 - smoothstep(0.985, 1.0, r));
-            float body = (1.0 - smoothstep(0.20, 1.0, r)) * 0.16;
-            float pop = 1.0 - smoothstep(0.86, 1.0, age);   // it simply stops
-            float a = (rim * 0.85 + body) * pop * 0.85;
+            // no hard ring and no specular dot — those two marks alone are what
+            // made this read as a drawn soap bubble rather than as light
+            // a wide gradient, not a ring: a hard band of interference colour
+            // is just an outline drawn round a circle, which is the thing this
+            // was supposed to stop being
+            float rim = smoothstep(0.24, 0.95, r) * (1.0 - smoothstep(0.90, 1.0, r));
+            vec3 col = mix(held * 1.02, film, 0.06 + 0.15 * rim);
+            col += (film - 0.5) * 0.09 * rim;
+
+            // a bubble is nearly all edge in its opacity, but it is never empty
+            float a = (0.24 + 0.26 * rim) * pop;
+            a *= 1.0 - 0.35 * smoothstep(0.6, 1.0, age);
+            a *= 1.0 - smoothstep(0.94, 1.0, r);            // no cut silhouette
             if (a <= 0.005) discard;
-            vec3 col = mix(vec3(0.72, 0.78, 0.86), film, 0.58) * (0.55 + 0.9 * rim);
-            // one small specular window, as on any soap bubble
-            col += vec3(1.0) * (1.0 - smoothstep(0.05, 0.16,
-              length(p - vec2(-0.34, 0.36)))) * 0.55 * pop;
             fragColor = vec4(col * a, a);
           }
         `;
@@ -1414,9 +1561,7 @@
           precision highp float;
           in vec2 vUv;
           out vec4 fragColor;
-          precision highp sampler2DArray;   // GLSL ES 3.00 has no default for it
           uniform sampler2D uScene;
-          uniform sampler2DArray uHist;
           uniform sampler2D uDelay;
           uniform sampler2D uMotion;
           uniform sampler2D uLayer;
@@ -1429,10 +1574,6 @@
           uniform float uFilmGrain;
           uniform float uRain;
           uniform float uReveal;
-          uniform float uHistHz;
-          uniform float uHistN;
-          uniform float uWrite;
-          uniform float uMaxDelay;
           uniform vec4 uAudA;
           uniform vec4 uAudB;
           uniform int uDebug;
@@ -1440,19 +1581,8 @@
           ${CHUNK_ENC}
           ${CHUNK_PALETTE}
           ${CHUNK_FRACTAL}
+          ${CHUNK_HIST}
           float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-
-          // sample the light that left this point sec seconds ago
-          vec3 lightFrom(vec2 uv, float sec) {
-            float lf = clamp(sec, 0.0, uMaxDelay) * uHistHz;
-            float l0 = floor(lf);
-            float fr = lf - l0;
-            float a0 = mod(uWrite - l0 + uHistN * 2.0, uHistN);
-            float a1 = mod(uWrite - l0 - 1.0 + uHistN * 2.0, uHistN);
-            vec3 c0 = texture(uHist, vec3(uv, a0)).rgb;
-            vec3 c1 = texture(uHist, vec3(uv, a1)).rgb;
-            return mix(c0, c1, fr);
-          }
 
           void main() {
             vec2 ar = vec2(uAspect, 1.0);
@@ -1461,26 +1591,34 @@
             float sec = dl.r;
             float foam = dl.g;
 
-            // ---- 無着色透明雨: drops of rain that are lenses onto another time.
-            // Inside a drop the age jumps by a lot, so what shows there is a
-            // person who may no longer be in the room (亡き人の影を探している).
+            // ---- 無着色透明雨: drops on the glass, each a lens onto another
+            // time. Inside a drop the age jumps, so what shows there is a person
+            // who may no longer be in the room (亡き人の影を探している).
+            // These were wide bright discs on two coarse grids, and they read as
+            // a screenful of crudely drawn soap bubbles — the loudest thing in
+            // the picture, and nothing to do with rain. A drop is small, taller
+            // than it is wide, and it goes DARK at its meniscus; it does not
+            // glow in the middle.
             float rainAmt = uRain * (0.35 + 0.9 * uAudA.z);
             vec2 ruv = vUv;
             float lens = 0.0;
+            float lrim = 0.0;
             for (int L = 0; L < 2; L++) {
-              float gs = 9.0 + 7.0 * float(L);
+              float gs = 21.0 + 13.0 * float(L);
               vec2 g = vUv * ar * gs;
-              g.y += uTime * (0.20 + 0.12 * float(L)) * gs * 0.16;
+              g.y += uTime * (0.16 + 0.10 * float(L)) * gs * 0.20;   // it runs
               vec2 cell = floor(g);
               vec2 f = fract(g) - 0.5;
               float h = hash12(cell + float(L) * 31.0);
-              if (h > 1.0 - 0.34 * rainAmt) {
-                float rr = 0.16 + 0.20 * hash12(cell + 5.0);
-                float d2 = length(f - (hash22(cell + 3.0) - 0.5) * 0.5);
-                float inD = 1.0 - smoothstep(rr * 0.80, rr, d2);
+              if (h > 1.0 - 0.17 * rainAmt) {
+                float rr = 0.10 + 0.26 * pow(hash12(cell + 5.0), 1.6);
+                vec2 dp = (f - (hash22(cell + 3.0) - 0.5) * 0.5) * vec2(1.0, 0.72);
+                float d2 = length(dp);
+                float inD = 1.0 - smoothstep(rr * 0.72, rr, d2);
                 if (inD > lens) {
                   lens = inD;
-                  ruv = vUv + normalize(f + vec2(1e-4)) * inD * 0.020;
+                  lrim = smoothstep(rr * 0.55, rr * 0.98, d2) * step(d2, rr);
+                  ruv = vUv + normalize(dp + vec2(1e-4)) * inD * 0.012;
                 }
               }
             }
@@ -1489,9 +1627,11 @@
 
             // ---- the picture that has arrived
             vec3 img = lightFrom(ruv, secR);
-            // whatever is moving is nearly present, and reads a touch sharper
+            // whatever is moving is nearly present. This has to be firm: the
+            // proposition of the piece is that what moves is NOW and what stops
+            // is old, and at 0.40 the living present was still half a memory.
             vec3 now = texture(uScene, vUv).rgb;
-            img = mix(img, now, smoothstep(0.10, 0.55, mo.r) * 0.40);
+            img = mix(img, now, smoothstep(0.10, 0.55, mo.r) * 0.62);
 
             // 無着色 — but the same for every age. Tinting or darkening by age
             // would be a postmark: it would tell you which parts are old, and
@@ -1503,9 +1643,10 @@
             vec3 col = mix(img, vec3(g2), 0.62);
             col = mix(col, NIGHT + vec3(g2) * 0.78, 0.22);
             col = (col - 0.5) * 1.10 + 0.5;
-            // a rain lens is the one place the image stays clean and bright
-            col = mix(col, mix(img, vec3(lumaf(img)), 0.25) * 1.15, lens * 0.55);
-            col += vec3(0.06, 0.07, 0.09) * lens * 0.5;
+            // a rain lens is the one place the image stays clean — clean, not
+            // bright. The lift is what turned every drop into a glowing bead.
+            col = mix(col, mix(img, vec3(lumaf(img)), 0.25) * 1.04, lens * 0.42);
+            col *= 1.0 - 0.24 * lrim;              // the meniscus reads dark
 
             // NOTHING is drawn here for the foam. Any tint keyed to the age
             // would draw a map of what is old across the picture — the postmark
@@ -1634,14 +1775,16 @@
             "uAudA", "uAudB",
           ]),
           foam: getLocations(programs.foam, [
-            "uStateA", "uStateB", "uDelay", "uMotion", "uTexW", "uDt", "uSeed",
-            "uAspect", "uFoam", "uReveal", "uAudA", "uAudB",
+            "uStateA", "uStateB", "uDelay", "uMotion", "uScene", "uTexW", "uDt",
+            "uSeed", "uAspect", "uFoam", "uReveal", "uAudA", "uAudB",
+            "uHist", "uHistHz", "uHistN", "uWrite", "uMaxDelay",
           ]),
           truss: getLocations(programs.truss, [
             "uAspect", "uTime", "uTruss", "uReveal", "uAudA", "uAudB",
           ]),
           foamDraw: getLocations(programs.foamDraw, [
-            "uStateA", "uStateB", "uTexW", "uAspect",
+            "uStateA", "uStateB", "uTexW", "uAspect", "uDelay",
+            "uHist", "uHistHz", "uHistN", "uWrite", "uMaxDelay",
           ]),
           bright: getLocations(programs.bright, ["uSrc", "uThreshold"]),
           composite: getLocations(programs.composite, [
@@ -2341,8 +2484,16 @@
             bindTexture(3, targets.softT.tex);
             gl.uniform1i(u.uStateA, 0);
             gl.uniform1i(u.uStateB, 1);
+            bindTexture(4, sceneCur.tex);
+            bindHistory(5);
             gl.uniform1i(u.uDelay, 2);
             gl.uniform1i(u.uMotion, 3);
+            gl.uniform1i(u.uScene, 4);
+            gl.uniform1i(u.uHist, 5);
+            gl.uniform1f(u.uHistHz, HIST_HZ);
+            gl.uniform1f(u.uHistN, HIST_N);
+            gl.uniform1f(u.uWrite, histWrite);
+            gl.uniform1f(u.uMaxDelay, MAX_DELAY);
             gl.uniform1f(u.uTexW, FOAM_W);
             gl.uniform1f(u.uDt, dt);
             gl.uniform1f(u.uSeed, seed);
@@ -2383,6 +2534,15 @@
             gl.uniform1i(u.uStateB, 1);
             gl.uniform1f(u.uTexW, FOAM_W);
             gl.uniform1f(u.uAspect, aspect);
+            // a bubble is made of the light it took, so it reads the history
+            bindHistory(2);
+            bindTexture(3, delayOut.tex);
+            gl.uniform1i(u.uHist, 2);
+            gl.uniform1i(u.uDelay, 3);
+            gl.uniform1f(u.uHistHz, HIST_HZ);
+            gl.uniform1f(u.uHistN, HIST_N);
+            gl.uniform1f(u.uWrite, histWrite);
+            gl.uniform1f(u.uMaxDelay, MAX_DELAY);
           }
           gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, FOAM_N);
           gl.disable(gl.BLEND);
