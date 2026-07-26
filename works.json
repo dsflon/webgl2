@@ -1,5 +1,21 @@
 [
   {
+    "slug": "opus5_ikitsugi",
+    "file": "opus5_ikitsugi.html",
+    "title": "息継ぎ",
+    "date": "2026-07-26",
+    "desc": "カメラの人物を、途切れない一本の線で描き続ける。声を出している間は筆が走り、一筆はほどけて数本になり、線は身体の輪郭を越えてはみ出して像が乱れる。息継ぎ——声がやんだ一瞬に筆は止まり、線が輪郭に吸い付いて、その人の像が定着する。声の高さが筆致の向き、息のノイズが墨のにじみ、子音のアタックが打ち込みになる。",
+    "model": "Opus 5",
+    "tags": [
+      "WebGL2",
+      "Mic",
+      "MediaPipe",
+      "Polyline"
+    ],
+    "series": "OPUS5",
+    "thumb": "thumbs/opus5_ikitsugi.jpg"
+  },
+  {
     "slug": "opus5_samoarinan",
     "file": "opus5_samoarinan.html",
     "title": "さもありなん",
