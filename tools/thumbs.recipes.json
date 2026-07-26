@@ -350,15 +350,15 @@
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   },
   "opus5_samoarinan": {
-    "query": "fakesource=1&prewarm=11",
-    "warmMs": 7000,
+    "query": "fakesource=1&prewarm=16",
+    "warmMs": 4000,
     "click": [],
     "hide": [
       "#closePanel"
     ],
     "readyFlag": true,
     "audio": false,
-    "note": "合成の歌+動く合成人型で全駆動。prewarm で遅延が育ち二重像が出た状態を撮る。",
+    "note": "合成の歌+動く合成人型で全駆動。合成の歌は18秒ループなので、prewarm はループの継ぎ目(=無音)を外して取る。遅延が育って二重像が出て、かつ泡が紙に溜まった状態を撮る。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
