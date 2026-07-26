@@ -24,6 +24,8 @@
        の正体だった)。漂わず、その場で咲いてその場で消える。
     5. 泡は声で決まる — 音量が大きさと数を、声色(スペクトル重心)が色相を決める。
        強いアタックは既にある泡を弾けさせる。大きい泡ほど脆い。
+       ただし**ゆっくり**。生成頻度・音量での変動幅・破裂の強さは意図的に低く
+       抑える(激しく湧いて激しく弾けると、曲の儚さから最も遠い明滅になる)。
     6. 残像を邪魔しない — 主役は人物とその残像。泡は遅延の場が深い所(=動かない
        地)にだけ濃く出て、人物とその航跡の上では退く。
     7. 抵抗しない色 — 無着色透明が基調。実写は淡いモノクロ寄り。彩度は泡だけに、
@@ -1071,9 +1073,11 @@
 
             if (age >= 0.999) {
               // dormant: the louder the voice, the more of them arrive
-              // 音量で増減するが、静かな小節で紙が空になっては困る。素の係数を
-              // 0.25 にしていたとき、歌の谷では泡がほぼ消えていた。
-              float rate = (2.6 + 26.0 * uFoam) * (0.55 + 1.9 * loud) *
+              // 発生は「ゆっくり、まばらに」。実機では毎秒たくさん生まれて
+              // たくさん弾け、画面が明滅して曲の儚さから遠かった。数そのもの
+              // より、生まれる頻度を落とすことのほうが効く。
+              // 音量での変動も浅くする(2.45倍まで振ると小節ごとに湧く)。
+              float rate = (0.10 + 0.85 * uFoam) * (0.70 + 0.80 * loud) *
                 uDt / max(uTexW * uTexW, 1.0);
               if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate) {
                 for (int k = 0; k < 6; k++) {
@@ -1102,8 +1106,8 @@
                     // 音量が大きいほど大きく吹かれる
                     // a wide spread: mostly small, a few large. An even spread
                     // of one size reads as a pattern, not as blown bubbles.
-                    rad = (0.014 + 0.115 * pow(hash12(vec2(seed * 21.0, 3.3)), 2.3))
-                      * (0.50 + 1.30 * loud);
+                    rad = (0.013 + 0.090 * pow(hash12(vec2(seed * 21.0, 3.3)), 2.3))
+                      * (0.55 + 0.70 * loud);
                     // 声色 → colour. Bright voice runs cool, chest voice warm.
                     // the voice sets where on the wheel the batch sits; each
                     // bubble still takes its own colour from around there
@@ -1119,14 +1123,20 @@
                 uDt * 0.045;
               vel *= exp(-uDt * 1.8);
               pos += vel * uDt / vec2(uAspect, 1.0);
-              float life = 3.0 + 4.0 * uFoam + 3.6 * hash12(vec2(seed * 3.3, 1.7));
+              // 長く居させる。短命だと「儚い」ではなく「せわしない」になる。
+              float life = 6.0 + 4.0 * uFoam + 5.0 * hash12(vec2(seed * 3.3, 1.7));
               age += uDt / life;
-              // 音量で弾ける: a loud attack pops what is already on the paper,
-              // the big ones first (they are the thinnest films)
+              // 音量で弾ける。ただし「強いアタックのときの、たまたま脆い泡」
+              // だけ。以前は全部の泡が毎回のオンセットで齢を進めていたので、
+              // 実機では常時生まれて常時弾ける明滅になっていた。
               float frail = smoothstep(0.030, 0.085, rad);
-              age += uDt * 5.5 * onset * (0.30 + 0.70 * frail);
-              age += uDt * 1.4 * smoothstep(0.55, 0.95, loud) * frail;
-              rad *= 1.0 + uDt * 0.05;
+              float fragile = step(hash12(vec2(seed * 41.0, 3.1)), 0.30);
+              age += uDt * 2.0 * smoothstep(0.55, 1.0, onset) * fragile *
+                (0.35 + 0.65 * frail);
+              // 成長はほぼ止める。寿命を3倍に伸ばしたとき 5%/秒 のままにして
+              // いたら、一生のあいだに半径が 2.7 倍になって画面いっぱいの輪に
+              // なった(寿命と成長率は必ず一緒に見ること)。
+              rad = min(rad * (1.0 + uDt * 0.010), 0.13);
               if (age >= 1.0) age = 1.0;
             }
             outA = vec4(pos, encV(vel));
@@ -1215,10 +1225,11 @@
             float r = length(p);
             if (r > 1.12) discard;
 
-            // 増えては儚く消える: a quick bloom, a short hold, a long thinning
-            float bloom = smoothstep(0.0, 0.16, age);
-            float fade = 1.0 - smoothstep(0.42, 1.0, age);
-            float R = mix(0.62, 1.0, bloom);
+            // 増えては儚く消える。にじり出て、長く薄れる — 立ち上がりが速い
+            // と、生まれた瞬間がストロボのように光って見える。
+            float bloom = smoothstep(0.0, 0.38, age);
+            float fade = 1.0 - smoothstep(0.22, 1.0, age);
+            float R = mix(0.70, 1.0, bloom);
             float d = r / R;
 
             // the wall: an ink line where the film stood on the paper. It is
@@ -1333,7 +1344,7 @@
             // proposition of the piece is that what moves is NOW and what stops
             // is old, and at 0.40 the living present was still half a memory.
             vec3 now = texture(uScene, vUv).rgb;
-            img = mix(img, now, smoothstep(0.08, 0.50, mo.r) * 0.88);
+            img = mix(img, now, smoothstep(0.05, 0.40, mo.r));
 
             // 無着色 — but the same for every age. Tinting or darkening by age
             // would be a postmark: it would tell you which parts are old, and
