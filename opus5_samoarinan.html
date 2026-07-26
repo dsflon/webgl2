@@ -4,7 +4,7 @@
   森山直太朗「さもありなん」(映画『ロストケア』主題歌)のための映像。画面に映って
   いるのは「いま」ではない。各所がそれぞれ違う遅れを持った過去の光として届く。
   動かないものほど古く、歌っている間だけ遅れた像が寄り集まって一つになる。
-  最も古い光は像を失って泡になり、割れて消える。
+  像を失った光は紙に押されたバブルアートの泡になり、増えては儚く消える。
   派生元エンジン: opus5_hana.html(マイク解析・合成の歌・カメラとUIと検証フック)/
   opus5_kiin-seido.html(実写の地・運動場)。
 
@@ -15,23 +15,19 @@
        動いているところは「いま」に近く、動かないところほど古い(亡き人は動かない)。
     2. 統合と離散 — 声が続く間、遅れた像が寄り集まって一つになる(時間が許す限り
        抱き締めて)。無音になると統合をやめ、静かに離れていく。山場を作らない。
-    3. ひとつの法則、三つのスケール — 遅延クラスタ / 石楠花の花房 / 泡 が同じ
-       生成則(黄金角の葉序配置)で配置される。曲の一点でだけ三つが同時に同じ形へ
-       重なり、また隠れる(「フラクタル=(統合)愛」の理論が石楠花に潜んでいる)。
-       ※現在は石楠花の描画を停止しているため、目に見える形で重なるのは
-         遅延クラスタと泡の二つ(生成則そのものは三スケールとも共有のまま)。
-    4. 石楠花は在るが主役でない ※2026-07-26 現在この描画は停止中(スライダー
-       「石楠花」の既定値 0)。実装は残してあるので、0 より上げれば以下が出る。
-       — 2〜4株。見切れ・手前のピンボケ・暗がり。十数個の
-       小花が一点から放射して半球をなす花房(=多が一に見える実物)、浅く5裂の漏斗形、
-       上裂片の蜜標、反り返る雄しべ、革質の輪生葉。音に派手に反応しない。
-       画面外から伸びる枝の先に付き(=宙に浮いた毬にしない)、小花は時折ほどけて
-       翻りながら落ちる。
-    5. 泡化 — 像を失った光は薄膜の泡になって漂い、割れて消える(泡と化す宇宙の言葉)。
-       泡が湧くのは「届く光といまの部屋が食い違う場所」= 亡き人が立っている所で、
-       泡の中にはその古い光そのものが入る(空の玉を浮かべない)。固定プール=有界。
-    6. 抵抗しない色 — 無着色透明が基調。実写は淡いモノクロ寄り。彩度は雨・泡の
-       干渉色・蜜標にだけ宿る。
+    3. ひとつの法則、二つのスケール — 遅延クラスタと泡が同じ生成則(黄金角の
+       葉序配置)で配置される。曲の一点でだけ二つが同時に同じ形へ重なり、また
+       隠れる(「フラクタル=(統合)愛」の理論)。
+    4. 泡はバブルアート — 石鹸玉ではない。ストローで吹いた泡が紙に触れて残す
+       跡: 乾いた輪郭線、内側の薄い滲み、密なところは小さな泡室の網。平面で、
+       ハイライトの白点も硬い光る縁も付けない(この2つが「雑に描いたシャボン玉」
+       の正体だった)。漂わず、その場で咲いてその場で消える。
+    5. 泡は声で決まる — 音量が大きさと数を、声色(スペクトル重心)が色相を決める。
+       強いアタックは既にある泡を弾けさせる。大きい泡ほど脆い。
+    6. 残像を邪魔しない — 主役は人物とその残像。泡は遅延の場が深い所(=動かない
+       地)にだけ濃く出て、人物とその航跡の上では退く。
+    7. 抵抗しない色 — 無着色透明が基調。実写は淡いモノクロ寄り。彩度は泡だけに、
+       それも一度彩度を落として紙に混ぜてから宿る(儚さは彩度の低さで作る)。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
     入力: カメラ映像 / fakeScene(GLSL 室内+動く人型) + マイク or 合成の歌
@@ -47,17 +43,16 @@
                 止まった瞬間だけ反動が掛かるので、去った直後の姿がその場に残る。
                 分布の基準は黄金角の葉序フラクタル場、アタックで「速達」の円が届く
     [P5 foam]   泡の状態 ping-pong(MRT 2枚, FOAM_W×FOAM_H)★
-                A=(x, y, encV(速度)) B=(齢, 半径, seed, 干渉位相)
-                遅延が飽和し、かつ「届く光 ≠ いまの部屋」= 残像がある場所から
-                のみ発生(外れたら休眠)。割れて消える
+                A=(x, y, encV(速度)) B=(齢, 半径, seed, 色相)
+                発生: 遅延の深い所を優先し、残像の上は避ける。半径と発生率は
+                音量、色相は声色で決まる。アタックで齢が一気に進んで弾ける
     [P6 layer]  layerT★ を透明にクリアし前乗算アルファで重ねる:
-                石楠花(枝→葉→花房の小花→落花)→ 泡(instanced quad。履歴配列を
-                読み、泡の中に古い光を映す)
+                泡(instanced quad。輪郭線+内側の滲み+Worley の泡室網。
+                遅延の場を読み、人物と残像の上では自ら薄くなる)
     [P7 bloom]  layerT の明部を抽出 → 2段ダウンサンプル+ぼかし        b1 b2
     [P8 comp]   遅延の場で履歴配列を2層サンプルして補間 → 実写(いま)を運動量で
-                僅かに戻す → 無着色透明雨のレンズ(粒の中だけ大きく古い時刻。
-                粒は小さく縦長で、縁が暗い)→
-                layer を前乗算合成 → ブルーム → 肩付きトーンマップ・粒子・周辺減光
+                僅かに戻す → layer を前乗算合成 → ブルーム →
+                肩付きトーンマップ・粒子・周辺減光
 
   実行方法:
     python3 -m http.server 8899 → http://localhost:8899/opus5_samoarinan.html を開き
@@ -68,16 +63,14 @@
     ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
     ?prewarm=<秒> … 初回描画前に固定 dt で早送りし「遅れが育った」絵を出す(検証用)
     ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
-    デバッグ表示: 0=最終 1=運動と静止 2=遅延の場 3=音の特徴量 4=泡と石楠花 5=配色標本
+    デバッグ表示: 0=最終 1=運動と静止 2=遅延の場 3=音の特徴量 4=泡 5=配色標本
 
   スライダーの説明:
     遅れの深さ  最も古い光が何秒前まで遡るか
     統合の強さ  歌っている間に遅れた像が一つへ寄る強さ
     網目の細かさ フラクタルな遅延分布の基準スケール(音高でも動く)
     速達        アタックで古い一枚が届く円の強さ
-    雨          無着色透明雨の量(息のノイズでも増える)
-    泡          泡化の量と寿命
-    石楠花      花房の存在感(既定 0 = 非表示。0 より上げると株が現れる)
+    泡          泡の量と寿命(音量でさらに増減する)
     音の感度    マイク入力のゲイン
     明るさ      全体の露出
     粒子        フィルムグレインの量
@@ -314,7 +307,7 @@
           "運動と静止",
           "遅延の場",
           "音の特徴量",
-          "泡と石楠花",
+          "泡",
           "配色標本",
         ];
 
@@ -323,9 +316,7 @@
           converge: 0.62,
           grain: 0.5,
           parcel: 0.55,
-          rain: 0.45,
           foam: 0.55,
-          truss: 0.0,        // 2026-07-26 ユーザー判断で石楠花の描画を一旦停止
           micGain: 0.55,
           exposure: 1.0,
           filmGrain: 0.20,
@@ -344,9 +335,7 @@
           ["converge", "統合の強さ", "歌う間に遅れた像が一つへ寄る強さ", 0, 1, 0.01],
           ["grain", "網目の細かさ", "遅延の分布の基準スケール(音高でも動く)", 0, 1, 0.01],
           ["parcel", "速達", "アタックで古い一枚が届く円の強さ", 0, 1, 0.01],
-          ["rain", "雨", "無着色透明雨の量(息のノイズでも増える)", 0, 1, 0.01],
           ["foam", "泡", "泡化の量と寿命", 0, 1, 0.01],
-          ["truss", "石楠花", "花房の存在感(既定 0 = 非表示)", 0, 1, 0.01],
           ["micGain", "音の感度", "マイク入力のゲイン", 0, 1, 0.01],
           ["exposure", "明るさ", "画面全体の露出", 0.6, 1.4, 0.01],
           ["filmGrain", "粒子", "全面の静的グレイン", 0, 1, 0.01],
@@ -529,13 +518,6 @@
         const FOAM_H = FOAM_SIDE;
         const FOAM_N = FOAM_W * FOAM_H;         // 676 / 1600 / 3136
 
-        const TRUSS_N = 3;                      // 石楠花の株
-        const FLORET_N = 22;                    // 小花/株(密な花房)
-        const LEAF_N = 6;
-        const STEM_N = 1;                       // 花房を枝に繋ぐ木質の茎
-        const FALL_N = 8;                       // 落ちてゆく小花
-        // 描画順 = インスタンス順。茎→葉→小花→落花 の順に手前へ重なる
-        const TRUSS_PER = STEM_N + LEAF_N + FLORET_N + FALL_N;
 
         const fullscreenVS = `#version 300 es
           precision highp float;
@@ -730,22 +712,14 @@
         // colour of the foam, and the nectar freckles of the shakunage.
         const CHUNK_PALETTE = `
           const vec3 NIGHT = vec3(0.020, 0.024, 0.032);
-          const vec3 LEAF_D = vec3(0.030, 0.062, 0.046);
-          const vec3 LEAF_L = vec3(0.098, 0.190, 0.128);
-          const vec3 PETAL_P = vec3(0.94, 0.80, 0.83);   // 石楠花 淡紅
-          const vec3 PETAL_W = vec3(0.97, 0.95, 0.94);   // ほぼ白
-          const vec3 FRECKLE = vec3(0.72, 0.36, 0.22);   // 蜜標
-          // thin-film interference: the only place a strong hue is allowed
-          vec3 filmColour(float thick, float grazing) {
-            vec3 ph = vec3(1.00, 0.86, 0.71) * thick * 15.0 + grazing * 1.6;
-            vec3 c = 0.5 + 0.5 * cos(ph);
-            // a real film integrates a whole spectrum, so it never lands on a
-            // pure primary. Left raw, this put a neon-green ring on the paper —
-            // no business being there in an ink-and-ash palette. Pull it back
-            // toward its own luminance: the hue still turns with the timbre,
-            // it just turns through pastels.
-            return mix(vec3(dot(c, vec3(0.30, 0.59, 0.11))), c, 0.30);
+          const vec3 PAPER = vec3(0.80, 0.79, 0.78);     // 泡が乗る紙
+          // 泡の色相環。声色が環のどこを使うかを決める。彩度は一度落としてから
+          // 紙に混ぜる — 生の色相環は墨と灰の画面で浮く。
+          vec3 bubbleHue(float h) {
+            vec3 c = 0.5 + 0.5 * cos(6.28318 * (h + vec3(0.0, 0.33, 0.67)));
+            return mix(vec3(dot(c, vec3(0.30, 0.59, 0.11))), c, 0.66);
           }
+          // thin-film interference: the only place a strong hue is allowed
         `;
 
         // 「フラクタル=(統合)愛」の理論。ONE generator, used at three scales:
@@ -1039,15 +1013,18 @@
           }
         `;
 
-        // P5 — the FOAM. 「泡と化す宇宙の言葉」. Free particles in a fixed pool
-        // (structurally bounded). They drift, thin, and pop — nothing accumulates.
+        // P5 — the BUBBLES. 「泡と化す宇宙の言葉」.
         //
-        // WHERE they form matters more than anything else about them. Spawning
-        // wherever the delay had saturated meant spawning on the still wall,
-        // so every bubble carried a scrap of blank wall and the screen filled
-        // with grey discs. A bubble has to take something. So it forms where
-        // the light that ARRIVES differs from what is actually there — which is
-        // exactly where a ghost is standing. The foam carries the person off.
+        // Not soap balls drifting through a room. This is bubble art: colour
+        // blown through a straw into paint and pressed onto paper, so what is
+        // left is a stamped ring, a wash inside it, and sometimes a raft of
+        // small cells. They bloom where they are and stay there; they do not
+        // float. 増えては儚く消える — a bubble is born, holds, and thins out.
+        //
+        // 音量 sets how big and how many. 声色 (spectral centroid) sets the
+        // colour. A loud attack BURSTS the ones already on the paper.
+        //
+        // Fixed pool = structurally bounded. Nothing accumulates.
         const foamFS = `#version 300 es
           precision highp float;
           layout(location = 0) out vec4 outA;
@@ -1063,8 +1040,8 @@
           uniform float uAspect;
           uniform float uFoam;
           uniform float uReveal;
-          uniform vec4 uAudA;
-          uniform vec4 uAudB;
+          uniform vec4 uAudA;   // rms, centroid, zcr, onset
+          uniform vec4 uAudB;   // sustain, pitch, vibrato, arc
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
           ${CHUNK_FRACTAL}
@@ -1087,369 +1064,88 @@
             float age = B.x;
             float rad = B.y;
             float seed = B.z;
-            float phase = B.w;
+            float hue = B.w;
+
+            float loud = clamp(uAudA.x, 0.0, 1.0);
+            float onset = clamp(uAudA.w, 0.0, 1.0);
 
             if (age >= 0.999) {
-              // dormant: look for a place where the light has gone to foam
-              // fewer and bigger. At the old rate the screen filled with small
-              // bubbles and the picture went to chaos; the dissolve has to be
-              // something you notice happening, not a texture over everything.
-              float rate = (1.0 + 7.0 * uFoam) * uDt / max(uTexW * uTexW, 1.0);
+              // dormant: the louder the voice, the more of them arrive
+              // 音量で増減するが、静かな小節で紙が空になっては困る。素の係数を
+              // 0.25 にしていたとき、歌の谷では泡がほぼ消えていた。
+              float rate = (2.6 + 26.0 * uFoam) * (0.55 + 1.9 * loud) *
+                uDt / max(uTexW * uTexW, 1.0);
               if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate) {
                 for (int k = 0; k < 6; k++) {
                   vec2 c = hash22(vec2(idx * 4.17 + float(k) * 9.13,
                     uSeed * 3.31 + float(k) * 2.77));
-                  // during the reveal the foam packs itself like a truss
+                  // during the reveal they pack themselves by the same law
                   vec2 cr = 0.5 + phyllo(floor(hash12(vec2(idx, float(k))) * 15.0),
                     15.0, uSeed) * 0.42;
                   c = mix(c, cr, uReveal * 0.85);
                   vec4 dl = texture(uDelay, c);
-                  // saturated AND holding someone who is not there any more
+                  // KEEP OFF THE GHOST. The afterimage is the subject of the
+                  // piece; bubbles blooming on top of it just fight it. They
+                  // want the still ground around the figure instead.
                   float gh = ghostAt(c, dl.r);
-                  if (age >= 0.999 && dl.g > 0.55 &&
-                      hash12(vec2(idx * 5.1, float(k) * 3.9)) <
-                        smoothstep(0.030, 0.16, gh)) {
+                  float room = 1.0 - smoothstep(0.022, 0.10, gh);
+                  // the oldest light is FAVOURED, not required. As a hard gate
+                  // it throttled the paper down to a dozen bubbles, and bubble
+                  // art is a crowd — they have to overlap to read as blown.
+                  room *= 0.16 + 0.84 * smoothstep(0.04, 0.50, dl.g);
+                  if (age >= 0.999 &&
+                      hash12(vec2(idx * 5.1, float(k) * 3.9)) < room) {
                     pos = c;
-                    vel = vec2((hash12(vec2(idx * 7.7, float(k))) - 0.5) * 0.03,
-                      0.010 + 0.030 * hash12(vec2(idx * 2.3, float(k) * 5.0)));
+                    vel = vec2(0.0);
                     age = 0.0;
                     seed = hash12(vec2(idx * 13.1, uSeed * 6.7));
-                    rad = 0.018 + 0.068 * pow(hash12(vec2(seed * 21.0, 3.3)), 2.0);
-                    // 声色: the timbre at the moment a bubble forms is baked
-                    // into its film thickness, so a bright voice makes cool
-                    // bubbles and a chest voice makes gold ones
-                    phase = 0.12 + 0.55 * clamp(uAudA.y, 0.0, 1.0) +
-                      0.50 * hash12(vec2(seed * 31.0, 7.7));
+                    // 音量が大きいほど大きく吹かれる
+                    // a wide spread: mostly small, a few large. An even spread
+                    // of one size reads as a pattern, not as blown bubbles.
+                    rad = (0.014 + 0.115 * pow(hash12(vec2(seed * 21.0, 3.3)), 2.3))
+                      * (0.50 + 1.30 * loud);
+                    // 声色 → colour. Bright voice runs cool, chest voice warm.
+                    // the voice sets where on the wheel the batch sits; each
+                    // bubble still takes its own colour from around there
+                    hue = fract(0.04 + 0.44 * clamp(uAudA.y, 0.0, 1.0) +
+                      0.52 * hash12(vec2(seed * 31.0, 7.7)));
                   }
                 }
               }
             } else {
-              vec2 mo = decV(texture(uMotion, pos).ba);
-              vel += mo * uDt * 0.25;
+              // stamped on the paper: it barely moves. Only the faintest
+              // breathing, so the picture does not turn into a lava lamp.
               vel += curlN(pos * vec2(uAspect, 1.0) * 2.6 + seed * 13.0) *
-                uDt * 0.22;
-              vel *= exp(-uDt * 0.55);
+                uDt * 0.045;
+              vel *= exp(-uDt * 1.8);
               pos += vel * uDt / vec2(uAspect, 1.0);
-              // a bubble thins as it ages and then it is simply gone
-              age += uDt / (2.6 + 5.5 * uFoam + 4.0 * hash12(vec2(seed * 3.3, 1.7)));
-              rad *= 1.0 + uDt * 0.10;
-              if (pos.x < -0.08 || pos.x > 1.08 || pos.y > 1.10) age = 1.0;
+              float life = 3.0 + 4.0 * uFoam + 3.6 * hash12(vec2(seed * 3.3, 1.7));
+              age += uDt / life;
+              // 音量で弾ける: a loud attack pops what is already on the paper,
+              // the big ones first (they are the thinnest films)
+              float frail = smoothstep(0.030, 0.085, rad);
+              age += uDt * 5.5 * onset * (0.30 + 0.70 * frail);
+              age += uDt * 1.4 * smoothstep(0.55, 0.95, loud) * frail;
+              rad *= 1.0 + uDt * 0.05;
               if (age >= 1.0) age = 1.0;
             }
             outA = vec4(pos, encV(vel));
-            outB = vec4(clamp(age, 0.0, 1.0), rad, seed, phase);
+            outB = vec4(clamp(age, 0.0, 1.0), rad, seed, hue);
           }
         `;
 
-        // P6a — 石楠花. Rebuilt from a photograph of a real truss: two dozen
-        // broad funnels packed into a DOME, heavily overlapping, deep rose at the
-        // frilled margin and cream in the throat, ten long stamens with anthers,
-        // unopened carmine buds around the rim, and a rosette of thick lanceolate
-        // leaves with a pale midrib, a glossy sheen and rolled-under edges.
-        // Each truss carries its own 3D attitude and drifts, so no two are alike
-        // and none of them faces the lens squarely.
-        const trussVS = `#version 300 es
-          precision highp float;
-          uniform float uAspect;
-          uniform float uTime;
-          uniform float uTruss;
-          uniform float uReveal;
-          uniform vec4 uAudA;
-          uniform vec4 uAudB;
-          out vec2 vLocal;
-          out vec4 vAttr;   // kind(0 floret/1 leaf/2 bud/3 stem), depth, seed, open
-          out vec4 vFace;   // cosTilt, sinTilt, roll, farness
-          out vec4 vCol;    // rgb + an extra fade (a falling floret runs out)
-          ${CHUNK_NOISE}
-          ${CHUNK_PALETTE}
-          ${CHUNK_FRACTAL}
-          const float PER = ${TRUSS_PER}.0;
-          const float FLORETS = ${FLORET_N}.0;
-          const vec2 QUAD[6] = vec2[6](
-            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
-            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
-          );
-          void main() {
-            vLocal = vec2(0.0);
-            vAttr = vec4(0.0);
-            vFace = vec4(1.0, 0.0, 0.0, 0.0);
-            vCol = vec4(0.0);
-            float inst = float(gl_InstanceID);
-            float tid = floor(inst / PER);
-            float part = inst - tid * PER;
-            if (uTruss <= 0.01) { gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return; }
-            float tseed = hash12(vec2(tid * 17.3, 4.1));
-
-            // the shrub drifts: each truss travels its own slow closed path, so
-            // the frame is never the same twice and nothing sits pinned in place
-            float sp = 0.030 + 0.045 * hash12(vec2(tid * 3.1, 8.2));
-            vec2 orbit = vec2(
-              sin(uTime * sp + tseed * 6.28) * (0.10 + 0.10 * tseed),
-              cos(uTime * sp * 0.74 + tseed * 4.11) * (0.06 + 0.07 * tseed));
-            vec2 anchor = vec2(tid < 0.5 ? -0.04 : (tid < 1.5 ? 1.04 : 0.20),
-              tid < 0.5 ? 0.26 : (tid < 1.5 ? 0.64 : -0.06));
-            anchor += (hash22(vec2(tid * 5.7, 2.3)) - 0.5) * 0.10 + orbit;
-
-            float depth = 0.22 + 0.74 * hash12(vec2(tid * 9.1, 6.6));
-            float scale = (0.072 + 0.070 * depth) * (0.55 + 0.85 * uTruss);
-            // the dome is seen at an angle, and the angle wanders
-            float tilt = 0.35 + 0.85 * hash12(vec2(tid * 23.7, 1.9)) +
-              0.10 * sin(uTime * 0.09 + tseed * 5.0);
-            float roll = tseed * PI2 + 0.15 * sin(uTime * 0.06 + tid);
-            float cosT = max(cos(tilt), 0.24);
-            float sinT = sin(tilt);
-            vec2 ar = vec2(uAspect, 1.0);
-            vec2 c = anchor * ar;
-            vec2 q = QUAD[gl_VertexID];
-            vLocal = q;
-            float cr = cos(roll), sr = sin(roll);
-            // every truss sits on the end of a twig that runs off the frame.
-            // A branch comes up from BELOW — pointing it radially outward from
-            // the frame centre hid it behind the truss on every edge-anchored
-            //株, which is why the truss still read as a ball in mid-air.
-            vec2 outward = normalize(vec2((anchor.x - 0.5) * 0.9, -1.0));
-
-            if (part < ${STEM_N}.0) {
-              // ---- the twig. Without it the truss is a ball hanging in the
-              // air; with it the whole thing belongs to a shrub that is simply
-              // out of shot. It runs from the truss to well past the frame edge.
-              float sway = 0.035 * sin(uTime * 0.22 + tseed * 6.28);
-              vec2 sd = normalize(outward + vec2(-outward.y, outward.x) * sway);
-              vec2 sp2 = vec2(-sd.y, sd.x);
-              float slen = 1.35;
-              float st = q.x * 0.5 + 0.5;                    // 0 truss … 1 far
-              // a branch thickens away from the tip, and it is never straight
-              float thick = scale * (0.085 + 0.16 * st);
-              float bow = (tseed - 0.5) * 0.24 * st * (1.0 - st) * 4.0;
-              vec2 P = c + sd * st * slen + sp2 * (q.y * thick + bow * scale);
-              vAttr = vec4(3.0, depth, tseed, st);
-              vFace = vec4(cosT, sinT, roll, 0.0);
-              vCol = vec4(mix(vec3(0.16, 0.13, 0.10), LEAF_D, 0.45), 1.0);
-              gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
-            } else if (part >= ${STEM_N + LEAF_N + FLORET_N}.0) {
-              // ---- 散る: a floret lets go of the truss and turns over as it
-              // falls. 「時間が許す限り抱き締めて」— it is held, and then it
-              // is not. The cycle is per-floret and never synchronised.
-              float fi = part - ${STEM_N + LEAF_N + FLORET_N}.0;
-              float fseed = hash12(vec2(fi * 3.3 + tid * 11.0, 5.5));
-              float per = 7.0 + 6.0 * fseed;
-              float t01 = fract(uTime / per + fseed * 0.97);
-              // released from a seat on the rim, then gravity and a slow sway
-              vec2 rel = phyllo(floor(fseed * FLORETS), FLORETS, tseed);
-              vec2 P0 = c + vec2(rel.x, rel.y * cosT) * scale * 0.66;
-              float drop = (0.55 + 0.45 * fseed) * t01 * t01;
-              float swayx = 0.075 * sin(t01 * 7.0 + fseed * 6.28) * t01;
-              // it tumbles, so it keeps turning edge-on and nearly vanishing
-              float spin = t01 * (5.0 + 7.0 * fseed) + fseed * 6.28;
-              float squash = max(abs(cos(spin * 0.7)), 0.16);
-              float fs = scale * (0.26 + 0.13 * fseed);
-              vec2 P = P0 + vec2(swayx * uAspect, -drop) + q * fs;
-              vAttr = vec4(0.0, depth, fseed, 1.0);
-              vFace = vec4(squash, sqrt(1.0 - squash * squash), spin, 0.0);
-              vec3 warm = mix(PETAL_P, vec3(0.90, 0.55, 0.62), 0.35);
-              vec3 cool = mix(PETAL_P, vec3(0.86, 0.80, 0.92), 0.35);
-              // a fallen floret browns at the edge and fades out near the ground
-              vCol = vec4(mix(mix(warm, cool, clamp(uAudA.y, 0.0, 1.0)),
-                vec3(0.78, 0.68, 0.60), 0.35 * t01),
-                smoothstep(0.0, 0.10, t01) * (1.0 - smoothstep(0.72, 1.0, t01)));
-              gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
-            } else if (part >= ${STEM_N + LEAF_N}.0) {
-              // pack the florets into the dome by the golden angle, then FLATTEN
-              // the packing along the tilt axis: that is what turns a flat rosette
-              // of blossoms into a dome you are looking at from the side
-              vec2 site = phyllo(part - ${STEM_N + LEAF_N}.0, FLORETS, tseed);
-              float far = 0.5 + 0.5 * site.y;              // 0 near … 1 far side
-              vec2 sq = vec2(site.x, site.y * cosT);
-              vec2 srot = vec2(sq.x * cr - sq.y * sr, sq.x * sr + sq.y * cr);
-              // the rim of the truss holds buds that have not opened
-              float rimness = length(site);
-              float isBud = step(0.86, rimness) *
-                step(hash12(vec2(part * 3.7, tid * 2.2)), 0.34);
-              float open = smoothstep(0.95, 0.25, rimness);
-              // a floret is big relative to the truss — they overlap, which is
-              // what makes a truss read as one mass instead of scattered stars
-              float fs = scale * (0.74 + 0.26 * open) * (0.80 + 0.30 * (1.0 - far));
-              if (isBud > 0.5) fs *= 0.48;
-              vec2 P = c + srot * scale * 0.66 + q * fs;   // packed, overlapping
-              vAttr = vec4(isBud > 0.5 ? 2.0 : 0.0, depth,
-                hash12(vec2(tid * 3.3 + part, 8.8)), open);
-              vFace = vec4(cosT, sinT, roll, far);
-              // deep carmine buds, cream-throated rose florets, and the timbre of
-              // the voice leans the whole truss warm or cool by a hair
-              vec3 warm = mix(PETAL_P, vec3(0.90, 0.55, 0.62), 0.35);
-              vec3 cool = mix(PETAL_P, vec3(0.86, 0.80, 0.92), 0.35);
-              vec3 base = mix(warm, cool, clamp(uAudA.y, 0.0, 1.0));
-              vCol = vec4(isBud > 0.5 ? mix(vec3(0.60, 0.24, 0.34), base, 0.45)
-                : mix(base * 0.92, PETAL_W, 0.30 * open), 1.0);
-              gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
-            } else {
-              // the leaf whorl. On a real shrub the leaves hang BELOW and
-              // BEHIND the truss as a partial collar — they never fan out
-              // evenly all the way round, and a full circle of them is exactly
-              // the pinwheel/star failure of CRAFT §B1. So: a downward arc,
-              // jittered, rotated only a little by the truss attitude.
-              float li = part - ${STEM_N}.0;
-              float lu = (li + 0.5) / ${LEAF_N}.0;
-              float la = -3.14159265 + 0.24 + lu * 2.66 +
-                (hash12(vec2(li * 4.4, tid * 6.1)) - 0.5) * 0.55 +
-                0.42 * sin(tseed * 6.28) + 0.05 * sin(uTime * 0.13 + li);
-              vec2 ld = vec2(cos(la), sin(la) * mix(1.0, cosT, 0.60));
-              ld = normalize(ld + vec2(1e-5));
-              // a leaf is about as long as the truss is wide, not twice it:
-              // oversized leaves are what made the shrub read as a starburst
-              float ls = scale * (0.46 + 0.30 * hash12(vec2(li * 7.7, tid)));
-              vec2 lc = c + ld * scale * 0.44;
-              vec2 lp = vec2(-ld.y, ld.x);
-              // a leaf turned edge-on is a sliver: this is the whole reason the
-              // whorl reads as three-dimensional
-              float lTilt = 0.55 + 0.45 * hash12(vec2(li * 13.3, tid * 3.7));
-              // and no blade is straight — it bows away from the stem
-              float lt = q.x * 0.5 + 0.5;
-              float bend = (hash12(vec2(li * 2.9, tid * 7.3)) - 0.5) * 0.85;
-              vec2 P = lc + ld * lt * ls * 2.8 +
-                lp * (q.y * ls * 0.55 * lTilt + bend * ls * lt * lt);
-              vAttr = vec4(1.0, depth, hash12(vec2(li * 11.1, tid * 2.2)), lTilt);
-              vFace = vec4(cosT, sinT, roll, 0.0);
-              vCol = vec4(mix(LEAF_D, LEAF_L, 0.38 + 0.42 * hash12(vec2(li, tid))), 1.0);
-              gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
-            }
-          }
-        `;
-
-        const trussFS = `#version 300 es
-          precision highp float;
-          in vec2 vLocal;
-          in vec4 vAttr;
-          in vec4 vFace;
-          in vec4 vCol;
-          out vec4 fragColor;
-          uniform float uReveal;
-          ${CHUNK_NOISE}
-          ${CHUNK_PALETTE}
-          void main() {
-            float kind = vAttr.x;
-            float depth = vAttr.y;
-            float seed = vAttr.z;
-            float open = vAttr.w;
-            vec2 p = vLocal;
-            float cov = 0.0;
-            vec3 col = vCol.rgb;
-
-            if (kind < 0.5) {
-              // ---- an open floret: a broad funnel with five FRILLED lobes.
-              // Foreshortened by the truss attitude, its throat pushed to the far
-              // side, cream at the centre and deep rose at the wavy margin.
-              float cosT = max(vFace.x, 0.24);
-              float roll = vFace.z;
-              float cr = cos(-roll), sr = sin(-roll);
-              vec2 pr = vec2(p.x * cr - p.y * sr, p.x * sr + p.y * cr);
-              vec2 fp = vec2(pr.x, pr.y / cosT);
-              float r = length(fp);
-              float a = atan(fp.y, fp.x);
-              // five lobes, each with a rippling edge (the frill is the single
-              // most recognisable thing about a rhododendron petal)
-              float lobe = 0.82 + 0.18 * cos(a * 5.0 + seed * 6.3);
-              float frill = 1.0 + 0.055 * sin(a * 9.0 + seed * 11.0) +
-                0.030 * sin(a * 17.0 - seed * 7.0);
-              float rad = lobe * frill * mix(0.45, 1.0, open);
-              cov = 1.0 - smoothstep(rad * 0.90, rad, r);
-              float u = clamp(r / max(rad, 1e-3), 0.0, 1.0);
-              // cream throat → rose margin
-              col = mix(mix(PETAL_W, vec3(1.0, 0.98, 0.96), 0.5),
-                mix(vCol.rgb, vec3(0.86, 0.42, 0.55), 0.35), smoothstep(0.06, 0.98, u));
-              col *= 0.66 + 0.52 * u;
-              // the corolla is a funnel: the throat is in shadow and sits off
-              // centre on a tilted floret
-              vec2 tp = fp + vec2(0.0, 0.20 * vFace.y);
-              float throat = 1.0 - smoothstep(0.14, 0.40, length(tp));
-              col *= 1.0 - 0.34 * throat;
-              // radial nectar freckles on the upper lobe
-              float fr = smoothstep(0.35, 1.0, sin(a)) *
-                smoothstep(0.72, 0.16, u) *
-                step(0.62, hash12(floor(fp * 13.0) + seed * 9.0));
-              col = mix(col, FRECKLE, fr * 0.42 * open);
-              // each funnel keeps its own edge inside the packed dome
-              col *= 1.0 - 0.42 * smoothstep(0.88, 1.0, u);
-              // ten stamens, curving out past the mouth, with an anther at the tip
-              float st = 0.0, anth = 0.0;
-              for (int k = 0; k < 5; k++) {
-                float sa = -1.5 + float(k) * 0.66 + seed * 0.9;
-                float ln = 0.95 + 0.30 * hash12(vec2(float(k), seed * 3.0));
-                vec2 tipp = vec2(cos(sa), sin(sa)) * rad * ln;
-                vec2 mid = mix(vec2(0.0, 0.10), tipp, 0.55) + vec2(0.0, 0.10);
-                st = max(st, 1.0 - smoothstep(0.010, 0.040,
-                  min(sdSeg(fp, vec2(0.0, 0.08), mid), sdSeg(fp, mid, tipp))));
-                anth = max(anth, 1.0 - smoothstep(0.030, 0.062, length(fp - tipp)));
-              }
-              st *= open; anth *= open;
-              cov = max(cov, max(st, anth) * 0.95);
-              col = mix(col, mix(PETAL_W, vec3(1.0, 0.93, 0.86), 0.5), st * 0.72);
-              col = mix(col, mix(FRECKLE, vec3(0.42, 0.24, 0.16), 0.45), anth * 0.85);
-            } else if (kind > 2.5) {
-              // ---- the twig: a round woody stem, lit down one side, with the
-              // bark roughening as it thickens away from the truss
-              float st2 = vAttr.w;
-              float across2 = p.y;
-              cov = smoothstep(1.0, 0.66, abs(across2));
-              // round, so one flank catches the light and the other is in shade
-              col *= 0.58 + 0.62 * smoothstep(1.0, -0.4, across2);
-              float bark = fbm(vec2(st2 * 26.0, across2 * 3.0) + seed * 17.0);
-              col *= 0.82 + 0.34 * bark;
-              col *= 0.80 + 0.30 * st2;
-            } else if (kind > 1.5) {
-              // ---- an unopened bud: a furled carmine cone with sepal ribs
-              vec2 bp = p * vec2(1.55, 0.94);
-              float taper = 0.80 - 0.26 * smoothstep(-0.3, 1.0, p.y);
-              cov = 1.0 - smoothstep(taper * 0.88, taper, length(bp));
-              float ribs = 0.5 + 0.5 * cos(atan(bp.y, bp.x) * 5.0 + seed * 9.0);
-              col = mix(vCol.rgb * 0.78, vCol.rgb, 0.35 + 0.55 * ribs);
-              col *= 0.70 + 0.45 * smoothstep(-0.8, 0.9, p.y);
-            } else {
-              // ---- a leathery leaf: heavy pale midrib, a glossy sheen band, and
-              // an edge rolled under so the margin runs dark
-              float ty = clamp(p.x * 0.5 + 0.5, 0.0, 1.0);
-              // lanceolate: widest at two fifths, then a long taper to an acute
-              // tip. A blunt profile turns the blade into a pod (it did).
-              float prof = pow(clamp(sin(pow(ty, 0.78) * 3.14159265), 0.0, 1.0), 0.62);
-              float halfw = 0.90 * prof;
-              float across = p.y / max(halfw, 1e-3);
-              cov = smoothstep(1.0, 0.78, abs(across));
-              float rib = smoothstep(0.065, 0.0, abs(across));
-              float sec = 0.5 + 0.5 * sin(abs(across) * 2.6 - ty * 22.0 + seed * 7.0);
-              col *= 0.52 + 0.34 * prof + 0.30 * (1.0 - abs(across));
-              col += vCol.rgb * 0.22 * sec * smoothstep(0.15, 0.9, abs(across));
-              // the midrib is pale, but it is a thread, not a stripe of paint
-              col = mix(col, mix(vCol.rgb, vec3(0.40, 0.50, 0.38), 0.50), rib * 0.38);
-              // the rolled margin is the darkest line on the blade
-              col *= 1.0 - 0.45 * smoothstep(0.74, 0.99, abs(across));
-              // wax: one narrow specular band down the length
-              float sheen = smoothstep(0.30, 0.0, abs(across + 0.34)) *
-                smoothstep(0.05, 0.45, ty) * (1.0 - smoothstep(0.6, 0.95, ty));
-              col += vec3(0.30, 0.36, 0.30) * sheen * 0.55;
-              col *= 0.78;
-            }
-
-            // foreground, off the focal plane: the nearer it is the softer it goes
-            float soft = mix(0.40, 0.07, depth);
-            cov *= smoothstep(0.0, soft + 0.05, cov);
-            // the far side of a tilted truss falls away into shade
-            col *= 1.0 - 0.34 * vFace.w;
-            float a2 = clamp(cov, 0.0, 1.0) * (0.42 + 0.38 * depth) * vCol.a;
-            if (a2 <= 0.012) discard;
-            col *= 1.0 + 0.30 * uReveal;
-            fragColor = vec4(col * a2, a2);         // premultiplied over
-          }
-        `;
-
-        // P6b — the foam, drawn as instanced quads.
+        // P6b — the bubbles, drawn as instanced quads.
         //
-        // 「泡と化す宇宙の言葉」。The first version drew a soap bubble: a hard
-        // bright ring and a white specular dot, with NOTHING inside it. That is
-        // a cartoon, and worse, it contradicts the premise — a bubble is
-        // supposed to be light that has lost its image, so it has to be made of
-        // that light. Now each bubble carries the oldest frame it can reach,
-        // magnified and pulled apart by the curve of the film. What is inside
-        // the bubble is the person who was there, coming undone.
+        // Bubble art, not a soap bubble. What is left on paper when a blown
+        // bubble lands and bursts is: a stamped ring where the film met the
+        // sheet, a thin wash inside it, and — where the foam was dense — a raft
+        // of small cells. Flat, no specular, no 3D. Two earlier versions failed
+        // by adding exactly the marks that read as "drawn soap bubble": a hard
+        // bright rim and a white highlight dot. There are none here.
+        //
+        // The palette is deliberately washed out. 儚い is the brief, and this
+        // has to sit under an afterimage without competing with it, so every
+        // colour is pulled most of the way to paper before it is used.
         const foamDrawVS = `#version 300 es
           precision highp float;
           uniform sampler2D uStateA;
@@ -1457,8 +1153,8 @@
           uniform float uTexW;
           uniform float uAspect;
           out vec2 vLocal;
-          out vec3 vAttr;   // age, seed, phase
-          out vec3 vCen;    // bubble centre in uv + its uv radius (x scaled)
+          out vec3 vAttr;   // age, seed, hue
+          out vec3 vCen;    // bubble centre in uv + its uv radius
           ${CHUNK_ENC}
           const vec2 QUAD[6] = vec2[6](
             vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
@@ -1478,7 +1174,9 @@
             vLocal = q;
             vAttr = vec3(B.x, B.z, B.w);
             vCen = vec3(A.xy, B.y);
-            vec2 P = A.xy * vec2(uAspect, 1.0) + q * B.y;
+            // the quad is a little larger than the bubble so the outermost
+            // cells of a foam raft are not clipped off square
+            vec2 P = A.xy * vec2(uAspect, 1.0) + q * B.y * 1.12;
             gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
           }
         `;
@@ -1489,52 +1187,87 @@
           in vec3 vAttr;
           in vec3 vCen;
           out vec4 fragColor;
-          uniform float uAspect;
           uniform sampler2D uDelay;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
-          ${CHUNK_HIST}
+
+          // the web of borders in a raft of small bubbles: F2 - F1 of a jittered
+          // Worley lattice is small exactly along the walls between cells
+          float cellWeb(vec2 q, float sd) {
+            vec2 g = floor(q), f = fract(q);
+            float b1 = 8.0, b2 = 8.0;
+            for (int y = -1; y <= 1; y++) {
+              for (int x = -1; x <= 1; x++) {
+                vec2 o = vec2(float(x), float(y));
+                vec2 pt = o + 0.12 + 0.76 * hash22(g + o + sd);
+                float d = length(f - pt);
+                if (d < b1) { b2 = b1; b1 = d; } else if (d < b2) { b2 = d; }
+              }
+            }
+            return b2 - b1;
+          }
+
           void main() {
             float age = vAttr.x;
             float seed = vAttr.y;
-            float phase = vAttr.z;
-            vec2 p = vLocal;
+            float hue = vAttr.z;
+            vec2 p = vLocal * 1.12;          // quad was widened; undo for radius
             float r = length(p);
-            if (r > 1.0) discard;
-            float pop = 1.0 - smoothstep(0.88, 1.0, age);   // it simply stops
-            vec2 radUv = vec2(vCen.z / uAspect, vCen.z);
+            if (r > 1.12) discard;
 
-            // what is INSIDE: the oldest light this place still holds, bent by
-            // the curve of the film so it magnifies at the centre and shears
-            // apart at the rim
-            float bulge = 0.52 + 0.62 * r * r;
-            vec2 suv = clamp(vCen.xy + p * radUv * bulge, 0.0, 1.0);
-            // the delay HERE, not some fixed depth: a bubble shows the ghost
-            // it actually formed on, which is the whole reason it exists
-            float sec = texture(uDelay, vCen.xy).r * (0.90 + 0.16 * phase);
-            vec3 held = lightFrom(suv, sec);
-            // and it is already going: the image thins toward grey as it ages
-            held = mix(held, vec3(dot(held, vec3(0.30, 0.59, 0.11))),
-              0.25 + 0.55 * age);
+            // 増えては儚く消える: a quick bloom, a short hold, a long thinning
+            float bloom = smoothstep(0.0, 0.16, age);
+            float fade = 1.0 - smoothstep(0.42, 1.0, age);
+            float R = mix(0.62, 1.0, bloom);
+            float d = r / R;
 
-            // the film itself is only a faint iridescent breath over that
-            float thick = (1.0 - 0.75 * age) * (0.55 + 0.9 * phase);
-            float grazing = pow(clamp(r, 0.0, 1.0), 2.2);
-            vec3 film = filmColour(thick + grazing * 0.55, grazing);
-            // no hard ring and no specular dot — those two marks alone are what
-            // made this read as a drawn soap bubble rather than as light
-            // a wide gradient, not a ring: a hard band of interference colour
-            // is just an outline drawn round a circle, which is the thing this
-            // was supposed to stop being
-            float rim = smoothstep(0.24, 0.95, r) * (1.0 - smoothstep(0.90, 1.0, r));
-            vec3 col = mix(held * 1.02, film, 0.06 + 0.15 * rim);
-            col += (film - 0.5) * 0.09 * rim;
+            // the wall: an ink line where the film stood on the paper. It is
+            // never perfectly round — a landed bubble dries wobbly.
+            float th = atan(p.y, p.x);
+            float wob = 1.0 + 0.030 * sin(th * 2.0 + seed * 19.0) +
+              0.016 * sin(th * 5.0 - seed * 11.0);
+            float dw = d / wob;
+            float ring = smoothstep(0.86, 0.985, dw) * (1.0 - smoothstep(0.985, 1.06, dw));
+            float inside = 1.0 - smoothstep(0.94, 1.0, dw);
 
-            // a bubble is nearly all edge in its opacity, but it is never empty
-            float a = (0.24 + 0.26 * rim) * pop;
-            a *= 1.0 - 0.35 * smoothstep(0.6, 1.0, age);
-            a *= 1.0 - smoothstep(0.94, 1.0, r);            // no cut silhouette
-            if (a <= 0.005) discard;
+            // a raft of small cells inside roughly a third of them
+            float raft = step(0.66, hash12(vec2(seed * 7.3, 2.9)));
+            float web = 0.0;
+            if (raft > 0.5) {
+              float sc = 4.5 + 6.0 * hash12(vec2(seed * 5.1, 8.4));
+              float e = cellWeb(p * sc, seed * 23.0);
+              web = (1.0 - smoothstep(0.0, 0.16, e)) * inside;
+              // the raft does not fill the whole bubble, it drifts to one side
+              vec2 off = (hash22(vec2(seed * 3.7, 1.3)) - 0.5) * 0.8;
+              web *= smoothstep(0.95, 0.25, length(p - off));
+            }
+
+            // ---- colour. Washed to the point of being barely there.
+            vec3 pure = bubbleHue(hue);
+            // paper first, pigment second — this is the whole reason it reads
+            // as 儚い instead of as a children's toy
+            vec3 tint = mix(PAPER, pure, 0.32);
+            // the wall holds a little more pigment, as ink does when it dries
+            // at an edge, but it goes DARKER rather than more colourful
+            vec3 line = mix(tint, pure, 0.22) * 0.70;
+
+            float aRing = ring * 0.42;
+            float aWash = inside * 0.085;
+            float aWeb  = web * 0.30;
+            float a = (aRing + aWash + aWeb) * fade;
+            vec3 col = (line * (aRing + aWeb) + tint * aWash) / max(a, 1e-4);
+
+            // ---- stay off the figure. The subject of the picture is the
+            // person and the afterimage they leave; bubbles are the ground it
+            // happens on. Comparing old light against now does NOT find the
+            // figure — where someone stands still the two agree exactly — so
+            // read the delay field instead: deep means still ground and is
+            // safe, shallow means the living body and its recent wake.
+            vec2 suv = clamp(vCen.xy + p * vec2(vCen.z, vCen.z), 0.0, 1.0);
+            float ground = texture(uDelay, suv).g;
+            a *= 0.14 + 0.86 * smoothstep(0.04, 0.42, ground);
+
+            if (a <= 0.004) discard;
             fragColor = vec4(col * a, a);
           }
         `;
@@ -1576,7 +1309,6 @@
           uniform float uTime;
           uniform float uExposure;
           uniform float uFilmGrain;
-          uniform float uRain;
           uniform float uReveal;
           uniform vec4 uAudA;
           uniform vec4 uAudB;
@@ -1595,47 +1327,13 @@
             float sec = dl.r;
             float foam = dl.g;
 
-            // ---- 無着色透明雨: drops on the glass, each a lens onto another
-            // time. Inside a drop the age jumps, so what shows there is a person
-            // who may no longer be in the room (亡き人の影を探している).
-            // These were wide bright discs on two coarse grids, and they read as
-            // a screenful of crudely drawn soap bubbles — the loudest thing in
-            // the picture, and nothing to do with rain. A drop is small, taller
-            // than it is wide, and it goes DARK at its meniscus; it does not
-            // glow in the middle.
-            float rainAmt = uRain * (0.35 + 0.9 * uAudA.z);
-            vec2 ruv = vUv;
-            float lens = 0.0;
-            float lrim = 0.0;
-            for (int L = 0; L < 2; L++) {
-              float gs = 21.0 + 13.0 * float(L);
-              vec2 g = vUv * ar * gs;
-              g.y += uTime * (0.16 + 0.10 * float(L)) * gs * 0.20;   // it runs
-              vec2 cell = floor(g);
-              vec2 f = fract(g) - 0.5;
-              float h = hash12(cell + float(L) * 31.0);
-              if (h > 1.0 - 0.17 * rainAmt) {
-                float rr = 0.10 + 0.26 * pow(hash12(cell + 5.0), 1.6);
-                vec2 dp = (f - (hash22(cell + 3.0) - 0.5) * 0.5) * vec2(1.0, 0.72);
-                float d2 = length(dp);
-                float inD = 1.0 - smoothstep(rr * 0.72, rr, d2);
-                if (inD > lens) {
-                  lens = inD;
-                  lrim = smoothstep(rr * 0.55, rr * 0.98, d2) * step(d2, rr);
-                  ruv = vUv + normalize(dp + vec2(1e-4)) * inD * 0.012;
-                }
-              }
-            }
-            float secR = mix(sec, uMaxDelay * (0.55 + 0.45 * hash12(floor(vUv * 20.0))),
-              lens * 0.92);
-
             // ---- the picture that has arrived
-            vec3 img = lightFrom(ruv, secR);
+            vec3 img = lightFrom(vUv, sec);
             // whatever is moving is nearly present. This has to be firm: the
             // proposition of the piece is that what moves is NOW and what stops
             // is old, and at 0.40 the living present was still half a memory.
             vec3 now = texture(uScene, vUv).rgb;
-            img = mix(img, now, smoothstep(0.10, 0.55, mo.r) * 0.62);
+            img = mix(img, now, smoothstep(0.08, 0.50, mo.r) * 0.88);
 
             // 無着色 — but the same for every age. Tinting or darkening by age
             // would be a postmark: it would tell you which parts are old, and
@@ -1647,10 +1345,6 @@
             vec3 col = mix(img, vec3(g2), 0.62);
             col = mix(col, NIGHT + vec3(g2) * 0.78, 0.22);
             col = (col - 0.5) * 1.10 + 0.5;
-            // a rain lens is the one place the image stays clean — clean, not
-            // bright. The lift is what turned every drop into a glowing bead.
-            col = mix(col, mix(img, vec3(lumaf(img)), 0.25) * 1.04, lens * 0.42);
-            col *= 1.0 - 0.24 * lrim;              // the meniscus reads dark
 
             // NOTHING is drawn here for the foam. Any tint keyed to the age
             // would draw a map of what is old across the picture — the postmark
@@ -1698,7 +1392,7 @@
                 float y0 = 0.14 + 0.115 * float(i);
                 float band = 1.0 - smoothstep(0.030, 0.038, abs(vUv.y - y0));
                 float fill = step(vUv.x, 0.08 + 0.84 * clamp(vals[i], 0.0, 1.0));
-                col = mix(col, filmColour(0.2 + 0.12 * float(i), 0.4),
+                col = mix(col, bubbleHue(0.10 + 0.16 * float(i)),
                   band * fill * 0.95);
                 col = mix(col, vec3(0.16), band * (1.0 - fill) * 0.6);
               }
@@ -1706,9 +1400,9 @@
               col = F.rgb + vec3(0.08) * clamp(F.a, 0.0, 1.0);
             } else if (uDebug == 5) {
               float row = floor(vUv.y * 3.0);
-              col = row < 1.0 ? mix(LEAF_D, LEAF_L, vUv.x)
-                : (row < 2.0 ? mix(PETAL_P, PETAL_W, vUv.x)
-                : filmColour(vUv.x * 1.6, 0.4));
+              col = row < 1.0 ? mix(NIGHT, vec3(0.86), vUv.x)
+                : (row < 2.0 ? bubbleHue(vUv.x)
+                : mix(PAPER, bubbleHue(vUv.x), 0.28));
             }
             col = min(col, vec3(0.985));
             fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
@@ -1756,7 +1450,6 @@
           histCopy: createProgram(histCopyFS),
           delay: createProgram(delayFS),
           foam: createProgram(foamFS),
-          truss: createProgramVS(trussVS, trussFS),
           foamDraw: createProgramVS(foamDrawVS, foamDrawFS),
           bright: createProgram(brightFS),
           composite: createProgram(compositeFS),
@@ -1783,17 +1476,13 @@
             "uSeed", "uAspect", "uFoam", "uReveal", "uAudA", "uAudB",
             "uHist", "uHistHz", "uHistN", "uWrite", "uMaxDelay",
           ]),
-          truss: getLocations(programs.truss, [
-            "uAspect", "uTime", "uTruss", "uReveal", "uAudA", "uAudB",
-          ]),
           foamDraw: getLocations(programs.foamDraw, [
             "uStateA", "uStateB", "uTexW", "uAspect", "uDelay",
-            "uHist", "uHistHz", "uHistN", "uWrite", "uMaxDelay",
           ]),
           bright: getLocations(programs.bright, ["uSrc", "uThreshold"]),
           composite: getLocations(programs.composite, [
             "uScene", "uHist", "uDelay", "uMotion", "uLayer", "uB1", "uB2",
-            "uResolution", "uAspect", "uTime", "uExposure", "uFilmGrain", "uRain",
+            "uResolution", "uAspect", "uTime", "uExposure", "uFilmGrain",
             "uReveal", "uHistHz", "uHistN", "uWrite", "uMaxDelay",
             "uAudA", "uAudB", "uDebug",
           ]),
@@ -2517,17 +2206,6 @@
           gl.blendEquation(gl.FUNC_ADD);
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // premultiplied over
 
-          gl.useProgram(programs.truss);
-          {
-            const u = locations.truss;
-            gl.uniform1f(u.uAspect, aspect);
-            gl.uniform1f(u.uTime, animTime);
-            gl.uniform1f(u.uTruss, state.truss);
-            gl.uniform1f(u.uReveal, reveal);
-            gl.uniform4f(u.uAudA, meters.rms, meters.cen, meters.zcr, meters.onset);
-            gl.uniform4f(u.uAudB, meters.sus, meters.pitch, meters.vib, arc);
-          }
-          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, TRUSS_N * TRUSS_PER);
 
           gl.useProgram(programs.foamDraw);
           {
@@ -2538,15 +2216,9 @@
             gl.uniform1i(u.uStateB, 1);
             gl.uniform1f(u.uTexW, FOAM_W);
             gl.uniform1f(u.uAspect, aspect);
-            // a bubble is made of the light it took, so it reads the history
-            bindHistory(2);
-            bindTexture(3, delayOut.tex);
-            gl.uniform1i(u.uHist, 2);
-            gl.uniform1i(u.uDelay, 3);
-            gl.uniform1f(u.uHistHz, HIST_HZ);
-            gl.uniform1f(u.uHistN, HIST_N);
-            gl.uniform1f(u.uWrite, histWrite);
-            gl.uniform1f(u.uMaxDelay, MAX_DELAY);
+            // it reads the delay field so it can step back off the figure
+            bindTexture(2, delayOut.tex);
+            gl.uniform1i(u.uDelay, 2);
           }
           gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, FOAM_N);
           gl.disable(gl.BLEND);
@@ -2593,7 +2265,6 @@
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uExposure, state.exposure);
             gl.uniform1f(u.uFilmGrain, state.filmGrain);
-            gl.uniform1f(u.uRain, state.rain);
             gl.uniform1f(u.uReveal, reveal);
             gl.uniform1f(u.uHistHz, HIST_HZ);
             gl.uniform1f(u.uHistN, HIST_N);
