@@ -242,7 +242,7 @@ const prefersReducedMotion =
 
 const params = {
   points: 2600, lineCount: 1, smoothing: 2,
-  contour: 1.40, outline: 0.95, tone: 0.85, detail: 0.80,
+  contour: 1.40, outline: 0.95, tone: 0.85, detail: 0.80, features: 0.95,
   darkTh: 0.06, gamma: 1.6,
   step: 0.9, jitter: 0.28,
   persistence: 0.90, glow: 0.22, contrast: 0.045, relink: 2,
@@ -263,6 +263,7 @@ const SLIDERS = [
   ["contour",    "輪郭",            0,    2,    0.05, "輪郭と面"],
   ["outline",    "人型の縁",        0,    2,    0.05, null],
   ["detail",     "細部",            0,    1,    0.01, null],
+  ["features",   "目鼻立ち",        0,    1.5,  0.05, null],
   ["tone",       "明暗の面",        0,    1.5,  0.05, null],
   ["darkTh",     "暗部の切り",      0,    0.6,  0.01, null],
   ["gamma",      "明暗のカーブ",    0.5,  4,    0.05, null],
@@ -545,7 +546,8 @@ let fieldDowngraded = (FW === FW_LO);
 // edge/sil は2種類持つ。広くぼかした方(edge/silF)は「線が坂を登って来られる」
 // ための引力場、鋭い方(edgeS/silS)は「そこに来たときの筆圧」。分けないと、
 // 引力のために太らせたぶんだけ線も太く鈍くなる。
-let luma, lumaB, tone, maskF, edge, edgeS, silF, silS, attr, inkF, magBuf, magL, tmpA, tmpB;
+let luma, lumaB, tone, maskF, edge, edgeS, silF, silS, attr, inkF;
+let magBuf, magFine, magL, tmpA, tmpB;
 let debugField;                       // Uint8 field for the debug composite
 let hotList, hotCount = 0;            // respawn candidates (輪郭寄り)
 const HOT_CAP = 8192;
@@ -561,7 +563,7 @@ function allocField() {
   edge = new Float32Array(n); edgeS = new Float32Array(n);
   silF = new Float32Array(n); silS = new Float32Array(n);
   attr = new Float32Array(n); inkF = new Float32Array(n);
-  magBuf = new Float32Array(n); magL = new Float32Array(n);
+  magBuf = new Float32Array(n); magFine = new Float32Array(n); magL = new Float32Array(n);
   tmpA = new Float32Array(n); tmpB = new Float32Array(n);
   debugField = new Uint8Array(n);
   hotList = new Int32Array(HOT_CAP);
@@ -691,10 +693,10 @@ function drawFigure(ctx, w, h, t, maskOnly) {
   // エッジ抽出だと人物と背景の段差に潰されて消える。局所コントラスト正規化
   // (「細部」スライダ)が効いているかは、この2つが線になるかで判定できる。
   ctx.save();
-  ctx.translate(X(G.cx), Y(G.cy + 0.62));
+  ctx.translate(X(G.cx), Y(G.cy + 0.47));
   ctx.rotate(-0.34 + G.tilt);
   ctx.beginPath();
-  ctx.ellipse(0, 0, X(0.150), Y(0.115), 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, X(0.150), Y(0.100), 0, 0, Math.PI * 2);
   ctx.fillStyle = white || "#343b41"; ctx.fill();
   if (!maskOnly) {
     ctx.strokeStyle = "#252a2f"; ctx.lineWidth = Math.max(1, h * 0.006);
@@ -713,7 +715,7 @@ function drawFigure(ctx, w, h, t, maskOnly) {
   ctx.restore();
   // 手(胴よりわずかに明るい程度)
   if (!maskOnly) ctx.fillStyle = "#4a4640";
-  for (const [hx, hy, hr] of [[-0.105, 0.60, 0.036], [0.088, 0.70, 0.040]]) {
+  for (const [hx, hy, hr] of [[-0.115, 0.42, 0.034], [0.095, 0.52, 0.038]]) {
     ctx.beginPath();
     ctx.ellipse(X(G.cx + hx), Y(G.cy + hy), X(hr), Y(hr * 1.25), G.tilt, 0, Math.PI * 2);
     ctx.fillStyle = white || "#4a4640"; ctx.fill();
@@ -755,8 +757,9 @@ function drawFigure(ctx, w, h, t, maskOnly) {
               G.tilt, 0, Math.PI * 2);
   ctx.fillStyle = "#241f24"; ctx.fill();
   ctx.restore();
-  // 眉 · 目 · 瞳
-  ctx.strokeStyle = "#2b2521"; ctx.lineWidth = Math.max(1, h * 0.009);
+  // 眉 · 目 · 瞳。実写の顔に近づけて、わざと低コントラストにしてある
+  // (合成側の目鼻が高コントラストだと『目鼻立ち』の効きを検証できない)。
+  ctx.strokeStyle = "#645b4f"; ctx.lineWidth = Math.max(1, h * 0.009);
   for (const s of [-1, 1]) {
     ctx.beginPath();
     ctx.moveTo(X(G.cx + s * 0.075), Y(G.cy - 0.052));
@@ -764,27 +767,27 @@ function drawFigure(ctx, w, h, t, maskOnly) {
                          X(G.cx + s * 0.020), Y(G.cy - 0.054));
     ctx.stroke();
   }
-  ctx.fillStyle = "#e8e2d8";
+  ctx.fillStyle = "#a89e90";
   for (const s of [-1, 1]) {
     ctx.beginPath();
     ctx.ellipse(X(G.cx + s * 0.050), Y(G.cy - 0.016), X(0.030), Y(0.020), 0, 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.fillStyle = "#1b1714";
+  ctx.fillStyle = "#463f37";
   for (const s of [-1, 1]) {
     ctx.beginPath();
     ctx.ellipse(X(G.cx + s * 0.050), Y(G.cy - 0.014), X(0.014), Y(0.014), 0, 0, Math.PI * 2);
     ctx.fill();
   }
   // 鼻の影 · 口
-  ctx.strokeStyle = "rgba(60,48,40,0.75)"; ctx.lineWidth = Math.max(1, h * 0.008);
+  ctx.strokeStyle = "rgba(84,74,64,0.55)"; ctx.lineWidth = Math.max(1, h * 0.008);
   ctx.beginPath();
   ctx.moveTo(X(G.cx + 0.004), Y(G.cy + 0.005));
   ctx.quadraticCurveTo(X(G.cx + 0.020), Y(G.cy + 0.050), X(G.cx - 0.004), Y(G.cy + 0.058));
   ctx.stroke();
   // 口はフェイクの歌に合わせて開く(声で口が動くので線も動く)
   const open = 0.010 + 0.028 * Math.max(0, fakeSong(t).vol);
-  ctx.fillStyle = "#4a2f2c";
+  ctx.fillStyle = "#6d5a52";
   ctx.beginPath();
   ctx.ellipse(X(G.cx), Y(G.cy + 0.102), X(0.040), Y(open), 0, 0, Math.PI * 2);
   ctx.fill();
@@ -870,24 +873,38 @@ function updateField() {
     bodyCy = Math.max(0, mSy / mSum - FH * 0.16);
   }
 
-  /* --- edge: 輝度のぼかし → Sobel → 正規化 → sqrt → マスク → ぼかし2回 ---
+  /* --- edge: 2 スケールの Sobel → 局所正規化 → sqrt → マスク → ぼかし ---
    *
-   * 正規化を「フレーム全体の最大値」だけでやると、いちばん強い段差(人物と
-   * 背景の境目)が基準になり、手の指・楽器・服のしわのような弱い段差が潰れる。
-   * 「輪郭ばかり描かれて内側が描かれない」の直接の原因がこれ。
-   * そこで局所コントラスト正規化を混ぜる: 勾配強度を大きくぼかした magL で
-   * 割ると、暗く平坦な胴の中の弱い段差も、シルエットと同じ濃さまで持ち上がる。
-   * 「細部」スライダ = 0 で従来の全体正規化、1 で完全に局所正規化。
-   * 分母の下限(edgeNorm*0.18)はセンサーノイズの増幅止め。                */
+   * (a) 多重スケール。事前に輝度をぼかしてから Sobel を取ると、目・小鼻・
+   *     唇の合わせ目のような 2-3 場px の段差が均されて消える。顔がのっぺり
+   *     するのはこれが原因。ぼかさない生の輝度からも Sobel を取り、粗い方と
+   *     max で合成する。粗い方はシルエットや顎の線のような広くゆるい段差、
+   *     細かい方は目鼻口を拾う。1280px の映像を 224px の場に落とす時点で
+   *     ソース ~5x5 画素が平均されているので、生から取ってもノイズは乗らない。
+   *
+   * (b) 局所コントラスト正規化。「フレーム全体の最大値」だけで割ると、
+   *     いちばん強い段差(人物と背景の境目)が基準になり、手の指・楽器・
+   *     服のしわのような弱い段差が潰れる。勾配強度を広い窓で平均した magL で
+   *     割ると、暗く平坦な胴の中の弱い段差もシルエットと同じ濃さまで上がる。
+   *     窓は拾いたい部品より十分大きく取る。目(~10場px)に対して窓が近いと
+   *     目自身が magL を押し上げて自分で自分を打ち消してしまう。
+   *     「細部」= 0 で従来の全体正規化、1 で完全に局所。                 */
   blur3(luma, lumaB, tmpA);
-  sobelMag(lumaB, magBuf);
+  sobelMag(lumaB, magBuf);          // 粗: シルエット・顎・生え際
+  const fineG = params.features;    // 「目鼻立ち」= 細スケールの取り込み量
+  if (fineG > 0.001) {
+    sobelMag(luma, magFine);        // 細: 目・鼻・口
+    for (let i = 0; i < magBuf.length; i++) {
+      const f = magFine[i] * fineG;
+      if (f > magBuf[i]) magBuf[i] = f;
+    }
+  }
   let mx = 0;
   for (let i = 0; i < magBuf.length; i++) if (magBuf[i] > mx) mx = magBuf[i];
   edgeNorm = Math.max(0.012, autoNorm(mx, edgeNorm));
   const det = params.detail;
   const dGlobal = edgeNorm * 0.55, dFloor = edgeNorm * 0.10;
-  // 窓は場幅の ~1/14。顔の部品より広く、胴より狭いくらいが素直に効く。
-  if (det > 0.001) boxBlur(magBuf, magL, tmpA, Math.max(4, Math.round(FW / 14)));
+  if (det > 0.001) boxBlur(magBuf, magL, tmpA, Math.max(5, Math.round(FW / 9)));
   for (let i = 0; i < magBuf.length; i++) {
     const denom = det > 0.001
       ? dGlobal * (1 - det) + (magL[i] * 3.0 + dFloor) * det
@@ -898,6 +915,8 @@ function updateField() {
   }
   blur3(tmpB, edgeS, tmpA);        // 1回 → 筆圧用の鋭い尾根
   blur3(edgeS, edge, tmpA);        // 2回 → 引力用の広い斜面
+
+
 
   /* --- sil: 人物マスクの縁。人型の外形そのものなので重みを一番強くする --- */
   silF.fill(0);
@@ -929,6 +948,7 @@ function updateField() {
   const wE = params.contour * V.edgeMul;
   const wS = params.outline * V.silMul;
   hotCount = 0;
+  let aSum = 0, aN = 0;
   for (let i = 0; i < attr.length; i++) {
     const a = wT * tone[i] + wE * edge[i] + wS * silF[i];
     attr[i] = a;
@@ -939,7 +959,9 @@ function updateField() {
       else if (Math.random() < HOT_CAP / (hotCount++))
         hotList[(Math.random() * HOT_CAP) | 0] = i;
     }
+    if (a > 0.05) { aSum += a; aN++; }
   }
+  attrMean = aN > 0 ? Math.max(0.05, aSum / aN) : 0.5;
   fieldReady = true;
 }
 
@@ -1014,7 +1036,7 @@ function burstRespawn(n) {
  * 引く。点は attr に比例して面を覆うようになる — 点描の Lloyd 緩和と同じ
  * 考え方で、輪郭には線が乗り、内側にはハッチングが残る。                */
 const occ = new Int32Array(64 * 128);
-let occExpect = 1;
+let occExpect = 1, attrMean = 0.5;
 // 罰則は超過分の2乗。線形だと尾根(attr≈2.4)と内側の面(attr≈0.4)の差を
 // 埋められず、点が全部輪郭に居座って内側のハッチングが消える。2乗にすると
 // セルごとに実質的な定員ができて、あふれた点が面へ流れる。
@@ -1033,10 +1055,17 @@ function buildOccupancy() {
   occExpect = activeP / Math.max(1, filled);
 }
 // セル占有率の超過分(0 以上)。格子は約 3.5 場px なので最近傍で十分。
-function crowdAt(x, y) {
+// セルの「定員」は引力に比例させる。均一な定員だと、引力をいくら上げても
+// 定員は sqrt でしか増えず密度がほとんど変わらない(実測: 目鼻立ちを 0→1.5 に
+// しても顔の墨量は横ばいだった)。定員 ∝ attr にすると、点の密度がそのまま
+// 引力に比例する — 重み付き点描の素直な形。これで「輪郭」「目鼻立ち」などの
+// 重みが density として効くようになる。
+function crowdAt(x, y, a) {
   let cx = (x * GW / FW) | 0; if (cx >= GW) cx = GW - 1; else if (cx < 0) cx = 0;
   let cy = (y * GH / FH) | 0; if (cy >= GH) cy = GH - 1; else if (cy < 0) cy = 0;
-  const e = occ[cy * GW + cx] / occExpect - 1;
+  let cap = a / attrMean;
+  if (cap < 0.25) cap = 0.25; else if (cap > 4) cap = 4;
+  const e = occ[cy * GW + cx] / (occExpect * cap) - 1;
   return e > 0 ? e * e : 0;
 }
 
@@ -1065,7 +1094,7 @@ function stepParticles(dt) {
   for (let i = 0; i < activeP; i++) {
     let x = px[i], y = py[i];
     const here = sampleF(attr, x, y);
-    let best = here - CROWD * crowdAt(x, y);
+    let best = here - CROWD * crowdAt(x, y, here);
     const lock = sampleF(inkF, x, y);
     const stepL = step * (1 - 0.55 * lock);
     const jitL = jit * (1 - 0.65 * lock);
@@ -1080,7 +1109,8 @@ function stepParticles(dt) {
         dxc = s1 * ux - s2 * uy; dyc = s1 * uy + s2 * ux;
       }
       const cx = x + dxc * r, cy = y + dyc * r;
-      const s = sampleF(attr, cx, cy) - CROWD * crowdAt(cx, cy);
+      const sa = sampleF(attr, cx, cy);
+      const s = sa - CROWD * crowdAt(cx, cy, sa);
       if (s > best + 0.01) { best = s; bx = cx; by = cy; }
     }
     // clamped move toward the best candidate (smooth, no teleporting)
