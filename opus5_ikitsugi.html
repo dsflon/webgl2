@@ -18,14 +18,25 @@
 
  声のどこが、線のどこに効くか
  ----------------------------
-   声量 rms      → 筆の速さ・揺れ・筆圧(線の濃さ)、繋ぎ直しの頻度
-   持続 sus      → 一筆がほどけて最大5本になる / 人型の外へはみ出す量
-   音高 pitch    → 筆の走る向き(低い=横のハッチング / 高い=縦)と輪郭の締まり
+   声量 rms      → 筆の速さ・筆圧(線の濃さ)、繋ぎ直しの頻度
+   アタック onset→ 打ち込み。人物の重心から「声の波」が同心円状に走り出し、
+                   通過したところの線を外向きに突き飛ばす。線を繋ぎ直し、
+                   点の一部が輪郭へ飛ぶ
+   持続 sus      → 「声の流れ」。線が輪郭から引き剥がされて流れ、渦でよじれる。
+                   一筆がほどけて最大5本になる / 人型の外へはみ出す量
+   音高 pitch    → 流れの向き(低い=横へ / 高い=上へ)、筆致の向き、輪郭の締まり
    息のノイズ    → 墨のにじみ(グローの広さと強さ)
-   アタック onset→ 打ち込み。その瞬間に線を繋ぎ直し、点の一部が輪郭へ飛ぶ
    声色 centroid → 墨の色みだけがわずかに暖⇄寒へ振れる(基本はグラファイト)
    楽章 arc      → 声が続くほど明暗の面が満ちてくる / 静寂で戻る
-   静寂 still    → 残像↑ 筆速↓ 揺れ↓ 輪郭吸着↑ 本数→1 …「定着」
+   静寂 still    → 残像↑ 筆速↓ 流れ停止 輪郭吸着↑ 本数→1 …「定着」
+
+ 波と流れは点に「速度」を与える。位置を直接ずらす揺れ(jitter)とは別物で、
+ ここが表現上いちばん効く違いになる。揺れをいくら上げても線はその場で震える
+ だけで、離れた場所どうしは干渉しない。速度で動かすと、顔で起きたことが肩や
+ 手へ遅れて届き、線どうしがすれ違って交わる。山登りは「戻ろうとする力」として
+ 残っているので、声がやめば線はひとりでに輪郭へ帰る — それが「定着」。
+ 安定条件は 終端速度 A/KDAMP < 山登りの歩幅。これを超えると点が引力場を
+ 振り切って戻らなくなり、絵が人の形を失って雲になる。
 
  輪郭が読めるようにするための変更(元 fable5_oneline-cam.html からの差分)
  ----------------------------------------------------------------------
@@ -35,9 +46,16 @@
     明るさ^γ×マスク だけで、その微分をおまけに 0.5 で足していた。いまは
     独立した3つの場を重みで混ぜる:
        tone … 明るさ^γ×マスク (面・陰影)
-       edge … 輝度をぼかして Sobel → 自動正規化 → sqrt で中間を太らせ →
+       edge … 輝度をぼかして Sobel → 正規化 → sqrt で中間を太らせ →
                マスクで背景を切り → 2回ぼかす (顔の目・鼻・口・髪の生え際)
        sil  … |∇マスク| を正規化してぼかしたもの (人物の外形そのもの)
+    edge の正規化には局所コントラスト正規化を混ぜている(「細部」スライダ)。
+    フレーム全体の最大値だけで割ると、いちばん強い段差=人物と背景の境目が
+    基準になり、手の指・楽器・服のしわといった弱い段差が潰れて「輪郭ばかり
+    描かれて内側が描かれない」絵になる。勾配強度を広い窓(場幅の 1/14、O(n)
+    の移動平均)で平均した magL で割ると、暗く平坦な胴の中の弱い段差も
+    シルエットと同じ濃さまで持ち上がる。窓は広くないと意味がない —
+    1-2-1 を数回では σ≈1px で、局所平均が元の勾配とほぼ同じになり効かない。
     ぼかしてあるのが要点で、1px の鋭い尾根には山登り粒子が乗れない。
     暗部の切り(darkTh)は tone にしか掛けないので、影の中の輪郭も描かれる。
  3. 粒子は輪郭に乗ると揺れと歩幅を落として「吸着」する。輪郭が毎フレーム
@@ -224,11 +242,11 @@ const prefersReducedMotion =
 
 const params = {
   points: 2600, lineCount: 1, smoothing: 2,
-  contour: 1.15, outline: 1.30, tone: 0.85,
+  contour: 1.40, outline: 0.95, tone: 0.85, detail: 0.80, features: 0.95,
   darkTh: 0.06, gamma: 1.6,
   step: 0.9, jitter: 0.28,
   persistence: 0.90, glow: 0.22, contrast: 0.045, relink: 2,
-  voice: 1.0, micGain: 0.55, timbre: 0.30,
+  voice: 1.0, wave: 1.0, flow: 1.0, micGain: 0.55, timbre: 0.30,
   mirror: true,
   pause: prefersReducedMotion,     // reduced-motion ⇒ particle motion paused
   voiceSplit: true,
@@ -238,10 +256,14 @@ const params = {
 const SLIDERS = [
   // key          label            min   max   step   group
   ["voice",      "声の効き",        0,    1.5,  0.05, "声"],
+  ["wave",       "声の波",          0,    2.5,  0.05, null],
+  ["flow",       "声の流れ",        0,    2.5,  0.05, null],
   ["micGain",    "音の感度",        0,    1,    0.01, null],
   ["timbre",     "声色の色み",      0,    1,    0.01, null],
   ["contour",    "輪郭",            0,    2,    0.05, "輪郭と面"],
   ["outline",    "人型の縁",        0,    2,    0.05, null],
+  ["detail",     "細部",            0,    1,    0.01, null],
+  ["features",   "目鼻立ち",        0,    1.5,  0.05, null],
   ["tone",       "明暗の面",        0,    1.5,  0.05, null],
   ["darkTh",     "暗部の切り",      0,    0.6,  0.01, null],
   ["gamma",      "明暗のカーブ",    0.5,  4,    0.05, null],
@@ -524,7 +546,8 @@ let fieldDowngraded = (FW === FW_LO);
 // edge/sil は2種類持つ。広くぼかした方(edge/silF)は「線が坂を登って来られる」
 // ための引力場、鋭い方(edgeS/silS)は「そこに来たときの筆圧」。分けないと、
 // 引力のために太らせたぶんだけ線も太く鈍くなる。
-let luma, lumaB, tone, maskF, edge, edgeS, silF, silS, attr, inkF, magBuf, tmpA, tmpB;
+let luma, lumaB, tone, maskF, edge, edgeS, silF, silS, attr, inkF;
+let magBuf, magFine, magL, tmpA, tmpB;
 let debugField;                       // Uint8 field for the debug composite
 let hotList, hotCount = 0;            // respawn candidates (輪郭寄り)
 const HOT_CAP = 8192;
@@ -540,7 +563,8 @@ function allocField() {
   edge = new Float32Array(n); edgeS = new Float32Array(n);
   silF = new Float32Array(n); silS = new Float32Array(n);
   attr = new Float32Array(n); inkF = new Float32Array(n);
-  magBuf = new Float32Array(n); tmpA = new Float32Array(n); tmpB = new Float32Array(n);
+  magBuf = new Float32Array(n); magFine = new Float32Array(n); magL = new Float32Array(n);
+  tmpA = new Float32Array(n); tmpB = new Float32Array(n);
   debugField = new Uint8Array(n);
   hotList = new Int32Array(HOT_CAP);
   off.width = FW; off.height = FH;
@@ -576,6 +600,32 @@ function blur3(src, dst, tmp) {
     for (let x = 0; x < FW; x++) {
       const i = r + x;
       dst[i] = (tmp[i - FW] + tmp[i] * 2 + tmp[i + FW]) * 0.25;
+    }
+  }
+}
+
+/* ---- O(n) 移動平均。半径によらずコスト一定なので、局所コントラスト正規化に
+ * 要る広い窓(~16 場px)が現実的な値段で取れる。1-2-1 を数回では σ≈1px にしか
+ * ならず、「局所」平均が元の勾配とほぼ同じになって正規化が効かない。      ---- */
+function boxBlur(src, dst, tmp, R) {
+  const inv = 1 / (2 * R + 1);
+  for (let y = 0; y < FH; y++) {
+    const r = y * FW;
+    let sum = src[r] * (R + 1);
+    for (let x = 1; x <= R; x++) sum += src[r + (x < FW ? x : FW - 1)];
+    for (let x = 0; x < FW; x++) {
+      tmp[r + x] = sum * inv;
+      const ai = x + R + 1, si = x - R;
+      sum += src[r + (ai < FW ? ai : FW - 1)] - src[r + (si > 0 ? si : 0)];
+    }
+  }
+  for (let x = 0; x < FW; x++) {
+    let sum = tmp[x] * (R + 1);
+    for (let y = 1; y <= R; y++) sum += tmp[(y < FH ? y : FH - 1) * FW + x];
+    for (let y = 0; y < FH; y++) {
+      dst[y * FW + x] = sum * inv;
+      const ay = y + R + 1, sy = y - R;
+      sum += tmp[(ay < FH ? ay : FH - 1) * FW + x] - tmp[(sy > 0 ? sy : 0) * FW + x];
     }
   }
 }
@@ -638,6 +688,38 @@ function drawFigure(ctx, w, h, t, maskOnly) {
   ctx.beginPath();
   ctx.ellipse(X(G.cx), Y(G.cy + 0.66), X(0.35), Y(0.31), G.tilt, 0, Math.PI * 2);
   ctx.fillStyle = white || "#2b3037"; ctx.fill();
+  // 抱えた楽器 + 手。胴とのコントラストをわざと低くしてある(#333a3f 対
+  // #2b3037)。ここが実写でいう「輪郭の内側の手や楽器」で、全体正規化だけの
+  // エッジ抽出だと人物と背景の段差に潰されて消える。局所コントラスト正規化
+  // (「細部」スライダ)が効いているかは、この2つが線になるかで判定できる。
+  ctx.save();
+  ctx.translate(X(G.cx), Y(G.cy + 0.47));
+  ctx.rotate(-0.34 + G.tilt);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, X(0.150), Y(0.100), 0, 0, Math.PI * 2);
+  ctx.fillStyle = white || "#343b41"; ctx.fill();
+  if (!maskOnly) {
+    ctx.strokeStyle = "#252a2f"; ctx.lineWidth = Math.max(1, h * 0.006);
+    ctx.stroke();
+    ctx.beginPath();                        // サウンドホール
+    ctx.ellipse(X(0.030), 0, X(0.038), Y(0.030), 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#1a1e22"; ctx.fill();
+    ctx.strokeStyle = "#3f474e"; ctx.lineWidth = Math.max(1, h * 0.004);
+    for (let s = -2; s <= 2; s++) {         // 弦
+      ctx.beginPath();
+      ctx.moveTo(X(-0.145), Y(s * 0.013));
+      ctx.lineTo(X(0.150), Y(s * 0.013));
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+  // 手(胴よりわずかに明るい程度)
+  if (!maskOnly) ctx.fillStyle = "#4a4640";
+  for (const [hx, hy, hr] of [[-0.115, 0.42, 0.034], [0.095, 0.52, 0.038]]) {
+    ctx.beginPath();
+    ctx.ellipse(X(G.cx + hx), Y(G.cy + hy), X(hr), Y(hr * 1.25), G.tilt, 0, Math.PI * 2);
+    ctx.fillStyle = white || "#4a4640"; ctx.fill();
+  }
   // 首
   ctx.beginPath();
   ctx.ellipse(X(G.cx), Y(G.cy + G.ry * 0.86), X(0.052), Y(0.070), G.tilt, 0, Math.PI * 2);
@@ -675,8 +757,9 @@ function drawFigure(ctx, w, h, t, maskOnly) {
               G.tilt, 0, Math.PI * 2);
   ctx.fillStyle = "#241f24"; ctx.fill();
   ctx.restore();
-  // 眉 · 目 · 瞳
-  ctx.strokeStyle = "#2b2521"; ctx.lineWidth = Math.max(1, h * 0.009);
+  // 眉 · 目 · 瞳。実写の顔に近づけて、わざと低コントラストにしてある
+  // (合成側の目鼻が高コントラストだと『目鼻立ち』の効きを検証できない)。
+  ctx.strokeStyle = "#645b4f"; ctx.lineWidth = Math.max(1, h * 0.009);
   for (const s of [-1, 1]) {
     ctx.beginPath();
     ctx.moveTo(X(G.cx + s * 0.075), Y(G.cy - 0.052));
@@ -684,27 +767,27 @@ function drawFigure(ctx, w, h, t, maskOnly) {
                          X(G.cx + s * 0.020), Y(G.cy - 0.054));
     ctx.stroke();
   }
-  ctx.fillStyle = "#e8e2d8";
+  ctx.fillStyle = "#a89e90";
   for (const s of [-1, 1]) {
     ctx.beginPath();
     ctx.ellipse(X(G.cx + s * 0.050), Y(G.cy - 0.016), X(0.030), Y(0.020), 0, 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.fillStyle = "#1b1714";
+  ctx.fillStyle = "#463f37";
   for (const s of [-1, 1]) {
     ctx.beginPath();
     ctx.ellipse(X(G.cx + s * 0.050), Y(G.cy - 0.014), X(0.014), Y(0.014), 0, 0, Math.PI * 2);
     ctx.fill();
   }
   // 鼻の影 · 口
-  ctx.strokeStyle = "rgba(60,48,40,0.75)"; ctx.lineWidth = Math.max(1, h * 0.008);
+  ctx.strokeStyle = "rgba(84,74,64,0.55)"; ctx.lineWidth = Math.max(1, h * 0.008);
   ctx.beginPath();
   ctx.moveTo(X(G.cx + 0.004), Y(G.cy + 0.005));
   ctx.quadraticCurveTo(X(G.cx + 0.020), Y(G.cy + 0.050), X(G.cx - 0.004), Y(G.cy + 0.058));
   ctx.stroke();
   // 口はフェイクの歌に合わせて開く(声で口が動くので線も動く)
   const open = 0.010 + 0.028 * Math.max(0, fakeSong(t).vol);
-  ctx.fillStyle = "#4a2f2c";
+  ctx.fillStyle = "#6d5a52";
   ctx.beginPath();
   ctx.ellipse(X(G.cx), Y(G.cy + 0.102), X(0.040), Y(open), 0, 0, Math.PI * 2);
   ctx.fill();
@@ -759,7 +842,7 @@ function updateField() {
   const boost = V.maskBoost;
   const [sx, sy, ox, oy] = lastFit;
 
-  let bi = 0;
+  let bi = 0, mSum = 0, mSx = 0, mSy = 0;
   for (let y = 0; y < FH; y++) {
     const v = (y + 0.5) / FH;
     for (let x = 0; x < FW; x++, bi++) {
@@ -779,25 +862,61 @@ function updateField() {
         m = Math.min(1, (mArr[my * mW + mx] / 255) * boost);   // soft, feathered
       }
       maskF[bi] = m;
+      mSum += m; mSx += m * x; mSy += m * y;
       // 面(陰影)は暗部で切るが、輪郭は切らない ⇒ 影の中の輪郭も描かれる
       tone[bi] = luma[bi] < darkTh ? 0 : gammaLUT[l8] * m;
     }
   }
+  // 人物の重心。声の波はここから同心円状に走る(頭の高さに少し上げる)。
+  if (mSum > 4) {
+    bodyCx = mSx / mSum;
+    bodyCy = Math.max(0, mSy / mSum - FH * 0.16);
+  }
 
-  /* --- edge: 輝度のぼかし → Sobel → 自動正規化 → sqrt → マスク → ぼかし2回 --- */
+  /* --- edge: 2 スケールの Sobel → 局所正規化 → sqrt → マスク → ぼかし ---
+   *
+   * (a) 多重スケール。事前に輝度をぼかしてから Sobel を取ると、目・小鼻・
+   *     唇の合わせ目のような 2-3 場px の段差が均されて消える。顔がのっぺり
+   *     するのはこれが原因。ぼかさない生の輝度からも Sobel を取り、粗い方と
+   *     max で合成する。粗い方はシルエットや顎の線のような広くゆるい段差、
+   *     細かい方は目鼻口を拾う。1280px の映像を 224px の場に落とす時点で
+   *     ソース ~5x5 画素が平均されているので、生から取ってもノイズは乗らない。
+   *
+   * (b) 局所コントラスト正規化。「フレーム全体の最大値」だけで割ると、
+   *     いちばん強い段差(人物と背景の境目)が基準になり、手の指・楽器・
+   *     服のしわのような弱い段差が潰れる。勾配強度を広い窓で平均した magL で
+   *     割ると、暗く平坦な胴の中の弱い段差もシルエットと同じ濃さまで上がる。
+   *     窓は拾いたい部品より十分大きく取る。目(~10場px)に対して窓が近いと
+   *     目自身が magL を押し上げて自分で自分を打ち消してしまう。
+   *     「細部」= 0 で従来の全体正規化、1 で完全に局所。                 */
   blur3(luma, lumaB, tmpA);
-  sobelMag(lumaB, magBuf);
+  sobelMag(lumaB, magBuf);          // 粗: シルエット・顎・生え際
+  const fineG = params.features;    // 「目鼻立ち」= 細スケールの取り込み量
+  if (fineG > 0.001) {
+    sobelMag(luma, magFine);        // 細: 目・鼻・口
+    for (let i = 0; i < magBuf.length; i++) {
+      const f = magFine[i] * fineG;
+      if (f > magBuf[i]) magBuf[i] = f;
+    }
+  }
   let mx = 0;
   for (let i = 0; i < magBuf.length; i++) if (magBuf[i] > mx) mx = magBuf[i];
   edgeNorm = Math.max(0.012, autoNorm(mx, edgeNorm));
-  const einv = 1 / (edgeNorm * 0.55);
+  const det = params.detail;
+  const dGlobal = edgeNorm * 0.55, dFloor = edgeNorm * 0.10;
+  if (det > 0.001) boxBlur(magBuf, magL, tmpA, Math.max(5, Math.round(FW / 9)));
   for (let i = 0; i < magBuf.length; i++) {
-    let e = magBuf[i] * einv;
+    const denom = det > 0.001
+      ? dGlobal * (1 - det) + (magL[i] * 3.0 + dFloor) * det
+      : dGlobal;
+    let e = magBuf[i] / denom;
     if (e > 1) e = 1;
     tmpB[i] = Math.sqrt(e) * maskF[i];      // sqrt で中間の輪郭を太らせる
   }
   blur3(tmpB, edgeS, tmpA);        // 1回 → 筆圧用の鋭い尾根
   blur3(edgeS, edge, tmpA);        // 2回 → 引力用の広い斜面
+
+
 
   /* --- sil: 人物マスクの縁。人型の外形そのものなので重みを一番強くする --- */
   silF.fill(0);
@@ -829,17 +948,20 @@ function updateField() {
   const wE = params.contour * V.edgeMul;
   const wS = params.outline * V.silMul;
   hotCount = 0;
+  let aSum = 0, aN = 0;
   for (let i = 0; i < attr.length; i++) {
     const a = wT * tone[i] + wE * edge[i] + wS * silF[i];
     attr[i] = a;
-    const k = 1.00 * edgeS[i] + 1.30 * silS[i];   // 筆圧は鋭い尾根から取る
+    const k = 1.15 * edgeS[i] + 0.85 * silS[i];   // 筆圧は鋭い尾根から取る
     inkF[i] = k > 1 ? 1 : k;
     if (a > 0.35) {                        // reservoir sampling of hot cells
       if (hotCount < HOT_CAP) hotList[hotCount++] = i;
       else if (Math.random() < HOT_CAP / (hotCount++))
         hotList[(Math.random() * HOT_CAP) | 0] = i;
     }
+    if (a > 0.05) { aSum += a; aN++; }
   }
+  attrMean = aN > 0 ? Math.max(0.05, aSum / aN) : 0.5;
   fieldReady = true;
 }
 
@@ -857,8 +979,36 @@ function sampleF(f, x, y) {
  *  Persistent particle pool (temporal coherence)
  * ===================================================================== */
 const px = new Float32Array(MAXP), py = new Float32Array(MAXP);
+// 声だけが与える速度。山登り本体は従来どおり位置を直接動かし、こちらは
+// その上に重なる移流成分。声の効き 0 では常に 0 のままなので、元の挙動に
+// 完全に戻る。揺れ(jitter)を上げるとその場で震えるだけだが、速度を与えると
+// 波が隣へ伝わり、線が輪郭から引き剥がされて流れる — 干渉が生まれる。
+const vx = new Float32Array(MAXP), vy = new Float32Array(MAXP);
 const stuck = new Uint8Array(MAXP);
 let activeP = params.points;          // may drop below the slider (auto-reduce)
+let bodyCx = 80, bodyCy = 60;         // 人物の重心(声の波の中心)
+
+/* 声の波。onset ごとに人物の重心から同心円状のリングが広がり、通過した
+ * ところの点を外向きに突き飛ばす。局所的な震えと違って、顔で起きたことが
+ * 肩や手まで遅れて届くので、離れた場所どうしが干渉して見える。          */
+const WAVE_MAX = 5;
+// 単位は場px/s²。終端速度は A/KDAMP なので、山登りの歩幅(既定 0.9 場px/frame
+// ≒ 54 場px/s)より小さくなるように選ぶ。流れは終端 ~18 場px/s(歩幅の 3 割)、
+// 波はリング通過 ~0.19 秒で Δv ~25 場px/s ⇒ 振れ幅 ~8 場px。
+const KDAMP = 3.2, WAVE_A = 200, FLOW_A = 58;
+const waves = [];
+function pushWave(amp) {
+  if (waves.length >= WAVE_MAX) waves.shift();
+  waves.push({ x: bodyCx, y: bodyCy, r: 0, amp });
+}
+function stepWaves(dt) {
+  for (let i = waves.length - 1; i >= 0; i--) {
+    const w = waves[i];
+    w.r += dt * FW * 0.85;                 // 場の幅を ~1.2 秒で渡る
+    w.amp *= Math.exp(-dt * 1.7);
+    if (w.amp < 0.02 || w.r > FW * 1.6) waves.splice(i, 1);
+  }
+}
 
 function respawn(i) {
   const nb = Math.min(hotCount, HOT_CAP);   // reservoir holds ≤ CAP entries
@@ -871,6 +1021,7 @@ function respawn(i) {
     py[i] = Math.random() * FH;
   }
   stuck[i] = 0;
+  vx[i] = 0; vy[i] = 0;      // 飛ばされた勢いは持ち越さない
 }
 for (let i = 0; i < MAXP; i++) { px[i] = Math.random() * FW; py[i] = Math.random() * FH; }
 
@@ -885,7 +1036,7 @@ function burstRespawn(n) {
  * 引く。点は attr に比例して面を覆うようになる — 点描の Lloyd 緩和と同じ
  * 考え方で、輪郭には線が乗り、内側にはハッチングが残る。                */
 const occ = new Int32Array(64 * 128);
-let occExpect = 1;
+let occExpect = 1, attrMean = 0.5;
 // 罰則は超過分の2乗。線形だと尾根(attr≈2.4)と内側の面(attr≈0.4)の差を
 // 埋められず、点が全部輪郭に居座って内側のハッチングが消える。2乗にすると
 // セルごとに実質的な定員ができて、あふれた点が面へ流れる。
@@ -904,10 +1055,17 @@ function buildOccupancy() {
   occExpect = activeP / Math.max(1, filled);
 }
 // セル占有率の超過分(0 以上)。格子は約 3.5 場px なので最近傍で十分。
-function crowdAt(x, y) {
+// セルの「定員」は引力に比例させる。均一な定員だと、引力をいくら上げても
+// 定員は sqrt でしか増えず密度がほとんど変わらない(実測: 目鼻立ちを 0→1.5 に
+// しても顔の墨量は横ばいだった)。定員 ∝ attr にすると、点の密度がそのまま
+// 引力に比例する — 重み付き点描の素直な形。これで「輪郭」「目鼻立ち」などの
+// 重みが density として効くようになる。
+function crowdAt(x, y, a) {
   let cx = (x * GW / FW) | 0; if (cx >= GW) cx = GW - 1; else if (cx < 0) cx = 0;
   let cy = (y * GH / FH) | 0; if (cy >= GH) cy = GH - 1; else if (cy < 0) cy = 0;
-  const e = occ[cy * GW + cx] / occExpect - 1;
+  let cap = a / attrMean;
+  if (cap < 0.25) cap = 0.25; else if (cap > 4) cap = 4;
+  const e = occ[cy * GW + cx] / (occExpect * cap) - 1;
   return e > 0 ? e * e : 0;
 }
 
@@ -920,16 +1078,23 @@ function crowdAt(x, y) {
  *  · hatch: 音高に応じて候補方向を楕円に歪める。低い声=横、高い声=縦の
  *    ハッチングになり、声の高さが筆致の向きとして見える。
  * プールは決してまとめて再サンプルしないので、ストロボしない。          */
-function stepParticles() {
+function stepParticles(dt) {
   if (!fieldReady) return;
   buildOccupancy();
+  stepWaves(dt);
   const step = params.step * V.stepMul, jit = params.jitter * V.jitMul;
   const hs = V.hatchS, ux = Math.cos(V.hatchA), uy = Math.sin(V.hatchA);
   const CAND = 4;
+  // 移流: 持続する声が線を一方向へ引き剥がし、渦がそれをよじる。
+  // 音高で向きが変わる(低い声=横へ、高い声=上へ)。
+  const flow = V.flow, fdx = Math.cos(V.flowA), fdy = Math.sin(V.flowA);
+  const nw = waves.length, wOn = V.wave > 0.001 && nw > 0;
+  const damp = Math.exp(-dt * KDAMP);
+  const VMAX = FW * 0.55;                   // 場px/s
   for (let i = 0; i < activeP; i++) {
     let x = px[i], y = py[i];
     const here = sampleF(attr, x, y);
-    let best = here - CROWD * crowdAt(x, y);
+    let best = here - CROWD * crowdAt(x, y, here);
     const lock = sampleF(inkF, x, y);
     const stepL = step * (1 - 0.55 * lock);
     const jitL = jit * (1 - 0.65 * lock);
@@ -944,7 +1109,8 @@ function stepParticles() {
         dxc = s1 * ux - s2 * uy; dyc = s1 * uy + s2 * ux;
       }
       const cx = x + dxc * r, cy = y + dyc * r;
-      const s = sampleF(attr, cx, cy) - CROWD * crowdAt(cx, cy);
+      const sa = sampleF(attr, cx, cy);
+      const s = sa - CROWD * crowdAt(cx, cy, sa);
       if (s > best + 0.01) { best = s; bx = cx; by = cy; }
     }
     // clamped move toward the best candidate (smooth, no teleporting)
@@ -953,6 +1119,38 @@ function stepParticles() {
     if (d > stepL) { dx *= stepL / d; dy *= stepL / d; }
     x += dx + (Math.random() - 0.5) * 2 * jitL;
     y += dy + (Math.random() - 0.5) * 2 * jitL;
+
+    /* ---- 声の移流。加速度[場px/s²] → 減衰つき速度[場px/s] → 位置。
+       山登りが「戻ろうとする力」として残っているので、声がやめば線は
+       ひとりでに輪郭へ帰って定着する。要は終端速度 A/KDAMP を山登りの
+       歩幅より小さく保つこと。ここを超えると点が引力場を振り切って
+       二度と戻らず、絵が人の形を失って雲になる(実測済み)。         ---- */
+    let ax = 0, ay = 0;
+    if (wOn) {
+      for (let k = 0; k < nw; k++) {
+        const w = waves[k];
+        const rx = x - w.x, ry = y - w.y;
+        const dist = Math.hypot(rx, ry) + 1e-3;
+        const u = (dist - w.r) / (FW * 0.055);      // リングの厚み
+        if (u > -3 && u < 3) {
+          const g = Math.exp(-u * u) * w.amp * V.wave * WAVE_A;
+          ax += (rx / dist) * g; ay += (ry / dist) * g;
+        }
+      }
+    }
+    if (flow > 0.001) {
+      // 一様な流れ + 位置で回る渦。一様なだけだと絵ごと平行移動して
+      // しまうので、よじれを混ぜて線どうしがすれ違うようにする。
+      const s = Math.sin(x * 0.075 + artTime * 1.1), c = Math.cos(y * 0.065 - artTime * 0.9);
+      ax += (fdx + c * 0.55) * flow;
+      ay += (fdy + s * 0.55) * flow;
+    }
+    let nvx = (vx[i] + ax * dt) * damp, nvy = (vy[i] + ay * dt) * damp;
+    const sp = Math.hypot(nvx, nvy);
+    if (sp > VMAX) { nvx *= VMAX / sp; nvy *= VMAX / sp; }   // 発散止め
+    vx[i] = nvx; vy[i] = nvy;
+    x += nvx * dt; y += nvy * dt;
+
     x = x < 0 ? 0 : (x > FW - 1 ? FW - 1 : x);
     y = y < 0 ? 0 : (y > FH - 1 ? FH - 1 : y);
     px[i] = x; py[i] = y;
@@ -1528,6 +1726,8 @@ function updateAudio(dt) {
     onsetLatch = true;
     relinkDirty = true;                          // その瞬間に線を繋ぎ直す
     burstRespawn(Math.max(4, Math.round(activeP * 0.06)));
+    if (params.wave > 0.001 && params.voice > 0.001)
+      pushWave(0.55 + 0.85 * meters.onset);      // 重心から波が走り出す
   } else if (meters.onset < 0.2) onsetLatch = false;
   meters.onset *= Math.exp(-dt * 5.5);
 
@@ -1603,6 +1803,7 @@ const V = {
   stepMul: 1, jitMul: 1, inkMul: 1, edgeMul: 1, silMul: 1,
   pers: 0.90, glow: 0.22, glowR: 1, lines: 1, maskBoost: 1.35,
   hatchA: 0, hatchS: 0, relink: 2, lift: 0.045, tint: 0,
+  wave: 0, flow: 0, flowA: -Math.PI / 2,
 };
 function deriveVoice() {
   const amt = params.voice;                 // 0 … 1.5
@@ -1610,12 +1811,20 @@ function deriveVoice() {
   const m = meters, st = stillV;
   const q = (x) => 1 + (x - 1) * amt;       // 中立(1)から amt だけ寄せる
 
-  // 声量: 筆が走り、揺れ、濃くなる。静寂では逆に落ち着く。
-  // 落とし過ぎないのが要点: 揺れを 0 近くまで削ると全部の点が尾根の頂点に
-  // 積み上がって線が短くなり、「定着」がかえって空っぽの絵になる。
-  V.stepMul = Math.max(0.05, q((1 + 2.4 * m.rms) * (1 - 0.55 * st)));
-  V.jitMul  = Math.max(0.02, q((1 + 2.6 * m.rms) * (1 - 0.62 * st)));
+  // 声量: 筆が走り、濃くなる。静寂では落ち着く。
+  // 揺れ(jitter)への配分は意図的に小さくしてある。ここを上げても線はその場で
+  // 震えるだけで、離れた場所どうしは干渉しない。声のエネルギーは下の
+  // 波(wave)と流れ(flow)に回し、そちらで大きく動かす。
+  // ただし 0 近くまで削ると全点が尾根の頂点に積み上がって線が短くなり、
+  // 「定着」がかえって空っぽの絵になるので下限は残す。
+  V.stepMul = Math.max(0.05, q((1 + 1.9 * m.rms) * (1 - 0.55 * st)));
+  V.jitMul  = Math.max(0.02, q((1 + 0.9 * m.rms) * (1 - 0.62 * st)));
   V.inkMul  = q(1 + 0.80 * m.rms + 1.20 * m.onset);
+  // 波: 打ち込みの瞬間に重心から広がるリング。振幅は pushWave 側。
+  V.wave = params.wave * a1;
+  // 流れ: 持続する声が線を輪郭から引き剥がす。静寂で止まり、線は帰る。
+  V.flow = params.flow * a1 * FLOW_A * Math.pow(m.sus, 1.3) * (1 - st);
+  V.flowA = -Math.PI / 2 + (0.5 - m.pitch) * 1.7;   // 高い声=上、低い声=横
   // 音高: 高い声で輪郭が締まる。静寂では少しだけ輪郭寄りになる(寄せ過ぎると
   // 明暗の面が消えて、ただのエッジ検出の絵になってしまう)。
   V.edgeMul = q((0.78 + 0.62 * m.pitch) * (1 + 0.30 * st));
@@ -1655,7 +1864,9 @@ function rescaleParticles(oldFW, oldFH) {
   for (let i = 0; i < MAXP; i++) {
     px[i] = Math.min(FW - 1, px[i] * kx);
     py[i] = Math.min(FH - 1, py[i] * ky);
+    vx[i] = 0; vy[i] = 0;
   }
+  waves.length = 0;          // 場の寸法が変わった波は座標系が合わない
 }
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1709,7 +1920,7 @@ function frame(now) {
 
   const t0 = performance.now();
   if (camReady && fieldReady) {
-    if (!params.pause) stepParticles();          // 停止は動きだけを止める
+    if (!params.pause) stepParticles(dt);        // 停止は動きだけを止める
     if (relinkDirty || numStrips === 0 ||
         (!params.pause && frameNo % Math.max(1, V.relink | 0) === 0)) relink();
     fillVertices();                              // re-read order at fresh positions
