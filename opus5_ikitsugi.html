@@ -1,0 +1,1897 @@
+<!DOCTYPE html>
+<!--
+==============================================================================
+ opus5_ikitsugi.html — 息継ぎ / 声で描く一筆書きの肖像 (WebGL2)
+==============================================================================
+
+ 作品
+ ----
+ カメラの人物を、途切れない一本の線で描き続ける。線は「声」で走る。
+
+   声を出している間  … 筆が速くなり、線はほどけて数本になり、身体の輪郭を
+                       越えてはみ出し、像は乱れる。
+   息継ぎ(声がやむ)  … 筆が止まり、線が輪郭に吸い付き、残像が濃く残って、
+                       その人の像が「定着」する。
+
+ だから、自分の顔を見たければ黙るしかない。大声で描き、沈黙で仕上げる —
+ それがこの作品の一往復。
+
+ 声のどこが、線のどこに効くか
+ ----------------------------
+   声量 rms      → 筆の速さ・揺れ・筆圧(線の濃さ)、繋ぎ直しの頻度
+   持続 sus      → 一筆がほどけて最大5本になる / 人型の外へはみ出す量
+   音高 pitch    → 筆の走る向き(低い=横のハッチング / 高い=縦)と輪郭の締まり
+   息のノイズ    → 墨のにじみ(グローの広さと強さ)
+   アタック onset→ 打ち込み。その瞬間に線を繋ぎ直し、点の一部が輪郭へ飛ぶ
+   声色 centroid → 墨の色みだけがわずかに暖⇄寒へ振れる(基本はグラファイト)
+   楽章 arc      → 声が続くほど明暗の面が満ちてくる / 静寂で戻る
+   静寂 still    → 残像↑ 筆速↓ 揺れ↓ 輪郭吸着↑ 本数→1 …「定着」
+
+ 輪郭が読めるようにするための変更(元 fable5_oneline-cam.html からの差分)
+ ----------------------------------------------------------------------
+ 1. 場の解像度を 160px → 224px 幅へ(モバイルは 160px のまま。CPU が苦しい
+    ときは自動で 160 へ落ちる)。顔の目鼻がフィールド上で数 px 確保される。
+ 2. 引力場を「明るさ」から「輪郭」へ組み替えた。以前は importance =
+    明るさ^γ×マスク だけで、その微分をおまけに 0.5 で足していた。いまは
+    独立した3つの場を重みで混ぜる:
+       tone … 明るさ^γ×マスク (面・陰影)
+       edge … 輝度をぼかして Sobel → 自動正規化 → sqrt で中間を太らせ →
+               マスクで背景を切り → 2回ぼかす (顔の目・鼻・口・髪の生え際)
+       sil  … |∇マスク| を正規化してぼかしたもの (人物の外形そのもの)
+    ぼかしてあるのが要点で、1px の鋭い尾根には山登り粒子が乗れない。
+    暗部の切り(darkTh)は tone にしか掛けないので、影の中の輪郭も描かれる。
+ 3. 粒子は輪郭に乗ると揺れと歩幅を落として「吸着」する。輪郭が毎フレーム
+    描き直される震えた線ではなく、濃く積み上がる一本の線になる。
+ 4. 頂点ごとの筆圧を導入(新しい頂点属性 aW)。
+       筆圧 = 輪郭の強さ × 渡り線のフェード
+    貪欲最近傍は時々顔を横断する長い「渡り線」を作る。これが像を潰していた
+    最大の原因なので、平均点間距離を基準に長い区間の筆圧を 0 へ落とす。
+    線は一本のまま連続していて、筆圧だけが抜ける — 本物の一筆書きと同じ。
+ 5. 描画2パス目は筆圧を pow(w, 2.2) で効かせるので、輪郭だけが二重に濃く
+    なる。合成時に黒の持ち上げ(濃度スライダ)を掛けて霞を落とす。
+
+ 動かし方
+ --------
+     python3 -m http.server 8000
+   → http://localhost:8000/opus5_ikitsugi.html (カメラとマイクを許可)
+
+   ?fakesource=1 … カメラ/マイク/MediaPipe を一切開かず、合成の人物と
+                   18秒の合成の歌で全パイプラインを駆動する(オフライン検証用)。
+
+ 依存
+ ----
+   MediaPipe Tasks-Vision(実カメラ時のみ) — 人物マスク。それ以外は素の
+   WebGL2 + WebAudio の AnalyserNode のみ。ビルド不要。
+   線は本物のポリライン(gl.LINE_STRIP)で、線に見えるシェーダではない。
+==============================================================================
+-->
+<html lang="ja">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>息継ぎ — 声で描く一筆書きの肖像</title>
+<style>
+  :root{
+    --hud-bg: rgba(8,8,8,.82);
+    --hud-fg: #e6e6e6;
+    --hud-dim:#8a8a8a;
+    --hud-line:#2e2e2e;
+    --accent:#ffffff;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:#000; overflow:hidden; }
+  canvas#gl{ position:fixed; inset:0; width:100%; height:100%; display:block; background:#000; }
+
+  /* ---------- terminal / HUD panel (top-left, collapsible) ---------- */
+  #hud{
+    position:fixed; top:10px; left:10px; z-index:10;
+    width:286px; max-height:calc(100vh - 20px); overflow-y:auto;
+    font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:var(--hud-fg); background:var(--hud-bg);
+    border:1px solid var(--hud-line); border-radius:4px;
+    backdrop-filter: blur(4px); user-select:none;
+  }
+  #hud summary{
+    list-style:none; cursor:pointer; padding:7px 10px; letter-spacing:.08em;
+    color:var(--accent); border-bottom:1px solid var(--hud-line);
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  #hud summary::-webkit-details-marker{ display:none; }
+  #hud summary::after{ content:"[–]"; color:var(--hud-dim); }
+  #hud:not([open]) summary::after{ content:"[+]"; }
+  #hud:not([open]) summary{ border-bottom:none; }
+  .hud-body{ padding:8px 10px 10px; }
+  .row{ display:flex; align-items:center; gap:8px; margin:5px 0; }
+  .row label{ flex:0 0 96px; color:var(--hud-dim); white-space:nowrap; overflow:hidden; }
+  .row .val{ flex:0 0 40px; text-align:right; color:var(--hud-fg); font-variant-numeric:tabular-nums; }
+  .grp{ margin:9px 0 3px; color:#666; letter-spacing:.10em; }
+  input[type=range]{
+    flex:1; -webkit-appearance:none; appearance:none; height:2px;
+    background:#3a3a3a; outline:none; border-radius:1px; margin:0; cursor:ew-resize;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:9px; height:9px; border-radius:50%;
+    background:var(--accent); border:none; cursor:ew-resize;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:9px; height:9px; border-radius:50%; background:var(--accent); border:none;
+  }
+  input[type=range]:focus-visible{ outline:1px solid var(--accent); outline-offset:3px; }
+  .toggles{ display:grid; grid-template-columns:1fr 1fr; gap:2px 10px; margin:8px 0 4px; }
+  .toggles label{ display:flex; align-items:center; gap:6px; color:var(--hud-dim); cursor:pointer; }
+  .toggles input{ accent-color:#fff; margin:0; }
+  .hud-sep{ border:none; border-top:1px solid var(--hud-line); margin:8px -10px; }
+  button.hud-btn{
+    width:100%; padding:5px 0; margin-top:2px; font:inherit; letter-spacing:.06em;
+    color:#000; background:var(--accent); border:none; border-radius:3px; cursor:pointer;
+  }
+  button.hud-btn:hover{ background:#cfcfcf; }
+  button.mini{
+    font:inherit; padding:2px 8px; color:#ddd; background:#242424;
+    border:1px solid var(--hud-line); border-radius:3px; cursor:pointer;
+  }
+  button.mini:hover{ background:#333; }
+  #micState{ flex:1; color:var(--hud-fg); }
+  /* 声のメーター: 声量 / 静寂(定着) を細いバーで見せる */
+  .meter{ flex:1; height:3px; background:#2c2c2c; border-radius:2px; overflow:hidden; }
+  .meter i{ display:block; height:100%; width:0%; background:#fff; }
+  #mStill i{ background:#7fd7ff; }
+  #readout{ margin-top:8px; color:var(--hud-dim); white-space:pre; font-variant-numeric:tabular-nums; }
+
+  /* ---------- fullscreen status / error overlay ---------- */
+  #status{
+    position:fixed; inset:0; z-index:20;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    font:13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:#ddd; background:rgba(0,0,0,.72); text-align:center; padding:20px;
+  }
+  #status.hidden{ display:none; }
+  #status .msg{ max-width:520px; white-space:pre-wrap; }
+  #status button{
+    font:inherit; padding:7px 18px; color:#000; background:#fff;
+    border:none; border-radius:3px; cursor:pointer;
+  }
+  #banner{
+    position:fixed; top:10px; right:10px; z-index:15; max-width:320px;
+    font:11px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    color:#ffd7d7; background:rgba(40,0,0,.85); border:1px solid #5a2a2a;
+    border-radius:4px; padding:8px 10px; display:none; white-space:pre-wrap;
+  }
+  /* ---------- 作品の使い方(初回だけ、静かに消える) ---------- */
+  #hint{
+    position:fixed; left:50%; bottom:26px; transform:translateX(-50%); z-index:12;
+    font:12px/1.7 ui-monospace, Menlo, Consolas, monospace; color:#9a9a9a;
+    text-align:center; pointer-events:none; white-space:pre-line;
+    transition:opacity 1.6s ease; opacity:1;
+  }
+  #hint.gone{ opacity:0; }
+  @media (prefers-reduced-motion: reduce){ #hint{ transition:none; } }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<details id="hud" open>
+  <summary>息継ぎ · IKITSUGI</summary>
+  <div class="hud-body">
+    <div class="row"><label>マイク</label><span id="micState">—</span><button class="mini" id="micRetry" type="button">再試行</button></div>
+    <div class="row"><label>声量</label><div class="meter" id="mRms"><i></i></div></div>
+    <div class="row"><label>静寂(定着)</label><div class="meter" id="mStill"><i></i></div></div>
+    <hr class="hud-sep">
+    <div id="sliders"></div>
+    <hr class="hud-sep">
+    <div class="toggles" id="toggles"></div>
+    <hr class="hud-sep">
+    <button class="hud-btn" id="saveBtn">PNG を保存</button>
+    <div id="readout">fps --  pts --
+path -- px  ·  model: --</div>
+  </div>
+</details>
+
+<div id="hint">声を出すと筆が走り、線がほどけます。
+息継ぎ — 黙ると線が輪郭に吸い付いて、像が定着します。</div>
+
+<div id="banner"></div>
+<div id="status"><div class="msg" id="statusMsg">起動中…</div></div>
+
+<script type="module">
+/* ========================================================================
+ *  ?fakesource=1 : カメラ / マイク / MediaPipe を開かず、合成の人物 +
+ *  18秒の合成の歌でパイプライン全体を駆動する。オフライン検証とサムネ
+ *  撮影のための唯一のモードで、実写経路とまったく同じ場・粒子・線を通る。
+ * ===================================================================== */
+const QUERY = new URLSearchParams(location.search);
+const FAKE = QUERY.get("fakesource") === "1";
+
+// MediaPipe は実カメラ時にだけ動的 import する(FAKE はオフラインで完結)
+let ImageSegmenter = null, FilesetResolver = null;
+
+/* ========================================================================
+ *  Parameters + UI
+ * ===================================================================== */
+const prefersReducedMotion =
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const params = {
+  points: 2600, lineCount: 1, smoothing: 2,
+  contour: 1.15, outline: 1.30, tone: 0.85,
+  darkTh: 0.06, gamma: 1.6,
+  step: 0.9, jitter: 0.28,
+  persistence: 0.90, glow: 0.22, contrast: 0.045, relink: 2,
+  voice: 1.0, micGain: 0.55, timbre: 0.30,
+  mirror: true,
+  pause: prefersReducedMotion,     // reduced-motion ⇒ particle motion paused
+  voiceSplit: true,
+  showMask: false, showEdge: false, showPoints: false,
+};
+
+const SLIDERS = [
+  // key          label            min   max   step   group
+  ["voice",      "声の効き",        0,    1.5,  0.05, "声"],
+  ["micGain",    "音の感度",        0,    1,    0.01, null],
+  ["timbre",     "声色の色み",      0,    1,    0.01, null],
+  ["contour",    "輪郭",            0,    2,    0.05, "輪郭と面"],
+  ["outline",    "人型の縁",        0,    2,    0.05, null],
+  ["tone",       "明暗の面",        0,    1.5,  0.05, null],
+  ["darkTh",     "暗部の切り",      0,    0.6,  0.01, null],
+  ["gamma",      "明暗のカーブ",    0.5,  4,    0.05, null],
+  ["points",     "点の数",          500,  6000, 50,   "筆"],
+  ["lineCount",  "線の本数",        1,    5,    1,    null],
+  ["smoothing",  "なめらかさ",      0,    3,    1,    null],
+  ["step",       "筆の速さ",        0.2,  3,    0.05, null],
+  ["jitter",     "揺れ",            0,    2,    0.05, null],
+  ["relink",     "繋ぎ直し",        1,    10,   1,    null],
+  ["persistence","残像",            0,    0.98, 0.01, "紙"],
+  ["glow",       "にじみ",          0,    1,    0.01, null],
+  ["contrast",   "濃度",            0,    0.2,  0.005,null],
+];
+const TOGGLES = [
+  ["mirror",     "鏡像"],
+  ["pause",      "停止"],
+  ["voiceSplit", "声で解ける"],
+  ["showEdge",   "輪郭場"],
+  ["showMask",   "マスク"],
+  ["showPoints", "点"],
+];
+
+const $ = (id) => document.getElementById(id);
+{
+  const box = $("sliders");
+  for (const [key, label, min, max, step, group] of SLIDERS) {
+    if (group) {
+      const g = document.createElement("div");
+      g.className = "grp"; g.textContent = "— " + group;
+      box.appendChild(g);
+    }
+    const row = document.createElement("div");
+    row.className = "row";
+    const digits = step >= 1 ? 0 : (step < 0.01 ? 3 : 2);
+    row.innerHTML =
+      `<label for="s_${key}">${label}</label>` +
+      `<input id="s_${key}" type="range" min="${min}" max="${max}" step="${step}" value="${params[key]}">` +
+      `<span class="val" id="v_${key}">${params[key].toFixed(digits)}</span>`;
+    box.appendChild(row);
+    row.querySelector("input").addEventListener("input", (e) => {
+      params[key] = parseFloat(e.target.value);
+      $("v_" + key).textContent = params[key].toFixed(digits);
+      if (key === "points" || key === "lineCount") onPoolChanged();
+      if (key === "gamma") rebuildGammaLUT();
+    });
+  }
+  const tbox = $("toggles");
+  for (const [key, label] of TOGGLES) {
+    const l = document.createElement("label");
+    l.innerHTML = `<input id="t_${key}" type="checkbox" ${params[key] ? "checked" : ""}> ${label}`;
+    tbox.appendChild(l);
+    l.querySelector("input").addEventListener("change", (e) => { params[key] = e.target.checked; });
+  }
+}
+
+/* ---------- status helpers ---------- */
+const statusEl = $("status"), statusMsg = $("statusMsg");
+function showStatus(text, retryFn = null) {
+  statusEl.classList.remove("hidden");
+  statusMsg.textContent = text;
+  statusEl.querySelectorAll("button").forEach(b => b.remove());
+  if (retryFn) {
+    const b = document.createElement("button");
+    b.textContent = "再試行"; b.onclick = retryFn;
+    statusEl.appendChild(b);
+  }
+}
+function hideStatus(){ statusEl.classList.add("hidden"); }
+function showBanner(t){ const b = $("banner"); b.textContent = t; b.style.display = "block"; }
+
+// 使い方の一言は 11 秒で静かに消える(以後は HUD だけが残る)
+setTimeout(() => { const h = $("hint"); if (h) h.classList.add("gone"); }, 11000);
+
+/* ========================================================================
+ *  WebGL2 setup
+ * ===================================================================== */
+const canvas = $("gl");
+const gl = canvas.getContext("webgl2", {
+  antialias: false, preserveDrawingBuffer: true, powerPreference: "high-performance",
+});
+if (!gl) {
+  showStatus("この環境では WebGL2 が使えません。\n「息継ぎ」は WebGL2 が必要です。");
+  throw new Error("no webgl2");
+}
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error("shader: " + gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("link: " + gl.getProgramInfoLog(p));
+  return p;
+}
+function uniforms(prog) {
+  const cache = {};
+  return (n) => (n in cache ? cache[n] : (cache[n] = gl.getUniformLocation(prog, n)));
+}
+
+/* ---------- shaders ---------- */
+// fullscreen "big triangle" — no vertex buffers
+const VERT_QUAD = `#version 300 es
+out vec2 v_uv;
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+// solid color quad — used for the persistence fade (multiplicative via alpha
+// blending, then a tiny constant subtract so 8-bit residue reaches true black)
+const FS_FADE = `#version 300 es
+precision highp float;
+uniform vec4 uColor; out vec4 outColor;
+void main(){ outColor = uColor; }`;
+
+// polyline / point renderer. Positions arrive normalized to [0,1]² in field
+// space (y down). aW is the per-vertex 筆圧 (contour strength × transit fade);
+// a per-vertex hash from gl_VertexID varies alpha slightly so strokes feel
+// inked rather than vector-perfect.
+const VS_LINE = `#version 300 es
+layout(location = 0) in vec2  aPos;
+layout(location = 1) in float aW;
+uniform vec2  uRes;
+uniform vec2  uOffsetPx;   // sub-pixel offset for the soft double-draw
+uniform float uPointSize;
+out float v_h;
+out float v_w;
+void main(){
+  v_h = fract(sin(float(gl_VertexID) * 12.9898) * 43758.5453);
+  v_w = aW;
+  vec2 clip = vec2(aPos.x, 1.0 - aPos.y) * 2.0 - 1.0;
+  clip += uOffsetPx / uRes * 2.0;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  gl_PointSize = uPointSize;
+}`;
+// 筆圧カーブ uWGamma: 1 パス目は素の筆圧、2 パス目は pow(w, 2.2) にすると
+// 輪郭に乗った区間だけが二重に濃くなり、渡り線は二重にならない。
+const FS_LINE = `#version 300 es
+precision highp float;
+in float v_h;
+in float v_w;
+uniform vec4  uColor;
+uniform float uWGamma;
+out vec4 outColor;
+void main(){
+  float w = clamp(v_w, 0.0, 1.0);
+  float a = uColor.a * pow(w, uWGamma) * (0.65 + 0.35 * v_h);
+  outColor = vec4(uColor.rgb, a);
+}`;
+
+// final composite: trail buffer + glow + 黒の持ち上げ + 声色の色み,
+// or camera passthrough / mask / contour-field debug
+const FS_FINAL = `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 outColor;
+uniform sampler2D uTrail;   // accumulated line buffer
+uniform sampler2D uCam;     // webcam (passthrough while model loads)
+uniform sampler2D uField;   // downsampled mask / contour field (debug)
+uniform vec2  uTexel;
+uniform vec2  uUVScale, uUVOffset;   // cover-fit crop for the camera
+uniform float uMirror, uGlow, uGlowR, uLift, uTimbre, uTint;
+uniform int   uMode;        // 0 = camera, 1 = lines, 2 = field debug
+void main(){
+  if (uMode == 0){
+    vec2 uv = v_uv; uv.x = mix(uv.x, 1.0 - uv.x, uMirror);
+    vec3 rgb = texture(uCam, uv * uUVScale + uUVOffset).rgb;
+    outColor = vec4(rgb, 1.0); return;
+  }
+  if (uMode == 2){
+    // the debug field is stored y-down at field resolution
+    float m = texture(uField, vec2(v_uv.x, 1.0 - v_uv.y)).r;
+    outColor = vec4(vec3(m), 1.0); return;
+  }
+  float c = texture(uTrail, v_uv).r;
+  if (uGlow > 0.001){
+    float b = 0.0;
+    for (int i = 0; i < 8; i++){
+      float a = 6.2831853 * float(i) / 8.0;
+      b += texture(uTrail, v_uv + vec2(cos(a), sin(a)) * uTexel * 3.0 * uGlowR).r;
+    }
+    b /= 8.0;
+    c += b * b * uGlow;
+  }
+  // 黒の持ち上げ: 8bit の霞を落として、線だけを白く残す
+  c = clamp((c - uLift) / max(1e-3, 1.0 - uLift), 0.0, 1.0);
+  // 声色: 墨は基本グラファイトのまま、低い声で暖色・高い声で寒色へ僅かに
+  vec3 warm = vec3(1.000, 0.955, 0.900);
+  vec3 cool = vec3(0.878, 0.925, 1.000);
+  vec3 ink  = mix(vec3(1.0), mix(warm, cool, clamp(uTimbre, 0.0, 1.0)), uTint);
+  outColor = vec4(c * ink, 1.0);
+}`;
+
+let progFade, progLine, progFinal, uFade, uLine, uFinal;
+try {
+  progFade  = program(VERT_QUAD, FS_FADE);  uFade  = uniforms(progFade);
+  progLine  = program(VS_LINE,   FS_LINE);  uLine  = uniforms(progLine);
+  progFinal = program(VERT_QUAD, FS_FINAL); uFinal = uniforms(progFinal);
+} catch (e) {
+  showStatus("シェーダのコンパイル/リンクに失敗しました:\n" + e.message.slice(0, 400));
+  throw e;
+}
+const quadVAO = gl.createVertexArray();
+
+/* ---------- geometry buffers (stride 3: x, y, 筆圧) ---------- */
+const MAXP = 6000;
+const MAXV = MAXP * 8 + 128;                 // Chaikin ×2³ worst case
+const VSTRIDE = 3;
+const vboData = new Float32Array(MAXV * VSTRIDE);
+const lineVAO = gl.createVertexArray();
+const lineVBO = gl.createBuffer();
+gl.bindVertexArray(lineVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER, lineVBO);
+gl.bufferData(gl.ARRAY_BUFFER, vboData.byteLength, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, VSTRIDE * 4, 0);
+gl.enableVertexAttribArray(1);
+gl.vertexAttribPointer(1, 1, gl.FLOAT, false, VSTRIDE * 4, 8);
+gl.bindVertexArray(null);
+
+const ptsData = new Float32Array(MAXP * 2);  // debug point cloud (positions only)
+const ptsVAO = gl.createVertexArray();
+const ptsVBO = gl.createBuffer();
+gl.bindVertexArray(ptsVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER, ptsVBO);
+gl.bufferData(gl.ARRAY_BUFFER, ptsData.byteLength, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+gl.bindVertexArray(null);   // attrib 1 stays disabled ⇒ generic value (set at draw)
+
+/* ---------- camera + field-debug textures ---------- */
+function texParams(){
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+const camTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, camTex); texParams();
+const fieldDebugTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, fieldDebugTex); texParams();
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE,
+              new Uint8Array([0]));
+
+/* ---------- persistence FBO (single buffer: fade-in-place, no feedback) ---- */
+let trail = null;
+function rebuildTrail() {
+  if (trail) { gl.deleteFramebuffer(trail.fbo); gl.deleteTexture(trail.tex); }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, canvas.width, canvas.height, 0,
+                gl.RGBA, gl.UNSIGNED_BYTE, null);
+  texParams();
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  trail = { fbo, tex };
+}
+
+/* ========================================================================
+ *  Fields (CPU). 元作品の単一 importance を tone / edge / sil の3枚に
+ *  分解したのが「輪郭が読める」ようになった中核。
+ * ===================================================================== */
+// 場の幅。細かい方が目鼻が出るが CPU 直撃なので、粗ポインタ端末は 160px、
+// デスクトップは 224px から始めて、重ければ一度だけ 160px に落ちる。
+const FW_HI = 224, FW_LO = 160;
+let FW = matchMedia("(pointer: coarse)").matches ? FW_LO : FW_HI;
+let FH = 120;
+let fieldDowngraded = (FW === FW_LO);
+
+// edge/sil は2種類持つ。広くぼかした方(edge/silF)は「線が坂を登って来られる」
+// ための引力場、鋭い方(edgeS/silS)は「そこに来たときの筆圧」。分けないと、
+// 引力のために太らせたぶんだけ線も太く鈍くなる。
+let luma, lumaB, tone, maskF, edge, edgeS, silF, silS, attr, inkF, magBuf, tmpA, tmpB;
+let debugField;                       // Uint8 field for the debug composite
+let hotList, hotCount = 0;            // respawn candidates (輪郭寄り)
+const HOT_CAP = 8192;
+const off = document.createElement("canvas");
+const octx = off.getContext("2d", { willReadFrequently: true });
+const fmask = document.createElement("canvas");        // FAKE 用の人型マスク
+const fctx = fmask.getContext("2d", { willReadFrequently: true });
+
+function allocField() {
+  const n = FW * FH;
+  luma = new Float32Array(n); lumaB = new Float32Array(n);
+  tone = new Float32Array(n); maskF = new Float32Array(n);
+  edge = new Float32Array(n); edgeS = new Float32Array(n);
+  silF = new Float32Array(n); silS = new Float32Array(n);
+  attr = new Float32Array(n); inkF = new Float32Array(n);
+  magBuf = new Float32Array(n); tmpA = new Float32Array(n); tmpB = new Float32Array(n);
+  debugField = new Uint8Array(n);
+  hotList = new Int32Array(HOT_CAP);
+  off.width = FW; off.height = FH;
+  fmask.width = FW; fmask.height = FH;
+}
+
+// pow(luma, gamma) as a 256-entry LUT — rebuilt only when Gamma changes
+const gammaLUT = new Float32Array(256);
+function rebuildGammaLUT() {
+  for (let i = 0; i < 256; i++) gammaLUT[i] = Math.pow(i / 255, params.gamma);
+}
+rebuildGammaLUT();
+
+/* ---- separable 1-2-1 blur (src→dst via tmp; src===dst is safe) ---- */
+function blur3(src, dst, tmp) {
+  for (let y = 0; y < FH; y++) {
+    const r = y * FW;
+    tmp[r] = (src[r] * 3 + src[r + 1]) * 0.25;
+    for (let x = 1; x < FW - 1; x++) {
+      const i = r + x;
+      tmp[i] = (src[i - 1] + src[i] * 2 + src[i + 1]) * 0.25;
+    }
+    const e = r + FW - 1;
+    tmp[e] = (src[e - 1] + src[e] * 3) * 0.25;
+  }
+  for (let x = 0; x < FW; x++) {
+    dst[x] = (tmp[x] * 3 + tmp[x + FW]) * 0.25;
+    const b = (FH - 1) * FW + x;
+    dst[b] = (tmp[b - FW] + tmp[b] * 3) * 0.25;
+  }
+  for (let y = 1; y < FH - 1; y++) {
+    const r = y * FW;
+    for (let x = 0; x < FW; x++) {
+      const i = r + x;
+      dst[i] = (tmp[i - FW] + tmp[i] * 2 + tmp[i + FW]) * 0.25;
+    }
+  }
+}
+
+/* ---- Sobel magnitude (|gx|+|gy|, normalized to ~0..1 per unit contrast) ---- */
+function sobelMag(src, dst) {
+  dst.fill(0);
+  for (let y = 1; y < FH - 1; y++) {
+    const r = y * FW;
+    for (let x = 1; x < FW - 1; x++) {
+      const i = r + x;
+      const a = src[i - FW - 1], b = src[i - FW], c = src[i - FW + 1];
+      const d = src[i - 1],                      f = src[i + 1];
+      const g = src[i + FW - 1], h = src[i + FW], k = src[i + FW + 1];
+      const gx = (c + 2 * f + k) - (a + 2 * d + g);
+      const gy = (g + 2 * h + k) - (a + 2 * b + c);
+      dst[i] = (Math.abs(gx) + Math.abs(gy)) * 0.25;
+    }
+  }
+}
+
+// 自動正規化: フレーム最大値の EMA(上りは速く、下りは遅い)で割る。
+// 逆光でも薄暗い部屋でも輪郭が同じ濃さで出るようにするための1行。
+let edgeNorm = 0.05, silNorm = 0.3;
+function autoNorm(cur, prev) {
+  return prev + (cur - prev) * (cur > prev ? 0.35 : 0.04);
+}
+
+// cover-fit crop of the video to the canvas aspect (source rect, normalized)
+function coverFit() {
+  const vw = (video && video.videoWidth) || 1280, vh = (video && video.videoHeight) || 720;
+  const va = vw / vh, ca = canvas.width / canvas.height;
+  let sx = 1, sy = 1;
+  if (va > ca) sx = ca / va; else sy = va / ca;
+  return [sx, sy, (1 - sx) / 2, (1 - sy) / 2];
+}
+
+/* ========================================================================
+ *  ?fakesource=1 — 合成の人物。実写と同じ「輝度 + 人物マスク」しか
+ *  下流に渡さないので、検証は本番と同一のコードパスを通る。
+ * ===================================================================== */
+function figureGeom(t) {
+  const sway = Math.sin(t * 0.55) * 0.020 + Math.sin(t * 0.21) * 0.011;
+  const bob  = Math.sin(t * 0.80) * 0.009;
+  return { cx: 0.5 + sway, cy: 0.40 + bob, rx: 0.150, ry: 0.196, tilt: sway * 1.5 };
+}
+// maskOnly=true なら白い人型だけ(=マスク)。false なら陰影のついた室内。
+function drawFigure(ctx, w, h, t, maskOnly) {
+  const G = figureGeom(t);
+  const X = (u) => u * w, Y = (v) => v * h;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (maskOnly) { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h); }
+  else {
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, "#0e1116"); g.addColorStop(1, "#1d2127");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  }
+  const white = maskOnly ? "#fff" : null;
+  // 胴 + 肩
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy + 0.66), X(0.35), Y(0.31), G.tilt, 0, Math.PI * 2);
+  ctx.fillStyle = white || "#2b3037"; ctx.fill();
+  // 首
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy + G.ry * 0.86), X(0.052), Y(0.070), G.tilt, 0, Math.PI * 2);
+  ctx.fillStyle = white || "#6b6156"; ctx.fill();
+  // 髪(後ろ) — 頭より先に描く。閉じた楕円なので弦(直線)が出ない。マスク側にも
+  // 同じ形を入れて、髪が人型の外形の一部になるようにする。
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy - G.ry * 0.16), X(G.rx * 1.09), Y(G.ry * 1.05),
+              G.tilt, 0, Math.PI * 2);
+  ctx.fillStyle = white || "#241f24"; ctx.fill();
+  // 頭
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy), X(G.rx), Y(G.ry), G.tilt, 0, Math.PI * 2);
+  ctx.fillStyle = white || "#8f8578"; ctx.fill();
+  if (maskOnly) { ctx.setTransform(1, 0, 0, 1, 0, 0); return; }
+  // 左上からの光
+  const rg = ctx.createRadialGradient(
+    X(G.cx - G.rx * 0.45), Y(G.cy - G.ry * 0.45), 1,
+    X(G.cx), Y(G.cy), X(G.rx) * 1.7);
+  rg.addColorStop(0, "rgba(255,246,232,0.55)");
+  rg.addColorStop(1, "rgba(255,246,232,0)");
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy), X(G.rx), Y(G.ry), G.tilt, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = rg; ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+  // 前髪 — 頭の中にクリップした閉じた楕円。生え際が曲線になる。
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy), X(G.rx), Y(G.ry), G.tilt, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy - G.ry * 0.78), X(G.rx * 1.02), Y(G.ry * 0.66),
+              G.tilt, 0, Math.PI * 2);
+  ctx.fillStyle = "#241f24"; ctx.fill();
+  ctx.restore();
+  // 眉 · 目 · 瞳
+  ctx.strokeStyle = "#2b2521"; ctx.lineWidth = Math.max(1, h * 0.009);
+  for (const s of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(X(G.cx + s * 0.075), Y(G.cy - 0.052));
+    ctx.quadraticCurveTo(X(G.cx + s * 0.048), Y(G.cy - 0.066),
+                         X(G.cx + s * 0.020), Y(G.cy - 0.054));
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#e8e2d8";
+  for (const s of [-1, 1]) {
+    ctx.beginPath();
+    ctx.ellipse(X(G.cx + s * 0.050), Y(G.cy - 0.016), X(0.030), Y(0.020), 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = "#1b1714";
+  for (const s of [-1, 1]) {
+    ctx.beginPath();
+    ctx.ellipse(X(G.cx + s * 0.050), Y(G.cy - 0.014), X(0.014), Y(0.014), 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // 鼻の影 · 口
+  ctx.strokeStyle = "rgba(60,48,40,0.75)"; ctx.lineWidth = Math.max(1, h * 0.008);
+  ctx.beginPath();
+  ctx.moveTo(X(G.cx + 0.004), Y(G.cy + 0.005));
+  ctx.quadraticCurveTo(X(G.cx + 0.020), Y(G.cy + 0.050), X(G.cx - 0.004), Y(G.cy + 0.058));
+  ctx.stroke();
+  // 口はフェイクの歌に合わせて開く(声で口が動くので線も動く)
+  const open = 0.010 + 0.028 * Math.max(0, fakeSong(t).vol);
+  ctx.fillStyle = "#4a2f2c";
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy + 0.102), X(0.040), Y(open), 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 顎の影
+  ctx.strokeStyle = "rgba(40,34,30,0.45)"; ctx.lineWidth = Math.max(1, h * 0.010);
+  ctx.beginPath();
+  ctx.ellipse(X(G.cx), Y(G.cy + 0.020), X(G.rx * 0.92), Y(G.ry * 0.90),
+              G.tilt, Math.PI * 0.20, Math.PI * 0.80);
+  ctx.stroke();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+let fakeMaskData = null;
+function drawFakeSource() {
+  drawFigure(octx, FW, FH, artTime, false);
+  drawFigure(fctx, FW, FH, artTime, true);
+  fakeMaskData = fctx.getImageData(0, 0, FW, FH).data;
+}
+
+/* ------------------------------------------------------------------------
+ *  updateField — 1フレームぶんの場の再構築(ビデオレート)
+ *
+ *   tone = gammaLUT[luma] × mask      (darkTh 以下は 0 = 影は面としては空)
+ *   edge = sqrt(Sobel(blur(luma)) / auto) × mask を2回ぼかしたもの
+ *   sil  = sqrt(|∇mask| / auto) を2回ぼかしたもの
+ *   attr = 輪郭・人型の縁・明暗の面 を重みで混ぜた「線が行きたい場所」
+ *   inkF = 輪郭の強さ = そこに線が来たときの筆圧
+ *
+ *  ぼかしが要点。鋭い1px の尾根には確率的山登りが乗れないので、尾根に
+ *  数 px 幅の斜面を作って、遠くの粒子が坂を登って来られるようにする。
+ * --------------------------------------------------------------------- */
+let fieldReady = false;
+let lastFit = [1, 1, 0, 0];
+function updateField() {
+  if (FAKE) {
+    drawFakeSource();
+  } else {
+    if (!camReady || video.readyState < 2) return;
+    const fit = coverFit();
+    const vw = video.videoWidth, vh = video.videoHeight;
+    octx.save();
+    if (params.mirror) { octx.translate(FW, 0); octx.scale(-1, 1); }
+    octx.drawImage(video, fit[2] * vw, fit[3] * vh, fit[0] * vw, fit[1] * vh, 0, 0, FW, FH);
+    octx.restore();
+    lastFit = fit;
+  }
+  const rgba = octx.getImageData(0, 0, FW, FH).data;
+
+  const darkTh = params.darkTh;
+  const useMask = FAKE || (maskReady && !modelFailed);
+  const mArr = maskArr, mW = maskW, mH = maskH;
+  const boost = V.maskBoost;
+  const [sx, sy, ox, oy] = lastFit;
+
+  let bi = 0;
+  for (let y = 0; y < FH; y++) {
+    const v = (y + 0.5) / FH;
+    for (let x = 0; x < FW; x++, bi++) {
+      const p = bi * 4;
+      const l8 = (rgba[p] * 299 + rgba[p + 1] * 587 + rgba[p + 2] * 114) / 1000 | 0;
+      luma[bi] = l8 / 255;
+      let m = 1;
+      if (FAKE) {
+        m = Math.min(1, (fakeMaskData[p] / 255) * boost);
+      } else if (useMask) {
+        // map field pixel → video frame → mask texel (undo the mirror,
+        // reapply the same cover crop; mask spans the full video frame)
+        let u = (x + 0.5) / FW;
+        if (params.mirror) u = 1 - u;
+        const mx = Math.min(mW - 1, (ox + u * sx) * mW | 0);
+        const my = Math.min(mH - 1, (oy + v * sy) * mH | 0);
+        m = Math.min(1, (mArr[my * mW + mx] / 255) * boost);   // soft, feathered
+      }
+      maskF[bi] = m;
+      // 面(陰影)は暗部で切るが、輪郭は切らない ⇒ 影の中の輪郭も描かれる
+      tone[bi] = luma[bi] < darkTh ? 0 : gammaLUT[l8] * m;
+    }
+  }
+
+  /* --- edge: 輝度のぼかし → Sobel → 自動正規化 → sqrt → マスク → ぼかし2回 --- */
+  blur3(luma, lumaB, tmpA);
+  sobelMag(lumaB, magBuf);
+  let mx = 0;
+  for (let i = 0; i < magBuf.length; i++) if (magBuf[i] > mx) mx = magBuf[i];
+  edgeNorm = Math.max(0.012, autoNorm(mx, edgeNorm));
+  const einv = 1 / (edgeNorm * 0.55);
+  for (let i = 0; i < magBuf.length; i++) {
+    let e = magBuf[i] * einv;
+    if (e > 1) e = 1;
+    tmpB[i] = Math.sqrt(e) * maskF[i];      // sqrt で中間の輪郭を太らせる
+  }
+  blur3(tmpB, edgeS, tmpA);        // 1回 → 筆圧用の鋭い尾根
+  blur3(edgeS, edge, tmpA);        // 2回 → 引力用の広い斜面
+
+  /* --- sil: 人物マスクの縁。人型の外形そのものなので重みを一番強くする --- */
+  silF.fill(0);
+  let smx = 0;
+  for (let y = 1; y < FH - 1; y++) {
+    const r = y * FW;
+    for (let x = 1; x < FW - 1; x++) {
+      const i = r + x;
+      const s = Math.abs(maskF[i + 1] - maskF[i - 1]) +
+                Math.abs(maskF[i + FW] - maskF[i - FW]);
+      tmpB[i] = s;
+      if (s > smx) smx = s;
+    }
+  }
+  for (let x = 0; x < FW; x++) { tmpB[x] = 0; tmpB[(FH - 1) * FW + x] = 0; }
+  for (let y = 0; y < FH; y++) { tmpB[y * FW] = 0; tmpB[y * FW + FW - 1] = 0; }
+  silNorm = Math.max(0.03, autoNorm(smx, silNorm));
+  const sinv = 1 / (silNorm * 0.65);
+  for (let i = 0; i < tmpB.length; i++) {
+    let s = tmpB[i] * sinv;
+    if (s > 1) s = 1;
+    tmpB[i] = Math.sqrt(s);
+  }
+  blur3(tmpB, silS, tmpA);
+  blur3(silS, silF, tmpA);
+
+  /* --- attr / inkF + 再出現の候補プール(輪郭寄り) --- */
+  const wT = params.tone * (1 + 0.50 * arcV);
+  const wE = params.contour * V.edgeMul;
+  const wS = params.outline * V.silMul;
+  hotCount = 0;
+  for (let i = 0; i < attr.length; i++) {
+    const a = wT * tone[i] + wE * edge[i] + wS * silF[i];
+    attr[i] = a;
+    const k = 1.00 * edgeS[i] + 1.30 * silS[i];   // 筆圧は鋭い尾根から取る
+    inkF[i] = k > 1 ? 1 : k;
+    if (a > 0.35) {                        // reservoir sampling of hot cells
+      if (hotCount < HOT_CAP) hotList[hotCount++] = i;
+      else if (Math.random() < HOT_CAP / (hotCount++))
+        hotList[(Math.random() * HOT_CAP) | 0] = i;
+    }
+  }
+  fieldReady = true;
+}
+
+// bilinear sample of a field (x, y in field-pixel units)
+function sampleF(f, x, y) {
+  x = x < 0 ? 0 : (x > FW - 1.001 ? FW - 1.001 : x);
+  y = y < 0 ? 0 : (y > FH - 1.001 ? FH - 1.001 : y);
+  const xi = x | 0, yi = y | 0, fx = x - xi, fy = y - yi;
+  const i = yi * FW + xi;
+  const a = f[i], b = f[i + 1], c = f[i + FW], d = f[i + FW + 1];
+  return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+}
+
+/* ========================================================================
+ *  Persistent particle pool (temporal coherence)
+ * ===================================================================== */
+const px = new Float32Array(MAXP), py = new Float32Array(MAXP);
+const stuck = new Uint8Array(MAXP);
+let activeP = params.points;          // may drop below the slider (auto-reduce)
+
+function respawn(i) {
+  const nb = Math.min(hotCount, HOT_CAP);   // reservoir holds ≤ CAP entries
+  if (nb > 0) {
+    const cell = hotList[(Math.random() * nb) | 0];
+    px[i] = (cell % FW) + Math.random();
+    py[i] = (cell / FW | 0) + Math.random();
+  } else {
+    px[i] = Math.random() * FW;
+    py[i] = Math.random() * FH;
+  }
+  stuck[i] = 0;
+}
+for (let i = 0; i < MAXP; i++) { px[i] = Math.random() * FW; py[i] = Math.random() * FH; }
+
+// 打ち込み(子音・弦のアタック)で点の一部を輪郭へ飛ばす
+function burstRespawn(n) {
+  for (let k = 0; k < n; k++) respawn((Math.random() * activeP) | 0);
+}
+
+/* 混雑度。山登りは純粋な最大化なので、揺れを落として長く回すと 2600 点
+ * ぜんぶが同じ尾根の頂点に積み上がり、覆う長さが消えて「定着」がかえって
+ * 空っぽの絵になる(実測済み)。そこで、すでに混んでいるセルの点数を得点から
+ * 引く。点は attr に比例して面を覆うようになる — 点描の Lloyd 緩和と同じ
+ * 考え方で、輪郭には線が乗り、内側にはハッチングが残る。                */
+const occ = new Int32Array(64 * 128);
+let occExpect = 1;
+// 罰則は超過分の2乗。線形だと尾根(attr≈2.4)と内側の面(attr≈0.4)の差を
+// 埋められず、点が全部輪郭に居座って内側のハッチングが消える。2乗にすると
+// セルごとに実質的な定員ができて、あふれた点が面へ流れる。
+const CROWD = 1.5;
+function buildOccupancy() {
+  const nc = GW * GH;
+  occ.fill(0, 0, nc);
+  const kx = GW / FW, ky = GH / FH;
+  let filled = 0;
+  for (let i = 0; i < activeP; i++) {
+    let cx = px[i] * kx | 0; if (cx >= GW) cx = GW - 1;
+    let cy = py[i] * ky | 0; if (cy >= GH) cy = GH - 1;
+    const c = cy * GW + cx;
+    if (occ[c]++ === 0) filled++;
+  }
+  occExpect = activeP / Math.max(1, filled);
+}
+// セル占有率の超過分(0 以上)。格子は約 3.5 場px なので最近傍で十分。
+function crowdAt(x, y) {
+  let cx = (x * GW / FW) | 0; if (cx >= GW) cx = GW - 1; else if (cx < 0) cx = 0;
+  let cy = (y * GH / FH) | 0; if (cy >= GH) cy = GH - 1; else if (cy < 0) cy = 0;
+  const e = occ[cy * GW + cx] / occExpect - 1;
+  return e > 0 ? e * e : 0;
+}
+
+/* Stochastic hill-climb on `attr` — each particle scores its spot and a few
+ * random nearby offsets and takes a clamped step toward the best.
+ *  · 元作品では importance + 0.5·|∇importance| をここで足していたが、
+ *    輪郭は attr に織り込んだので候補ごとの bilinear が1回で済む。
+ *  · 輪郭に乗った粒子(lock)は歩幅と揺れを落として吸着する ⇒ 輪郭が
+ *    毎フレーム震える線ではなく、濃く積み上がる一本の線になる。
+ *  · hatch: 音高に応じて候補方向を楕円に歪める。低い声=横、高い声=縦の
+ *    ハッチングになり、声の高さが筆致の向きとして見える。
+ * プールは決してまとめて再サンプルしないので、ストロボしない。          */
+function stepParticles() {
+  if (!fieldReady) return;
+  buildOccupancy();
+  const step = params.step * V.stepMul, jit = params.jitter * V.jitMul;
+  const hs = V.hatchS, ux = Math.cos(V.hatchA), uy = Math.sin(V.hatchA);
+  const CAND = 4;
+  for (let i = 0; i < activeP; i++) {
+    let x = px[i], y = py[i];
+    const here = sampleF(attr, x, y);
+    let best = here - CROWD * crowdAt(x, y);
+    const lock = sampleF(inkF, x, y);
+    const stepL = step * (1 - 0.55 * lock);
+    const jitL = jit * (1 - 0.65 * lock);
+    let bx = x, by = y;
+    for (let c = 0; c < CAND; c++) {
+      const a = Math.random() * 6.2831853;
+      const r = stepL * (0.5 + Math.random() * 2.5);
+      let dxc = Math.cos(a), dyc = Math.sin(a);
+      if (hs > 0.001) {                       // 楕円に歪めて筆致の向きを作る
+        const al = dxc * ux + dyc * uy, pe = -dxc * uy + dyc * ux;
+        const s1 = al * (1 + hs), s2 = pe / (1 + hs);
+        dxc = s1 * ux - s2 * uy; dyc = s1 * uy + s2 * ux;
+      }
+      const cx = x + dxc * r, cy = y + dyc * r;
+      const s = sampleF(attr, cx, cy) - CROWD * crowdAt(cx, cy);
+      if (s > best + 0.01) { best = s; bx = cx; by = cy; }
+    }
+    // clamped move toward the best candidate (smooth, no teleporting)
+    let dx = bx - x, dy = by - y;
+    const d = Math.hypot(dx, dy);
+    if (d > stepL) { dx *= stepL / d; dy *= stepL / d; }
+    x += dx + (Math.random() - 0.5) * 2 * jitL;
+    y += dy + (Math.random() - 0.5) * 2 * jitL;
+    x = x < 0 ? 0 : (x > FW - 1 ? FW - 1 : x);
+    y = y < 0 ? 0 : (y > FH - 1 ? FH - 1 : y);
+    px[i] = x; py[i] = y;
+    // respawn if parked in near-zero attraction for a while
+    if (here < 0.02) { if (++stuck[i] > 12) respawn(i); }
+    else stuck[i] = 0;
+  }
+}
+
+/* ========================================================================
+ *  Path linking: grid-bucketed greedy nearest-neighbor (~O(P))
+ * ===================================================================== */
+const GW = 64; let GH = 48;
+let mortonCells;                        // cell indices in Z-curve order
+const cellCount = new Int32Array(64 * 128);
+const cellStart = new Int32Array(64 * 128 + 1);
+const cellCursor = new Int32Array(64 * 128);
+const cellItems = new Int32Array(MAXP);
+const cellOfPt = new Int32Array(MAXP);
+const mortonPts = new Int32Array(MAXP);
+const used = new Uint8Array(MAXP);
+const order = new Int32Array(MAXP);     // path visit order (persists!)
+const stripFirst = new Int32Array(8), stripLen = new Int32Array(8);
+let numStrips = 0, relinkDirty = true;
+
+function morton(x, y) {                 // interleave 7 bits of x and y
+  let m = 0;
+  for (let b = 0; b < 7; b++) m |= ((x >> b & 1) << (2 * b)) | ((y >> b & 1) << (2 * b + 1));
+  return m;
+}
+function rebuildMorton() {
+  GH = Math.max(8, Math.min(128, Math.round(GW * FH / FW)));
+  const cells = [];
+  for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) cells.push(y * GW + x);
+  cells.sort((a, b) => morton(a % GW, a / GW | 0) - morton(b % GW, b / GW | 0));
+  mortonCells = Int32Array.from(cells);
+}
+
+function buildGrid() {
+  const nc = GW * GH;
+  cellCount.fill(0, 0, nc);
+  const kx = GW / FW, ky = GH / FH;
+  for (let i = 0; i < activeP; i++) {
+    let cx = px[i] * kx | 0; if (cx >= GW) cx = GW - 1;
+    let cy = py[i] * ky | 0; if (cy >= GH) cy = GH - 1;
+    const c = cy * GW + cx;
+    cellOfPt[i] = c; cellCount[c]++;
+  }
+  let acc = 0;
+  for (let c = 0; c < nc; c++) { cellStart[c] = acc; cellCursor[c] = acc; acc += cellCount[c]; }
+  cellStart[nc] = acc;
+  for (let i = 0; i < activeP; i++) cellItems[cellCursor[cellOfPt[i]]++] = i;
+}
+
+// nearest UNUSED point to point i: expand square rings of grid cells around
+// its cell; once a candidate is found, scan one extra ring (a nearer point
+// can hide diagonally in ring r+1), then accept. Practically O(1) per call.
+function nearestUnused(i) {
+  const c = cellOfPt[i], cx0 = c % GW, cy0 = c / GW | 0;
+  const x0 = px[i], y0 = py[i];
+  let best = -1, bd = Infinity;
+  const scanCell = (cx, cy) => {
+    if (cx < 0 || cy < 0 || cx >= GW || cy >= GH) return;
+    const cc = cy * GW + cx, e = cellStart[cc] + cellCount[cc];
+    for (let k = cellStart[cc]; k < e; k++) {
+      const j = cellItems[k];
+      if (used[j]) continue;
+      const dx = px[j] - x0, dy = py[j] - y0, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = j; }
+    }
+  };
+  const scanRing = (r) => {
+    if (r === 0) { scanCell(cx0, cy0); return; }
+    for (let x = cx0 - r; x <= cx0 + r; x++) { scanCell(x, cy0 - r); scanCell(x, cy0 + r); }
+    for (let y = cy0 - r + 1; y <= cy0 + r - 1; y++) { scanCell(cx0 - r, y); scanCell(cx0 + r, y); }
+  };
+  const maxR = Math.max(GW, GH);
+  for (let r = 0; r <= maxR; r++) {
+    scanRing(r);
+    if (best >= 0) { scanRing(r + 1); return best; }
+  }
+  return -1;
+}
+
+/* Relink: chain every active point into K polylines. Points are consumed in
+ * Morton (Z-curve) cell order for the strip starts, which keeps the result
+ * deterministic frame-to-frame; between relinks the SAME `order` array is
+ * re-read at fresh particle positions, so the stroke deforms smoothly.
+ * K は声で決まる: 沈黙なら 1 本、声が続くと最大 5 本にほどける。         */
+function relink() {
+  buildGrid();
+  // points sorted by Morton order of their cell
+  let n = 0;
+  for (let m = 0; m < mortonCells.length; m++) {
+    const c = mortonCells[m], e = cellStart[c] + cellCount[c];
+    for (let k = cellStart[c]; k < e; k++) mortonPts[n++] = cellItems[k];
+  }
+  used.fill(0, 0, activeP);
+  const K = V.lines | 0;
+  let mp = 0, out = 0, remaining = activeP;
+  numStrips = 0;
+  for (let s = 0; s < K && remaining > 0; s++) {
+    const target = Math.ceil(remaining / (K - s));
+    while (mp < n && used[mortonPts[mp]]) mp++;
+    if (mp >= n) break;
+    let cur = mortonPts[mp];
+    used[cur] = 1;
+    stripFirst[s] = out; order[out++] = cur;
+    let len = 1;
+    while (len < target) {
+      const nxt = nearestUnused(cur);
+      if (nxt < 0) break;
+      used[nxt] = 1; order[out++] = nxt; cur = nxt; len++;
+    }
+    stripLen[s] = len; remaining -= len; numStrips++;
+  }
+  relinkDirty = false;
+}
+
+/* ========================================================================
+ *  Chaikin corner cutting — turns the NN zigzag into loopy curls.
+ *  Each pass replaces every segment with its 1/4 and 3/4 points (endpoints
+ *  preserved), roughly doubling the vertex count and rounding every corner.
+ *  筆圧(3成分目)も同じ重みで補間されるので、渡り線のフェードは角を丸めた
+ *  あとでも滑らかにつながる。
+ * ===================================================================== */
+const chaikA = new Float32Array(MAXV * VSTRIDE);
+const chaikB = new Float32Array(MAXV * VSTRIDE);
+function chaikin(buf, n, iters) {
+  let src = buf, dst = (buf === chaikA ? chaikB : chaikA), cnt = n;
+  for (let it = 0; it < iters && cnt >= 3; it++) {
+    let m = 0;
+    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; m = 1;   // keep first
+    for (let i = 0; i < cnt - 1; i++) {
+      const a = i * 3, b = a + 3, o1 = m * 3, o2 = o1 + 3;
+      dst[o1]     = src[a]     * 0.75 + src[b]     * 0.25;
+      dst[o1 + 1] = src[a + 1] * 0.75 + src[b + 1] * 0.25;
+      dst[o1 + 2] = src[a + 2] * 0.75 + src[b + 2] * 0.25;
+      dst[o2]     = src[a]     * 0.25 + src[b]     * 0.75;
+      dst[o2 + 1] = src[a + 1] * 0.25 + src[b + 1] * 0.75;
+      dst[o2 + 2] = src[a + 2] * 0.25 + src[b + 2] * 0.75;
+      m += 2;
+    }
+    const l = (cnt - 1) * 3, o = m * 3;
+    dst[o] = src[l]; dst[o + 1] = src[l + 1]; dst[o + 2] = src[l + 2]; m++;  // keep last
+    const t = src; src = dst; dst = t;                       // ping-pong
+    cnt = m;
+  }
+  return { buf: src, n: cnt };
+}
+
+/* ---- fill the VBO from the current order + particle positions ------------
+ *  頂点ごとの筆圧 = (輪郭の強さ + 少しの明暗) × 渡り線のフェード
+ *
+ *  貪欲最近傍は、点を使い切る過程でどうしても顔を横断する長い「渡り線」を
+ *  作る。元作品ではそれが本線と同じ濃さで積み上がり、像を潰していた。
+ *  ここでは平均点間距離 meanD を基準に、長い区間の筆圧を 0 へ落とす。
+ *  線は一本のまま連続していて、筆圧だけが抜ける = 筆を浮かせた一筆書き。
+ * ---------------------------------------------------------------------- */
+const drawFirst = new Int32Array(8), drawCount = new Int32Array(8);
+let totalVerts = 0, pathLenPx = 0;
+const smoothstep = (a, b, x) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+function fillVertices() {
+  const iters = params.smoothing | 0;
+  let v = 0; pathLenPx = 0;
+  const cw = canvas.width, ch = canvas.height;
+  const inkMul = V.inkMul;
+  // 平均点間距離: 点数と場の解像度が変わっても渡り線の閾値が追従する
+  const meanD = Math.sqrt((FW * FH * 0.45) / Math.max(1, activeP));
+  const near = meanD * 1.6, far = meanD * 5.0;
+  for (let s = 0; s < numStrips; s++) {
+    const n = stripLen[s], f = stripFirst[s];
+    for (let j = 0; j < n; j++) {
+      const idx = order[f + j];
+      const x = px[idx], y = py[idx];
+      chaikA[j * 3] = x; chaikA[j * 3 + 1] = y;
+      // 内側のハッチングが完全に消えないよう、下限と明暗の寄与を残す。
+      // 0 にすると輪郭だけのエッジ検出画になり、一筆書きの肌理が失われる。
+      let w = 0.22 + 0.62 * sampleF(inkF, x, y) + 0.45 * sampleF(tone, x, y);
+      w *= inkMul;
+      chaikA[j * 3 + 2] = w > 1 ? 1 : w;
+    }
+    // 渡り線のフェード: 前後の区間長の大きい方で筆圧を抜く。両端が落ちる
+    // ので、渡りに入る手前の本線は自然にテーパーして筆を浮かせて見える。
+    for (let j = 0; j < n; j++) {
+      const a = j * 3;
+      let L = 0;
+      if (j > 0) {
+        const d = Math.hypot(chaikA[a] - chaikA[a - 3], chaikA[a + 1] - chaikA[a - 2]);
+        if (d > L) L = d;
+      }
+      if (j < n - 1) {
+        const d = Math.hypot(chaikA[a + 3] - chaikA[a], chaikA[a + 4] - chaikA[a + 1]);
+        if (d > L) L = d;
+      }
+      chaikA[a + 2] *= 1 - smoothstep(near, far, L);
+    }
+    const r = chaikin(chaikA, n, iters);
+    drawFirst[s] = v; drawCount[s] = r.n;
+    let lx = 0, ly = 0;
+    for (let j = 0; j < r.n; j++) {
+      const nx = r.buf[j * 3] / FW, ny = r.buf[j * 3 + 1] / FH;
+      vboData[v * 3] = nx; vboData[v * 3 + 1] = ny; vboData[v * 3 + 2] = r.buf[j * 3 + 2];
+      if (j > 0) pathLenPx += Math.hypot((nx - lx) * cw, (ny - ly) * ch);
+      lx = nx; ly = ny; v++;
+    }
+  }
+  totalVerts = v;
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineVBO);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, vboData.subarray(0, totalVerts * 3));
+}
+
+/* ========================================================================
+ *  Camera (FAKE では一切開かない)
+ * ===================================================================== */
+const video = document.createElement("video");
+video.playsInline = true; video.muted = true;
+let stream = null, camReady = false;
+
+async function startCamera() {
+  if (FAKE) { camReady = true; hideStatus(); return; }
+  showStatus("カメラを要求しています…");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    camReady = true;
+    hideStatus();
+    startVideoLoop();
+  } catch (err) {
+    camReady = false;
+    if (err && (err.name === "NotAllowedError" || err.name === "SecurityError"))
+      showStatus("カメラが許可されていません。\n許可してから再試行してください。", startCamera);
+    else if (err && (err.name === "NotFoundError" || err.name === "OverconstrainedError"))
+      showStatus("この端末でカメラが見つかりません。", startCamera);
+    else
+      showStatus("カメラのエラー: " + (err && err.message || err), startCamera);
+  }
+}
+window.addEventListener("pagehide", () => {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (segmenter) try { segmenter.close(); } catch (_) {}
+  stopMic();
+});
+
+/* ========================================================================
+ *  MediaPipe segmentation (VIDEO mode, throttled to ~30 Hz)
+ * ===================================================================== */
+let segmenter = null, modelFailed = false, maskReady = false;
+let modelStatus = FAKE ? "合成" : "loading";
+let maskArr = null, maskW = 0, maskH = 0;
+let lastSegTs = -1;
+
+/* Mobile detection recipe (proven in fable5_gas-head.html): coarse-pointer
+   devices segment a downscaled copy of the frame on an adaptive cadence and
+   auto-switch GPU→CPU when the delegate emits degenerate masks. Desktop
+   (fine pointer) keeps the exact full-resolution pipeline it always had
+   (the mask lands in the CPU field either way, so 288px loses nothing). */
+const SEG_SMALL    = matchMedia("(pointer: coarse)").matches;
+const SEG_MAX_SIDE = 288;
+const segSrc = document.createElement("canvas");
+const segSrcCtx = segSrc.getContext("2d");
+let segDelegate = "GPU", segCost = 20, segBadRun = 0, segSwitching = false;
+let SegClass = null, segVision = null;
+
+const segOpts = (delegate) => ({
+  baseOptions: {
+    modelAssetPath:
+      "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+    delegate,
+  },
+  runningMode: "VIDEO",
+  outputConfidenceMasks: true,
+  outputCategoryMask: false,
+});
+
+async function loadModel() {
+  if (FAKE) return;                       // 合成マスクで完結。CDN に触らない
+  modelStatus = "loading"; modelFailed = false;
+  try {
+    if (!ImageSegmenter) {
+      const mod = await import(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs");
+      ImageSegmenter = mod.ImageSegmenter; FilesetResolver = mod.FilesetResolver;
+    }
+    segVision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
+    SegClass = ImageSegmenter;
+    try {
+      segmenter = await ImageSegmenter.createFromOptions(segVision, segOpts("GPU"));
+      segDelegate = "GPU";
+    } catch (_) {
+      // some mobile GPUs reject the GPU delegate outright — fall back to CPU
+      segmenter = await ImageSegmenter.createFromOptions(segVision, segOpts("CPU"));
+      segDelegate = "CPU";
+    }
+    modelStatus = "ok";
+    $("banner").style.display = "none";
+  } catch (err) {
+    modelFailed = true; modelStatus = "failed";
+    showBanner("人物マスクのモデルを読み込めませんでした:\n" + (err && err.message || err) +
+               "\n画面全体を対象に描き続けます。");
+    const b = document.createElement("button");
+    b.textContent = "モデルを再試行";
+    b.style.cssText = "margin-top:6px;font:inherit;padding:3px 10px;cursor:pointer;";
+    b.onclick = () => { $("banner").style.display = "none"; loadModel(); };
+    $("banner").appendChild(b);
+  }
+}
+
+// Some mobile GPU delegates "succeed" but emit degenerate masks (all-zero or
+// all-one). When that persists, rebuild the segmenter on the CPU delegate.
+async function switchToCpuDelegate() {
+  if (segSwitching || segDelegate === "CPU" || !SegClass || !segVision) return;
+  segSwitching = true;
+  try {
+    const next = await SegClass.createFromOptions(segVision, segOpts("CPU"));
+    try { if (segmenter && segmenter.close) segmenter.close(); } catch (_) {}
+    segmenter = next; segDelegate = "CPU"; segBadRun = 0;
+    console.warn("ikitsugi: GPU segmentation output looked broken — switched to CPU delegate");
+  } catch (_) { /* keep the GPU segmenter */ }
+  segSwitching = false;
+}
+
+// Mobile only: segment a ≤288px copy of the frame (10-20x cheaper). Desktop
+// returns the raw video element — byte-identical to the original pipeline.
+function segInput() {
+  if (!SEG_SMALL) return video;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+  const cw = Math.max(2, Math.round(vw * s)), ch = Math.max(2, Math.round(vh * s));
+  if (segSrc.width !== cw || segSrc.height !== ch) { segSrc.width = cw; segSrc.height = ch; }
+  segSrcCtx.drawImage(video, 0, 0, cw, ch);
+  return segSrc;
+}
+
+function runSegmentation() {
+  if (!segmenter || segSwitching || !camReady || video.readyState < 2 || !video.videoWidth) return;
+  let ts = performance.now();
+  if (ts <= lastSegTs) ts = lastSegTs + 0.1;
+  lastSegTs = ts;
+  const t0 = performance.now();
+  try {
+    // callback form: MPMask is only valid inside — getAsUint8Array() copies.
+    segmenter.segmentForVideo(segInput(), ts, (result) => {
+      const masks = result.confidenceMasks;
+      if (!masks || !masks.length) return;
+      // selfie_segmenter: 2 masks ⇒ index 1 = "person"; 1 mask ⇒ foreground
+      const m = masks.length > 1 ? masks[1] : masks[0];
+      maskArr = m.getAsUint8Array(); maskW = m.width; maskH = m.height;
+      maskReady = true;
+      if (SEG_SMALL) {
+        // GPU-health watchdog: mean coverage ~0 or ~1 for >40 consecutive
+        // results means the delegate is emitting garbage, not "no person".
+        let sum = 0;
+        for (let i = 0; i < maskArr.length; i++) sum += maskArr[i];
+        const cover = sum / (maskArr.length * 255);
+        segBadRun = (cover < 0.002 || cover > 0.97) ? segBadRun + 1 : 0;
+        if (segBadRun > 40) switchToCpuDelegate();
+      }
+    });
+  } catch (_) {
+    if (SEG_SMALL && ++segBadRun > 40) switchToCpuDelegate();
+  }
+  segCost = segCost * 0.8 + (performance.now() - t0) * 0.2;
+}
+
+// Inference must never own the main thread: it runs on its own timer, outside
+// the video loop. Desktop keeps the original ~30 Hz; slow phones (CPU
+// delegate) back off up to 250 ms and the field reuses the latest mask.
+function segTick() {
+  if (!document.hidden) runSegmentation();
+  const interval = SEG_SMALL ? Math.max(33, Math.min(250, segCost * 1.7)) : 33;
+  setTimeout(segTick, interval);
+}
+if (!FAKE) segTick();
+
+// field update at video rate; segmentation runs on its own timer (segTick).
+// NOTE: this keeps running while "停止" is on — pause only freezes the
+// PARTICLE MOTION (per prefers-reduced-motion), the drawing stays visible.
+function startVideoLoop() {
+  const onFrame = () => { updateField(); };
+  if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+    const tick = () => { onFrame(); video.requestVideoFrameCallback(tick); };
+    video.requestVideoFrameCallback(tick);
+  } else {
+    let lastT = -1;
+    const tick = () => {
+      if (video.currentTime !== lastT) { lastT = video.currentTime; onFrame(); }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+}
+
+/* ========================================================================
+ *  声 → メーター
+ *    mic  — AnalyserNode: RMS(速い/遅い EMA)、スペクトル重心、ゼロ交差率、
+ *           優勢音高、そしてヒステリシス+不感時間つきのオンセット検出。
+ *    fake — ?fakesource=1: 18秒の決定的な歌。WebAudio もマイクも開かない。
+ *    demo — マイク拒否/不在: ゆっくりした呼吸。作品が止まらないための保険。
+ *  すべて 0..1 に正規化し、平滑化は dt 駆動。
+ * ===================================================================== */
+const aud = {
+  mode: FAKE ? "fake" : "demo",
+  ctx: null, analyser: null, stream: null,
+  timeData: null, freqData: null,
+  rmsF: 0, rmsM: 0, rmsS: 0, cen: 0.3, zcr: 0.2, pitF: 0.4, pitS: 0.4,
+  armed: true, refr: 0, err: "",
+};
+// mid は「息継ぎ」判定専用の中位エンベロープ(0.4s)。sus(1.2-1.4s)で判定すると
+// 声をやめてから定着し始めるまで 2.5s も待たされ、作品の見せ場が鈍る。逆に
+// rms(0.05s)だけだと音節の切れ目ごとに定着しかけてちらつく。その中間。
+const meters = { rms: 0, mid: 0, sus: 0, cen: 0.3, zcr: 0.2, pitch: 0.4, vib: 0, onset: 0 };
+let stillV = 0;      // 静寂(定着)の度合い 0..1
+let arcV = 0;        // 楽章: 声が続くほど溜まる 0..1
+let onsetLatch = false;
+
+/* ?fakesource=1 の歌 — 18秒。サムネと検証のために、サビの直後に長めの
+ * 「息継ぎ(無音)」を置いてある。そこで像が定着するのが作品の見せ場。      */
+function fakeSong(t) {
+  const T = t % 18;
+  let vol, cen, pit, zcr;
+  if (T < 1.2) {                       // 前奏: ほぼ無音
+    vol = 0.05 + 0.03 * Math.sin(T * 3.0); cen = 0.22; pit = 0.30; zcr = 0.30;
+  } else if (T < 5.5) {                // A メロ
+    const u = (T - 1.2) / 4.3;
+    vol = 0.32 + 0.13 * Math.sin(T * 2.3) + 0.08 * u;
+    cen = 0.30 + 0.08 * Math.sin(T * 0.7);
+    pit = 0.34 + 0.10 * Math.sin(T * 1.1); zcr = 0.26;
+  } else if (T < 8.2) {                // サビ: 一筆がほどける
+    const u = (T - 5.5) / 2.7;
+    vol = 0.64 + 0.20 * Math.sin(T * 1.7) * (0.6 + 0.4 * u);
+    cen = 0.54 + 0.14 * Math.sin(T * 0.9);
+    pit = 0.64 + 0.14 * Math.sin(T * 1.4); zcr = 0.22;
+  } else if (T < 11.2) {               // 息継ぎ: 無音 → 像が定着する
+    vol = 0.0; cen = 0.34; pit = 0.42; zcr = 0.30;
+  } else if (T < 14.6) {               // サビ 2
+    vol = 0.58 + 0.22 * Math.sin(T * 1.9);
+    cen = 0.50 + 0.16 * Math.sin(T * 1.1);
+    pit = 0.58 + 0.18 * Math.sin(T * 1.6); zcr = 0.24;
+  } else {                             // 余韻
+    const u = (T - 14.6) / 3.4;
+    vol = 0.18 * (1 - u); cen = 0.30; pit = 0.35; zcr = 0.40;
+  }
+  const playing = vol > 0.08;
+  return { vol: Math.max(0, vol), cen, pit, zcr, playing };
+}
+
+// マイクの無い来訪者のためのゆっくりした呼吸(控えめな保持パターン)
+function demoSong(t) {
+  const s = 0.5 + 0.5 * Math.sin(t * 0.42);
+  const s2 = 0.5 + 0.5 * Math.sin(t * 0.17 + 1.3);
+  const vol = 0.08 + 0.26 * Math.pow(s, 2.0) * (0.5 + 0.5 * s2);
+  return {
+    vol, cen: 0.30 + 0.22 * s2, pit: 0.34 + 0.24 * s,
+    zcr: 0.24 + 0.14 * (1 - s), playing: vol > 0.12,
+  };
+}
+
+function micFeatures(dt) {
+  const an = aud.analyser;
+  an.getFloatTimeDomainData(aud.timeData);
+  const N = aud.timeData.length;
+  let sum = 0, zc = 0, prev = aud.timeData[0];
+  for (let i = 1; i < N; i++) {
+    const v = aud.timeData[i];
+    sum += v * v;
+    if ((v >= 0) !== (prev >= 0)) zc++;
+    prev = v;
+  }
+  const rms = Math.sqrt(sum / N);
+  const zcrRaw = Math.min(1, (zc / N) * 2.4);
+  an.getByteFrequencyData(aud.freqData);
+  const bins = aud.freqData.length;
+  const binHz = (aud.ctx ? aud.ctx.sampleRate : 48000) / (2 * bins);
+  let msum = 0, mw = 0, peak = 0, peakBin = 0;
+  const lo = Math.max(1, Math.floor(70 / binHz));
+  const hi = Math.min(bins - 1, Math.ceil(1200 / binHz));
+  for (let i = 0; i < bins; i++) {
+    const v = aud.freqData[i];
+    msum += v; mw += v * i;
+    if (i >= lo && i <= hi && v > peak) { peak = v; peakBin = i; }
+  }
+  const cenRaw = msum > 4 ? (mw / msum) / (bins * 0.5) : 0;
+  const f0 = peakBin * binHz;
+  const pitRaw = peak > 24 && f0 > 60
+    ? Math.min(1, Math.max(0, Math.log2(f0 / 80) / Math.log2(1200 / 80)))
+    : aud.pitS;
+  const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
+  aud.rmsF += (rms - aud.rmsF) * k(0.05);
+  aud.rmsM += (rms - aud.rmsM) * k(0.45);
+  aud.rmsS += (rms - aud.rmsS) * k(1.4);
+  aud.cen += (cenRaw - aud.cen) * k(0.20);
+  aud.zcr += (zcrRaw - aud.zcr) * k(0.20);
+  aud.pitF += (pitRaw - aud.pitF) * k(0.06);
+  aud.pitS += (pitRaw - aud.pitS) * k(0.9);
+  // 感度: 基準を下げると小声でも筆が走る
+  const ref = 0.030 + 0.190 * (1 - params.micGain);
+  meters.rms = Math.min(1, aud.rmsF / ref);
+  meters.mid = Math.min(1, aud.rmsM / (ref * 0.95));
+  meters.sus = Math.min(1, aud.rmsS / (ref * 0.95));
+  meters.cen = Math.min(1, aud.cen * 1.15);
+  meters.zcr = aud.zcr;
+  meters.pitch = aud.pitF;
+  meters.vib = Math.min(1, Math.abs(aud.pitF - aud.pitS) * 9);
+  // onset(子音 / 弦のアタック): 速い RMS が遅い RMS を跨ぐ + ヒステリシス
+  aud.refr = Math.max(0, aud.refr - dt);
+  const thHi = aud.rmsS * 1.75 + 0.008 * (1.4 - params.micGain);
+  const thLo = aud.rmsS * 1.12 + 0.003;
+  if (aud.armed && aud.refr <= 0 && aud.rmsF > thHi && aud.rmsF > 0.006) {
+    aud.armed = false; aud.refr = 0.13;
+    meters.onset = Math.min(1, 0.55 + meters.rms * 0.7);
+  } else if (!aud.armed && aud.rmsF < thLo) {
+    aud.armed = true;
+  }
+}
+
+function scriptedFeatures(dt, song, onsetPeriod, clock) {
+  const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
+  aud.rmsF += (song.vol - aud.rmsF) * k(0.06);
+  aud.rmsM += (song.vol - aud.rmsM) * k(0.40);
+  aud.rmsS += (song.vol - aud.rmsS) * k(1.2);
+  aud.cen += (song.cen - aud.cen) * k(0.25);
+  aud.zcr += (song.zcr - aud.zcr) * k(0.25);
+  aud.pitF += (song.pit - aud.pitF) * k(0.08);
+  aud.pitS += (song.pit - aud.pitS) * k(0.9);
+  meters.rms = Math.min(1, aud.rmsF / 0.55);
+  meters.mid = Math.min(1, aud.rmsM / 0.40);
+  meters.sus = Math.min(1, aud.rmsS / 0.32);
+  meters.cen = aud.cen;
+  meters.zcr = aud.zcr;
+  meters.pitch = aud.pitF;
+  meters.vib = Math.min(1, Math.abs(aud.pitF - aud.pitS) * 7);
+  if (song.playing) {
+    while (clock.next <= artTime) {
+      meters.onset = Math.min(1, 0.5 + meters.rms * 0.8);
+      clock.next += onsetPeriod;
+    }
+  } else {
+    clock.next = Math.max(clock.next, artTime + onsetPeriod);
+  }
+}
+
+const fakeClock = { next: 1.4 };
+const demoClock = { next: 1.6 };
+
+// マイクが本当に音を運んでいるか。AudioContext が suspended のあいだ
+// アナライザは 0 を返し続けるので、そのまま使うと「ずっと静寂=定着したまま
+// 動かない」絵になる。走り出すまではデモ呼吸で繋ぐ。
+function micLive() {
+  return aud.mode === "mic" && aud.analyser && aud.ctx && aud.ctx.state === "running";
+}
+
+function updateAudio(dt) {
+  if (dt <= 0) return;
+  if (micLive()) {
+    micFeatures(dt);
+  } else if (aud.mode === "fake") {
+    scriptedFeatures(dt, fakeSong(artTime), 0.50, fakeClock);
+  } else {
+    scriptedFeatures(dt, demoSong(artTime), 1.8, demoClock);
+    meters.rms *= 0.85; meters.mid *= 0.9; meters.sus *= 0.9;   // デモの呼吸は控えめに
+  }
+  // 打ち込みは短いエンベロープとして消費される
+  if (meters.onset > 0.5 && !onsetLatch) {
+    onsetLatch = true;
+    relinkDirty = true;                          // その瞬間に線を繋ぎ直す
+    burstRespawn(Math.max(4, Math.round(activeP * 0.06)));
+  } else if (meters.onset < 0.2) onsetLatch = false;
+  meters.onset *= Math.exp(-dt * 5.5);
+
+  // 静寂(定着): 溜まるのはゆっくり、声で一瞬で崩れる
+  const loud = Math.min(1, Math.max(meters.rms * 1.05, meters.mid * 1.05));
+  const target = Math.max(0, 1 - loud);
+  const tc = target > stillV ? 0.50 : 0.08;
+  stillV += (target - stillV) * (1 - Math.exp(-dt / tc));
+
+  // 楽章: 声が続く間だけ溜まり、静寂で戻る。明暗の面とにじみを押し上げる。
+  const drive = meters.sus * 0.75 + meters.rms * 0.35;
+  arcV = Math.max(0, Math.min(1, arcV + dt * (drive - 0.16) * 0.085));
+}
+
+let micStarted = false;
+async function startMic() {
+  if (FAKE || micStarted) return;
+  micStarted = true;
+  if (!window.isSecureContext ||
+      !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    aud.err = "非対応"; micStarted = false; return;
+  }
+  try {
+    const st = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!st.getAudioTracks || st.getAudioTracks().length === 0)
+      throw new Error("no audio track");
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!aud.ctx) aud.ctx = new Ctx();
+    // resume() を await してはいけない。ユーザ操作前の Chrome では、この
+    // Promise は操作があるまで解決しないので、await するとここで永久に止まり、
+    // アナライザが作られず「マイクを許可したのにデモ呼吸のまま」になる。
+    // グラフだけ先に組み、実際に走り出したかは micLive() で判定する。
+    aud.ctx.resume().catch(() => { /* needs a gesture */ });
+    const src = aud.ctx.createMediaStreamSource(st);
+    aud.analyser = aud.ctx.createAnalyser();
+    aud.analyser.fftSize = 2048;
+    aud.analyser.smoothingTimeConstant = 0;
+    src.connect(aud.analyser);
+    aud.stream = st;
+    aud.timeData = new Float32Array(aud.analyser.fftSize);
+    aud.freqData = new Uint8Array(aud.analyser.frequencyBinCount);
+    aud.mode = "mic"; aud.err = "";
+  } catch (error) {
+    // マイクが無いのは致命的ではない: デモの呼吸で作品は生き続ける
+    aud.analyser = null; aud.mode = "demo"; micStarted = false;
+    const name = error && error.name ? error.name : "";
+    aud.err = name === "NotAllowedError" ? "許可なし"
+      : (name === "NotFoundError" ? "見つからない" : "使用不可");
+    console.warn("ikitsugi: microphone unavailable — " + (name || error));
+  }
+}
+function stopMic() {
+  if (aud.stream) { aud.stream.getTracks().forEach(t => t.stop()); aud.stream = null; }
+  aud.analyser = null;
+  if (aud.mode === "mic") aud.mode = "demo";
+}
+$("micRetry").addEventListener("click", () => {
+  stopMic(); micStarted = false; aud.err = ""; startMic();
+});
+// ブラウザは新しい AudioContext をユーザ操作まで停止させる
+const resumeAudio = () => {
+  if (aud.ctx && aud.ctx.state === "suspended") aud.ctx.resume();
+  if (!FAKE && !micStarted && aud.mode !== "mic") startMic();
+};
+window.addEventListener("pointerdown", resumeAudio, { passive: true });
+window.addEventListener("keydown", resumeAudio);
+
+/* ========================================================================
+ *  声 → 線。すべてのマッピングをここ一箇所に集めてある。
+ *  「声の効き」= 0 で V は完全に中立 ⇒ 元のラインアートそのままになる。
+ * ===================================================================== */
+const V = {
+  stepMul: 1, jitMul: 1, inkMul: 1, edgeMul: 1, silMul: 1,
+  pers: 0.90, glow: 0.22, glowR: 1, lines: 1, maskBoost: 1.35,
+  hatchA: 0, hatchS: 0, relink: 2, lift: 0.045, tint: 0,
+};
+function deriveVoice() {
+  const amt = params.voice;                 // 0 … 1.5
+  const a1 = Math.min(1, amt);
+  const m = meters, st = stillV;
+  const q = (x) => 1 + (x - 1) * amt;       // 中立(1)から amt だけ寄せる
+
+  // 声量: 筆が走り、揺れ、濃くなる。静寂では逆に落ち着く。
+  // 落とし過ぎないのが要点: 揺れを 0 近くまで削ると全部の点が尾根の頂点に
+  // 積み上がって線が短くなり、「定着」がかえって空っぽの絵になる。
+  V.stepMul = Math.max(0.05, q((1 + 2.4 * m.rms) * (1 - 0.55 * st)));
+  V.jitMul  = Math.max(0.02, q((1 + 2.6 * m.rms) * (1 - 0.62 * st)));
+  V.inkMul  = q(1 + 0.80 * m.rms + 1.20 * m.onset);
+  // 音高: 高い声で輪郭が締まる。静寂では少しだけ輪郭寄りになる(寄せ過ぎると
+  // 明暗の面が消えて、ただのエッジ検出の絵になってしまう)。
+  V.edgeMul = q((0.78 + 0.62 * m.pitch) * (1 + 0.30 * st));
+  V.silMul  = q(1 + 0.35 * st);
+  // 静寂で残像が伸びて像が定着する(0.972 まで)
+  const persTarget = params.persistence + (0.972 - params.persistence) * st;
+  V.pers = params.persistence + (persTarget - params.persistence) * a1;
+  // 息のノイズ = 墨のにじみ
+  V.glow  = params.glow * q(1 + 1.9 * m.zcr + 0.5 * m.onset) + 0.12 * arcV * a1;
+  V.glowR = q(1 + 1.1 * m.zcr);
+  // 持続する声で一筆がほどける。静寂で 1 本に戻る。
+  // pow で立ち上げを鈍らせる: 中くらいの声で 2〜3 本、張った声で 5 本まで。
+  const split = params.voiceSplit
+    ? Math.floor(Math.pow(m.sus, 1.5) * 4.0 * (1 - st) * a1) : 0;
+  V.lines = Math.max(1, Math.min(5, (params.lineCount | 0) + split));
+  // 持続する声は人型の外へはみ出す(声が身体からこぼれる)
+  V.maskBoost = 1.35 + 0.95 * m.sus * a1;
+  // 音高 = 筆致の向き。低い声で横、高い声で縦のハッチング。
+  V.hatchA = (0.12 + 0.88 * m.pitch) * Math.PI * 0.5;
+  V.hatchS = 0.75 * Math.min(1, m.sus * 1.25) * (1 - st) * a1;
+  // 声量で繋ぎ直しが速くなり、静寂では落ち着く
+  V.relink = Math.max(1, Math.round((params.relink | 0) * (1 - 0.55 * m.rms) + 4 * st * a1));
+  V.lift = params.contrast + 0.045 * st * a1;
+  V.tint = params.timbre * Math.min(1, 0.35 + amt);
+}
+
+/* ========================================================================
+ *  Resize / pool changes
+ * ===================================================================== */
+function onPoolChanged() {
+  activeP = Math.min(params.points | 0, MAXP);
+  autoReduced = false;
+  relinkDirty = true;
+}
+function rescaleParticles(oldFW, oldFH) {
+  const kx = FW / oldFW, ky = FH / oldFH;
+  for (let i = 0; i < MAXP; i++) {
+    px[i] = Math.min(FW - 1, px[i] * kx);
+    py[i] = Math.min(FH - 1, py[i] * ky);
+  }
+}
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(2, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(2, Math.round(canvas.clientHeight * dpr));
+  if (w !== canvas.width || h !== canvas.height) {
+    canvas.width = w; canvas.height = h;
+    const oldFH = FH;
+    FH = Math.max(48, Math.min(320, Math.round(FW * h / w)));
+    allocField(); rebuildMorton();
+    rescaleParticles(FW, oldFH);
+    rebuildTrail();
+    fieldReady = false; relinkDirty = true;
+  }
+}
+// CPU が苦しいときの一度だけの逃げ道: 場の解像度を 224 → 160 に落とす
+function downgradeField() {
+  if (fieldDowngraded) return;
+  fieldDowngraded = true;
+  const oldFW = FW, oldFH = FH;
+  FW = FW_LO;
+  FH = Math.max(48, Math.min(320, Math.round(FW * canvas.height / canvas.width)));
+  allocField(); rebuildMorton(); rescaleParticles(oldFW, oldFH);
+  fieldReady = false; relinkDirty = true;
+  console.warn("ikitsugi: CPU budget exceeded — field resolution reduced to " + FW + "px");
+}
+window.addEventListener("resize", resize);
+allocField(); rebuildMorton(); resize();
+
+/* ========================================================================
+ *  Render loop (with ~8.5 ms CPU budget + auto point reduction)
+ * ===================================================================== */
+let frameNo = 0, lastNow = performance.now(), artTime = 0;
+let fpsEMA = 0, cpuEMA = 0, lastReadout = 0, autoReduced = false, hotFrames = 0;
+let readyStamped = false;
+
+function frame(now) {
+  const dtRaw = (now - lastNow) / 1000; lastNow = now;
+  const dt = Math.min(0.05, Math.max(0, dtRaw));
+  artTime += dt;
+  fpsEMA = fpsEMA ? fpsEMA * 0.9 + (1 / Math.max(dt, 1e-3)) * 0.1 : 60;
+  resize();
+  frameNo++;
+
+  updateAudio(dt);
+  deriveVoice();
+
+  // FAKE は video を持たないので、場の更新をこのループで回す。実写では
+  // requestVideoFrameCallback 側なので、予算計測(t0)の外に置いて条件を揃える。
+  if (FAKE) updateField();
+
+  const t0 = performance.now();
+  if (camReady && fieldReady) {
+    if (!params.pause) stepParticles();          // 停止は動きだけを止める
+    if (relinkDirty || numStrips === 0 ||
+        (!params.pause && frameNo % Math.max(1, V.relink | 0) === 0)) relink();
+    fillVertices();                              // re-read order at fresh positions
+  }
+  const cpuMs = performance.now() - t0;
+  cpuEMA = cpuEMA * 0.9 + cpuMs * 0.1;
+
+  // --- BUDGET: keep CPU work under ~8.5 ms ---
+  if (camReady && fieldReady && !params.pause) {
+    if (cpuEMA > 8.5) {
+      hotFrames++;
+      if (hotFrames > 90 && !fieldDowngraded) { downgradeField(); hotFrames = 0; cpuEMA = 6; }
+      else if (activeP > 500) {
+        activeP = Math.max(500, Math.round(activeP * 0.9));
+        autoReduced = true; relinkDirty = true; cpuEMA = 6; // settle
+      }
+    } else {
+      hotFrames = Math.max(0, hotFrames - 1);
+      if (autoReduced && cpuEMA < 5 && activeP < (params.points | 0)) {
+        activeP = Math.min(params.points | 0, Math.round(activeP * 1.05) + 8);
+        relinkDirty = true;
+        if (activeP >= (params.points | 0)) autoReduced = false;
+      }
+    }
+  }
+
+  /* ---------- GL: persistence buffer ---------- */
+  const maskUsable = maskReady && !modelFailed;
+  const engaged = camReady && (FAKE || maskUsable || modelFailed);
+  if (camReady && trail) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, trail.fbo);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.enable(gl.BLEND);
+    // fade pass 1: multiply everything by `persistence` (black quad, alpha
+    // blend: dst ← dst·(1−a));  pass 2: subtract 1/255 so 8-bit residue
+    // actually reaches true black instead of plateauing at a dim gray.
+    gl.useProgram(progFade);
+    gl.bindVertexArray(quadVAO);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // 残像も墨の乗りも dt 正規化する(60fps 基準)。減衰だけ dt に合わせると、
+    // 30fps では1秒あたりの打ち込み回数が半分なので絵が薄くなる。両方を
+    // 同じ係数で伸ばすと、平衡濃度がフレームレートに依らなくなる。
+    const fadeK = Math.max(0.2, Math.min(4, dt * 60));
+    gl.uniform4f(uFade("uColor"), 0, 0, 0, 1 - Math.pow(V.pers, fadeK));
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.uniform4f(uFade("uColor"), 1 / 255, 1 / 255, 1 / 255, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.blendEquation(gl.FUNC_ADD);
+
+    // 本物のポリライン。加算合成なので重なりが密度になる。
+    // 1 パス目は素の筆圧、2 パス目は pow(w,2.2) で輪郭だけを二重に濃く。
+    if (engaged && totalVerts > 1) {
+      gl.useProgram(progLine);
+      gl.bindVertexArray(lineVAO);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.uniform2f(uLine("uRes"), canvas.width, canvas.height);
+      gl.uniform1f(uLine("uPointSize"), 1);
+      const passes = [[0, 0, 0.28, 1.0], [0.45, 0.45, 0.20, 2.2]];
+      for (const [oxp, oyp, al, wg] of passes) {
+        gl.uniform2f(uLine("uOffsetPx"), oxp, oyp);
+        gl.uniform4f(uLine("uColor"), 1, 1, 1, Math.min(1, al * fadeK));
+        gl.uniform1f(uLine("uWGamma"), wg);
+        for (let s = 0; s < numStrips; s++)
+          gl.drawArrays(gl.LINE_STRIP, drawFirst[s], drawCount[s]);
+      }
+    }
+    gl.disable(gl.BLEND);
+  }
+
+  /* ---------- GL: composite to screen ---------- */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  if (camReady) {
+    // mode 0 = camera passthrough while the model loads,
+    // mode 1 = line drawing, mode 2 = field debug (mask / contour)
+    let mode = engaged ? 1 : 0;
+    const dbg = params.showEdge ? inkF : (params.showMask ? maskF : null);
+    if (dbg && fieldReady) mode = 2;
+
+    if (mode === 0 && !FAKE && video.readyState >= 2) {   // upload only when needed
+      gl.bindTexture(gl.TEXTURE_2D, camTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    }
+    if (mode === 2) {                                     // tiny upload, debug only
+      for (let i = 0; i < debugField.length; i++) {
+        const v = dbg[i]; debugField[i] = (v > 1 ? 1 : v < 0 ? 0 : v) * 255;
+      }
+      gl.bindTexture(gl.TEXTURE_2D, fieldDebugTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, FW, FH, 0, gl.RED, gl.UNSIGNED_BYTE, debugField);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    }
+
+    const [sx, sy, ox, oy] = coverFit();
+    gl.useProgram(progFinal);
+    gl.bindVertexArray(quadVAO);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, trail.tex);
+    gl.uniform1i(uFinal("uTrail"), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, camTex);
+    gl.uniform1i(uFinal("uCam"), 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, fieldDebugTex);
+    gl.uniform1i(uFinal("uField"), 2);
+    gl.uniform2f(uFinal("uTexel"), 1 / canvas.width, 1 / canvas.height);
+    gl.uniform2f(uFinal("uUVScale"), sx, sy);
+    gl.uniform2f(uFinal("uUVOffset"), ox, oy);
+    gl.uniform1f(uFinal("uMirror"), params.mirror ? 1 : 0);
+    gl.uniform1f(uFinal("uGlow"), V.glow);
+    gl.uniform1f(uFinal("uGlowR"), V.glowR);
+    gl.uniform1f(uFinal("uLift"), V.lift);
+    gl.uniform1f(uFinal("uTimbre"), meters.cen);
+    gl.uniform1f(uFinal("uTint"), V.tint);
+    gl.uniform1i(uFinal("uMode"), mode);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // debug: the actual vertices the stroke visits
+    if (params.showPoints && mode !== 0) {
+      for (let i = 0; i < activeP; i++) {
+        ptsData[i * 2] = px[i] / FW; ptsData[i * 2 + 1] = py[i] / FH;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, ptsVBO);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, ptsData.subarray(0, activeP * 2));
+      gl.useProgram(progLine);
+      gl.bindVertexArray(ptsVAO);
+      gl.vertexAttrib1f(1, 1.0);          // 属性1は無効 ⇒ 汎用値で筆圧 1
+      gl.uniform2f(uLine("uRes"), canvas.width, canvas.height);
+      gl.uniform2f(uLine("uOffsetPx"), 0, 0);
+      gl.uniform1f(uLine("uPointSize"), 3);
+      gl.uniform1f(uLine("uWGamma"), 1);
+      gl.uniform4f(uLine("uColor"), 1, 0.35, 0.35, 1);
+      gl.drawArrays(gl.POINTS, 0, activeP);
+    }
+  }
+
+  /* ---------- readout ~2 Hz ---------- */
+  if (now - lastReadout > 500) {
+    lastReadout = now;
+    const km = pathLenPx >= 10000 ? (pathLenPx / 1000).toFixed(1) + "k" : pathLenPx.toFixed(0);
+    const seg = modelStatus === "ok" ? ` (${segDelegate} ${segCost.toFixed(0)}ms)` : "";
+    $("readout").textContent =
+      `fps ${fpsEMA.toFixed(0).padStart(3)}  pts ${activeP}${autoReduced ? " (自動調整)" : ""}\n` +
+      `線長 ${km} px  ·  線 ${V.lines}本  ·  場 ${FW}px\n` +
+      `モデル: ${modelStatus}${seg}`;
+    $("micState").textContent =
+      micLive() ? "入力中" :
+      aud.mode === "mic" ? "画面をクリックで開始" :
+      aud.mode === "fake" ? "合成 (fakesource=1)" :
+      ("デモ呼吸" + (aud.err ? " · " + aud.err : ""));
+    $("mRms").firstElementChild.style.width = (meters.rms * 100).toFixed(0) + "%";
+    $("mStill").firstElementChild.style.width = (stillV * 100).toFixed(0) + "%";
+  }
+
+  // 検証/サムネ用: 場と線が実際に出てから一度だけ立てる
+  if (!readyStamped && fieldReady && totalVerts > 1 && frameNo > 40) {
+    readyStamped = true; window.__artReady = true;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- PNG を保存 (preserveDrawingBuffer が最後のフレームを保つ) ---------- */
+$("saveBtn").addEventListener("click", () => {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `ikitsugi-${Date.now()}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, "image/png");
+});
+
+/* ---------- go ---------- */
+startCamera();
+loadModel();
+if (!FAKE) startMic();
+</script>
+</body>
+</html>

@@ -360,5 +360,15 @@
     "audio": false,
     "note": "合成の歌+動く合成人型で全駆動。prewarm で遅延が育ち二重像が出た状態を撮る。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
+  },
+  "opus5_ikitsugi": {
+    "query": "fakesource=1",
+    "warmMs": 3500,
+    "click": [],
+    "hide": [],
+    "readyFlag": true,
+    "audio": false,
+    "note": "合成人型+合成の歌で全駆動。歌の 1.2-8.2s は連続した有声区間なので、__artReady 後 3.5s だと必ず「声で線がほどけている」状態で撮れる(8.2-11.2s の息継ぎ=定着した細い輪郭線は絵が薄いのでサムネには使わない)。HUD は閉じるボタンが無いので hideCss で消す。",
+    "hideCss": "#hud,#hint{display:none!important}"
   }
 }

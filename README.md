@@ -45,3 +45,5 @@
 [https://dsflon.github.io/webgl2/opus5_hana.html](https://dsflon.github.io/webgl2/opus5_hana.html)
 
 [https://dsflon.github.io/webgl2/opus5_samoarinan.html](https://dsflon.github.io/webgl2/opus5_samoarinan.html)
+
+[https://dsflon.github.io/webgl2/opus5_ikitsugi.html](https://dsflon.github.io/webgl2/opus5_ikitsugi.html)
