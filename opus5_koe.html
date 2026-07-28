@@ -25,7 +25,8 @@
     3. 雨は肩にかかる — ぼかしたマスクの勾配=法線と上方マーチの遮蔽判定で、
        上を向いた面(肩・頭頂)だけが濡れる。腕の下側は乾いたまま。
        着弾は淡い閃光、濡れは重力で流れ落ちて身体を覆う。
-    4. 濡れた真綿は重くなる — 吸った繊維は暗く、束になる。反射で光らせない。
+    4. 濡れは実写の上に — 雨に打たれた服と髪は暗く沈み、色が抜ける(肩から)。
+       水滴の反射で光らせない。
     5. 声の光は胸から昇る — 光は空から降らず、歌っている身体の深部で湧き、
        上へ昇って肩と頭に満ちる。**実写の輝度が光を運ぶ**(顔や皺の明るい所が
        灯り、影は影のまま)ので、身体の実形に沿って灯る。ブルームで外へ僅かに
@@ -76,7 +77,7 @@
     声の光      声が身体に灯る光の量
     真綿        宙を漂う綿毛の量
     濡れの残り  濡れが残る強さ(=乾きにくさ)
-    風          風の強さ(雨の傾きと繊維の梳かれ)
+    風          風の強さ(雨の傾きと綿毛の流れ)
     音の感度    マイク入力のゲイン
     明るさ      画面全体の露出
     粒子        フィルムグレインの量
@@ -100,7 +101,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>OPUS5 · 声 — WebGL2 mic+cam voice as rain</title>
+    <title>OPUS5 · 声 — WebGL2 mic+cam rain and light</title>
     <style>
       :root {
         color-scheme: dark;
@@ -245,7 +246,7 @@
   </head>
 
   <body>
-    <canvas id="gl" aria-label="WebGL2 song of flowers webcam"></canvas>
+    <canvas id="gl" aria-label="WebGL2 声 — 雨と光のウェブカメラ作品"></canvas>
     <video id="video" playsinline muted autoplay></video>
 
     <button id="togglePanel" type="button" class="top-btn hidden"
@@ -253,7 +254,7 @@
     <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
     <div id="statusChip">起動中</div>
 
-    <section id="panel" class="panel" aria-label="Song of flowers controls"></section>
+    <section id="panel" class="panel" aria-label="声 のコントローラー"></section>
 
     <div id="overlay" role="status" aria-live="polite">
       <div class="overlay-card">
@@ -352,7 +353,7 @@
           ["glowAmt", "声の光", "声が身体に灯る光の量", 0, 1, 0.01],
           ["floss", "真綿", "宙を漂う綿毛の量", 0, 1, 0.01],
           ["soak", "濡れの残り", "濡れが残る強さ(=乾きにくさ)", 0, 1, 0.01],
-          ["wind", "風", "風の強さ(雨の傾きと繊維の梳かれ)", 0, 1, 0.01],
+          ["wind", "風", "風の強さ(雨の傾きと綿毛の流れ)", 0, 1, 0.01],
           ["micGain", "音の感度", "マイク入力のゲイン(小声で届かせるなら上げる)", 0, 1, 0.01],
           ["exposure", "明るさ", "画面全体の露出", 0.6, 1.4, 0.01],
           ["filmGrain", "粒子", "全面の静的グレイン", 0, 1, 0.01],
@@ -363,11 +364,12 @@
           <div class="panel-body">
           <h1>OPUS5 · 声</h1>
           <p>
-            あなたに向けて歌うと、声は雨になって降ります。ただし声は空中では見えず、
-            肩に触れた瞬間だけ見えます。映っている人は真綿でできていて、届いた声を
-            吸って暗く重くなり、濡れは乾ききりません。そして<strong>大声では届き
-            ません</strong> — 声を張ると雨は霧になって身体をすり抜けます。静かに、
-            長く。マイクとカメラは端末内で処理されます。
+            静けさには雨が降ります。夜の雨があなたの肩を濡らし、濡れは乾き
+            きりません。歌えば、声は身体の中で光になります —
+            <strong>歌い続けるほど光が満ちて、雨は上がって晴れていきます</strong>。
+            黙ればまた、静かな雨が戻ります。真綿の綿毛が風に吹かれて宙を漂い、
+            雲が暗がりをゆっくり渡ります。天候なので、一音では変わりません。
+            マイクとカメラは端末内で処理されます。
           </p>
           <div class="select-row">
             <span>デバッグ表示</span>
@@ -407,7 +409,7 @@
             <button id="micRetry" type="button">マイク再試行</button>
           </div>
           <div class="status">
-            <div id="readout">FPS -- / 解像度 -- / 繊維 -- / 雨 -- / 音 -- / 検知 --</div>
+            <div id="readout">FPS -- / 解像度 -- / 綿毛 -- / 雨 -- / 音 -- / 検知 --</div>
             <span class="badge">WebGL2 · Mic + MediaPipe · GPU Plants</span>
           </div>
           </div>
