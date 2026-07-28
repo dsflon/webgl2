@@ -370,5 +370,17 @@
     "audio": false,
     "note": "合成人型+合成の歌で全駆動。歌の 1.2-8.2s は連続した有声区間なので、__artReady 後 3.5s だと必ず「声で線がほどけている」状態で撮れる(8.2-11.2s の息継ぎ=定着した細い輪郭線は絵が薄いのでサムネには使わない)。HUD は閉じるボタンが無いので hideCss で消す。",
     "hideCss": "#hud,#hint{display:none!important}"
+  },
+  "opus5_koe": {
+    "query": "fakesource=1&prewarm=7",
+    "warmMs": 5000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "合成の歌は20秒ループ。prewarm=7 は「静かな持続」区間の終わり=声が最も届いている瞬間で、肩と頭頂が濡れて着弾が見える状態を撮る。張り上げ区間(8.4〜14秒)は乾いていくので避ける。",
+    "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
