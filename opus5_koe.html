@@ -1,0 +1,2703 @@
+<!doctype html>
+<!--
+  opus5_koe.html — WebGL2 マイク+カメラ →「声 / Voice」
+  森山直太朗「声」(映画『半落ち』主題歌)のための映像。
+  **あなたに向けて歌うと、声は雨になって降る。ただし声は空中では見えない。
+  あなたの肩に触れた瞬間だけ、見える。** カメラに映る人は真綿でできていて、
+  届いた声を吸って暗く重くなる。そして**大声では届かない** — 声を張ると雨は霧に
+  なって身体をすり抜ける。静かに、長く、穏やかな声だけが肩に着く。
+  派生元エンジン: opus5_hana.html(ImageSegmenter のモバイル手順・マイク解析・
+  合成の歌・カメラと UI と検証フック)。
+
+  様式解析(視覚的不変量。優先度 1>2>5>3>4>6):
+    1. 声は触れたところだけで見える — 落下中の雨は完全に不可視。人物のシルエットに
+       達した瞬間だけ着弾が光り、すぐ消える。空中に雨の線・粒・軌跡を一切描かない。
+       (声の可視化を波形やスペクトルのような読み取り表示で代用しない。それは声の
+        記述であって声ではない。)
+    2. あなたは真綿でできている — 人物は数千本の細い繊維の集合。マット・白・空気を
+       含む。輪郭は線ではなく毛羽で、繊維は輪郭の外へはみ出す。内部を平坦な白で
+       塗らない。
+    3. 濡れは上を向いた面から — 肩と頭頂が先に濡れ、腕の下側は乾いたまま。上に
+       身体がある場所(庇の下)は濡れない。マスク勾配の法線と、上方マーチによる
+       遮蔽判定で決める。
+    4. 濡れた真綿は重くなる — 吸った繊維は暗く、束になり、半透明になって垂れる。
+       水滴の反射で光らせない(光らせると「水のひと」になり、吸水が消える)。
+    5. 静けさが条件 — 雨量は音量ではなく**声の安定度**で決まる。閾値を超える音量では
+       雨が霧に変わり、身体をすり抜けて届かない。声を張るほど報われる設計の反転。
+    6. 確かな誇り — 濡れは乾ききらない。下限が 0 ではなく、届いたものは残る。
+       ただし上限があり発散しない。
+
+  パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
+    入力: カメラ映像 + ImageSegmenter / fakeScene(GLSL 室内+動く人型) + マイク or 合成の歌
+    [P0 scene]  cover-fit+mirror                        sceneA/B RGBA8 長辺≤1280
+    [P1 mask]   R=速いマスクEMA G=遅いマスクEMA BA=運動ベクトル  maskA/B★ ≤448
+    [P2 blur]   マスクのソフト化(法線を取るため。生マスクの勾配はブロックになる) softT★
+    [P3 wet]    濡れ場 ping-pong★。R=濡れ G=床(乾ききらない分) BA=流れ落ちる向き
+                注入 = 雨量 ×(上向きの面)×(上方マーチで庇に入っていない)×マスク
+                重力で下へ移流し、わずかに拡散し、床まで減衰して止まる
+    [P4 rain]   雨粒プール ping-pong(MRT 2枚, RAIN_W×RAIN_H)★
+                A=(x, y, encV(速度)) B=(齢, 大きさ, seed, 霧フラグ)
+                落下中は**描画しない**。マスクに入った瞬間に着弾の閃光を出して死ぬ。
+                霧粒はマスクを無視して通過し、堆積もしない
+    [P5 layer]  layerT★ を透明にクリアし前乗算アルファで重ねる:
+                真綿の繊維(instanced quad。乾=白くマット/濡=暗く束ねて垂れる)
+                → 着弾の閃光(instanced quad。声が見える唯一の場所)
+    [P6 bloom]  layerT の明部を抽出 → 2段ダウンサンプル+ぼかし        b1 b2
+    [P7 comp]   夜の実写(暗く)→ 真綿の層を前乗算合成 → ブルーム →
+                胸のうちの確かな誇り(濡れの床が最も高い所の淡い温度)→
+                肩付きトーンマップ・粒子・周辺減光
+
+  実行方法:
+    python3 -m http.server 8899 → http://localhost:8899/opus5_koe.html を開き
+    カメラとマイクを許可(どちらも端末内で処理。外部送信なし)。
+    (カメラ/マイク API はセキュアコンテキスト必須。file:// では動きません)
+    **静かに、長く歌ってください。張り上げると届きません。**
+    ?fakesource=1 … カメラ/マイク不使用。合成室内+動く人型+合成の歌(20秒ループ。
+                    静かな持続区間を含む)で全パス駆動(検証用)
+    ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
+    ?prewarm=<秒> … 初回描画前に固定 dt で早送りし「濡れが育った」絵を出す(検証用)
+    ?fakeseg=1   … 実カメラのマスク経路を合成マスクで駆動(Y反転の検査)
+    ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
+    デバッグ表示: 0=最終 1=マスクと法線 2=濡れ場 3=音の特徴量(安定度を含む)
+                  4=雨と繊維 5=配色標本
+
+  スライダーの説明:
+    声の雨      声が雨になる量
+    静けさの条件 声を張ったときに霧へ転じる厳しさ(既定は中間)
+    真綿の毛羽  繊維の長さと毛羽立ち
+    濡れの残り  濡れが残る強さ(=乾きにくさ)
+    風          風の強さ(雨の傾きと繊維の梳かれ)
+    音の感度    マイク入力のゲイン
+    明るさ      画面全体の露出
+    粒子        フィルムグレインの量
+
+  依存: MediaPipe tasks-vision(ImageSegmenter)とそのモデルのみ。他は自己完結。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>OPUS5 · 花 — WebGL2 mic+cam song of flowers</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05070a;
+        --ink: #f0e6ea;
+        --muted: rgba(240, 230, 236, 0.66);
+        --panel: rgba(14, 11, 18, 0.85);
+        --line: rgba(240, 230, 236, 0.16);
+        --accent: #e6849f;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #07070d, #0d0a12 55%, #05070a);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      video {
+        position: fixed; width: 1px; height: 1px; left: -10px; top: -10px;
+        opacity: 0; pointer-events: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(240, 230, 236, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(240, 230, 236, 0.14); }
+      #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
+      @media (pointer: coarse) { #flipCamera { display: block; } }
+      #statusChip {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 11; padding: 7px 12px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: var(--panel); font-size: 10px; letter-spacing: 0.1em;
+        pointer-events: none; transition: opacity 0.6s ease; white-space: nowrap;
+      }
+      #statusChip.hidden { opacity: 0; }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(240, 230, 236, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(240, 230, 236, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .meter {
+        margin-top: 10px; height: 5px; border-radius: 3px; overflow: hidden;
+        background: rgba(240, 230, 236, 0.10);
+      }
+      .meter i {
+        display: block; height: 100%; width: 0%;
+        background: linear-gradient(90deg, #7fd4c1, #e6849f, #f0c46a);
+        transition: width 0.08s linear;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(6, 5, 10, 0.76);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
+      .overlay-card button {
+        margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(240, 230, 236, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 song of flowers webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
+    <div id="statusChip">起動中</div>
+
+    <section id="panel" class="panel" aria-label="Song of flowers controls"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces BOTH inputs: a synthetic room + a full-body
+        // figure that drifts and swings its limbs stands in for the camera, and
+        // a scripted 18s song (intro / verse / chorus / bridge / fade) stands in
+        // for the microphone. Neither MediaPipe nor WebAudio is ever touched, so
+        // the whole growth pipeline runs offline and deterministically.
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: plant stages, petal physics, the audio EMAs,
+        // the fake figure and every mask EMA stop → deterministic still frame.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
+        // KNOWN orientation (person in the TOP ~60% of image space, top-left
+        // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
+        // With the Y-flip correct the flowers must sprout around the TOP figure;
+        // if they gather at the bottom the flip regressed (CRAFT §C1).
+        const FAKESEG = QUERY.get("fakeseg") === "1";
+        // ?fakescale=<f> scales the synthetic figure (real-scale divergence test,
+        // CRAFT §C2). f>1 = big/close, f<1 = far/small. Default 1.0.
+        const FAKESCALE = (() => {
+          const v = parseFloat(QUERY.get("fakescale"));
+          return Number.isFinite(v) && v > 0.05 ? Math.min(4, v) : 1.0;
+        })();
+        // ?prewarm=<sec> fast-forwards the simulation with a fixed dt before the
+        // first present, so a screenshot shows grown flowers instead of bare
+        // ground (the verification GPU is far too slow to warm in real time —
+        // CRAFT §C4). Chunked + glSync'd so the compositor is never parked.
+        const PREWARM = (() => {
+          const v = parseFloat(QUERY.get("prewarm"));
+          return Number.isFinite(v) && v > 0 ? Math.min(30, v) : 0;
+        })();
+        const PREWARM_DT = 1 / 24;
+
+        const DEBUG_MODES = [
+          "最終",
+          "マスクと法線",
+          "濡れ場",
+          "音の特徴量",
+          "雨と繊維",
+          "配色標本",
+        ];
+
+        const DEFAULTS = {
+          rain: 0.60,
+          quiet: 0.50,      // 2026-07-28 ユーザー判断: 静けさの条件は中間から
+          floss: 0.55,
+          soak: 0.50,
+          wind: 0.45,
+          micGain: 0.55,
+          exposure: 1.0,
+          filmGrain: 0.18,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["rain", "声の雨", "声が雨になる量", 0, 1, 0.01],
+          ["quiet", "静けさの条件", "声を張ったときに霧へ転じる厳しさ", 0, 1, 0.01],
+          ["floss", "真綿の毛羽", "繊維の長さと毛羽立ち", 0, 1, 0.01],
+          ["soak", "濡れの残り", "濡れが残る強さ(=乾きにくさ)", 0, 1, 0.01],
+          ["wind", "風", "風の強さ(雨の傾きと繊維の梳かれ)", 0, 1, 0.01],
+          ["micGain", "音の感度", "マイク入力のゲイン(小声で届かせるなら上げる)", 0, 1, 0.01],
+          ["exposure", "明るさ", "画面全体の露出", 0.6, 1.4, 0.01],
+          ["filmGrain", "粒子", "全面の静的グレイン", 0, 1, 0.01],
+        ];
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>OPUS5 · 花</h1>
+          <p>
+            歌とギターの音で花が育ちます。声が続くと芽が出て茎が伸び、弦のアタックで
+            蕾がほどけ、盛り上がりで一斉に開花し、静けさが続けば萎れて散ります。
+            声色が色相、音高が茎の高さ、息のノイズが綿毛になります。人物は実写のまま、
+            背景は周縁から夜の花園へ溶けます。マイクとカメラは端末内で処理されます。
+          </p>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>左右反転(鏡)</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>ゆらぎを停止</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="meter" aria-label="入力音量"><i id="levelBar"></i></div>
+          <div class="buttons">
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
+            <button id="micRetry" type="button">マイク再試行</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 解像度 -- / 株 -- / 花びら -- / 音 -- / 検知 --</div>
+            <span class="badge">WebGL2 · Mic + MediaPipe · GPU Plants</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode = state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `opus5-hana-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the plant/petal state and the HDR flower
+        // layer from stalling in 8 bits. Signed velocity is offset-encoded into
+        // [0,1] (encV) so the RGBA8 fallback runs the same shaders, coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        // Renderer probe → pool sizing. Software (SwiftShader in the verifier)
+        // and coarse-pointer (mobile) devices get smaller pools.
+        const dbgRI = gl.getExtension("WEBGL_debug_renderer_info");
+        const RENDERER = dbgRI ? gl.getParameter(dbgRI.UNMASKED_RENDERER_WEBGL) : "";
+        const IS_SOFT = /swiftshader|llvmpipe|software|basic|subzero/i.test(RENDERER);
+        const COARSE = window.matchMedia("(pointer: coarse)").matches;
+
+        // 真綿の繊維. Attributeless instanced quads: each instance hashes itself
+        // to a position and only draws where the mask is. The pool is FIXED, so
+        // the floss can never accumulate — and it must be big enough that the
+        // body reads as a fibrous MASS rather than as scattered hairs (§B1).
+        const FLOSS_N = IS_SOFT ? 12000 : (COARSE ? 26000 : 64000);
+
+        // 声の雨. Free particles, two MRT attachments. Sized to the live
+        // population: drops are invisible in flight and only matter at the
+        // instant of contact, so this is a throughput pool, not a spray.
+        const RAIN_SIDE = IS_SOFT ? 40 : (COARSE ? 56 : 80);
+        const RAIN_W = RAIN_SIDE;
+        const RAIN_H = RAIN_SIDE;
+        const RAIN_N = RAIN_W * RAIN_H;         // 1600 / 3136 / 6400
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hashes + value noise + fbm + curl noise (unit
+        // scaled) + the 2D SDF helpers. Grain, mottle and every placement seed
+        // are derived from POSITION or INDEX only — never from uTime (repo rule)
+        // so they stay deterministic under ?freeze=1.
+        const CHUNK_NOISE = `
+          const float PI2 = 6.28318530718;
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          vec2 hash22(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            p3 += dot(p3, p3.yxz + 33.33);
+            return fract((p3.xx + p3.yz) * p3.zy);
+          }
+          float h11(float p) {
+            p = fract(p * 0.1031);
+            p *= p + 33.33;
+            p *= p + p;
+            return fract(p);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm4(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 4; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          float fbm(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 5; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          // curl of value noise, normalised to ≈ unit scale (a raw finite
+          // difference divided by 2e reaches ~20 and turns a "small" coefficient
+          // into a 200px warp — CRAFT / kiin-seido §8-3).
+          vec2 curlN(vec2 p) {
+            float e = 0.35;
+            float n1 = vnoise(p + vec2(0.0, e)) - vnoise(p - vec2(0.0, e));
+            float n2 = vnoise(p + vec2(e, 0.0)) - vnoise(p - vec2(e, 0.0));
+            return vec2(n1, -n2) * 1.6;
+          }
+          float sdSeg(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+        `;
+
+        // Shared: [0,1] offset encoding for signed fields. The clamp doubles as
+        // the mandatory velocity clamp (no NaN blow-ups).
+        const CHUNK_ENC = `
+          const float VMAX = 2.4;
+          vec2 encV(vec2 v) { return clamp(v, -VMAX, VMAX) / (2.0 * VMAX) + 0.5; }
+          vec2 decV(vec2 e) { return (e - 0.5) * (2.0 * VMAX); }
+        `;
+
+        // Shared: the ?fakesource=1 synthetic scene — a lit room (never black)
+        // with a full-body figure that drifts, bobs and swings its limbs. The
+        // swing is what makes the motion field, the gusts and the edge-band
+        // sprouting testable offline. uScale is ?fakescale= (CRAFT §C2).
+        const CHUNK_FAKE = `
+          float humanDist(vec2 p, float cx, float swing, float sc) {
+            vec2 anchor = vec2(cx, 0.46);
+            p = (p - anchor) / max(sc, 0.05) + anchor;
+            float d = 1e9;
+            vec2 head = vec2(cx, 0.80);
+            d = min(d, length((p - head) / vec2(1.0, 1.14)) - 0.062);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.745), vec2(cx, 0.685)) - 0.024, 0.018);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.685), vec2(cx, 0.40)) - 0.098, 0.045);
+            d = smin2(d, sdSeg(p, vec2(cx - 0.115, 0.665), vec2(cx + 0.115, 0.665)) - 0.052, 0.04);
+            // arms: shoulder → elbow → hand, driven by the swing phase (the
+            // strumming/fretting arm of the singer)
+            float aL = 2.55 + 0.62 * swing;
+            vec2 shL = vec2(cx - 0.115, 0.655);
+            vec2 elL = shL + 0.135 * vec2(cos(aL), sin(aL) * 0.7 - 0.35);
+            vec2 haL = elL + 0.125 * vec2(cos(aL - 0.55 - 0.5 * swing),
+                                          sin(aL - 0.55 - 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shL, elL) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elL, haL) - 0.028, 0.028);
+            float aR = 0.59 - 0.62 * swing;
+            vec2 shR = vec2(cx + 0.115, 0.655);
+            vec2 elR = shR + 0.135 * vec2(cos(aR), sin(aR) * 0.7 - 0.35);
+            vec2 haR = elR + 0.125 * vec2(cos(aR + 0.55 + 0.5 * swing),
+                                          sin(aR + 0.55 + 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shR, elR) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elR, haR) - 0.028, 0.028);
+            // legs: hip → knee → foot
+            vec2 hipL = vec2(cx - 0.05, 0.405);
+            vec2 knL = hipL + vec2(-0.028 - 0.05 * swing, -0.15);
+            vec2 ftL = knL + vec2(-0.012 + 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipL, knL) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knL, ftL) - 0.034, 0.03);
+            vec2 hipR = vec2(cx + 0.05, 0.405);
+            vec2 knR = hipR + vec2(0.028 + 0.05 * swing, -0.15);
+            vec2 ftR = knR + vec2(0.012 - 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipR, knR) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knR, ftR) - 0.034, 0.03);
+            // the guitar: a body ellipse across the lap plus a neck to the left
+            vec2 gc = vec2(cx + 0.055, 0.44);
+            float gd = length((p - gc) / vec2(1.25, 1.0)) - 0.085;
+            vec2 nk0 = gc + vec2(-0.09, 0.045);
+            vec2 nk1 = gc + vec2(-0.30, 0.130);
+            gd = min(gd, sdSeg(p, nk0, nk1) - 0.016);
+            d = min(d, gd);
+            return d;
+          }
+          vec3 fakeScene(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            // a lit room, not a dim gradient: the synthetic scene is the only
+            // proxy for a real background, so it must sit in a realistic
+            // exposure range or every judgement about the flowers over it is wrong
+            vec3 top = vec3(0.30, 0.31, 0.36);
+            vec3 bot = vec3(0.46, 0.42, 0.37);
+            vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
+            bg += 0.03 * (0.5 + 0.5 * sin(uv.x * 30.0) - 0.5);
+            float horizon = exp(-pow((uv.y - 0.40) * 6.0, 2.0));
+            bg = mix(bg, vec3(0.55, 0.51, 0.45), 0.16 * horizon);
+            bg += 0.04 * (vnoise(uv * 5.0) - 0.5);
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            float d = humanDist(p, cx, swing, sc);
+            float m = 1.0 - smoothstep(-0.004, 0.008, d);
+            // body-local coords (same transform humanDist uses) so the costume
+            // regions ride with ?fakescale=. The figure needs INTERNAL tonal
+            // structure — a flat silhouette makes the grading and the
+            // figure/flower interplay impossible to judge offline.
+            vec2 q = (p - vec2(cx, 0.46)) / max(sc, 0.05) + vec2(cx, 0.46);
+            float folds = 0.86 + 0.30 * fbm(q * vec2(34.0, 20.0));
+            float upper = smoothstep(0.40, 0.46, q.y);
+            vec3 person = mix(vec3(0.24, 0.26, 0.33), vec3(0.68, 0.64, 0.58), upper);
+            person = mix(person, vec3(0.16, 0.19, 0.29),
+              smoothstep(0.01, -0.05, q.x - cx) * upper * 0.75);
+            person = mix(person, vec3(0.15, 0.18, 0.27),
+              smoothstep(0.60, 0.69, q.y) * 0.85);
+            person = mix(person, vec3(0.36, 0.25, 0.16),
+              exp(-pow((q.y - 0.44) * 55.0, 2.0)));            // the guitar body
+            person *= folds;
+            float headM = 1.0 - smoothstep(0.050, 0.070,
+              length((q - vec2(cx, 0.80)) / vec2(1.0, 1.14)));
+            vec3 skin = vec3(0.62, 0.49, 0.42);
+            skin *= 1.0 - 0.45 * exp(-pow((q.y - 0.815) * 240.0, 2.0));  // brow
+            skin *= 1.0 - 0.28 * exp(-pow((q.y - 0.772) * 190.0, 2.0));  // mouth
+            person = mix(person, skin, headM);
+            person *= 0.78 + 0.34 * smoothstep(0.05, 0.80, q.y);
+            return clamp(mix(bg, person, m), 0.0, 1.0);
+          }
+          float fakeMask(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            return 1.0 - smoothstep(-0.006, 0.010, humanDist(p, cx, swing, sc));
+          }
+        `;
+
+        // Shared: the flower palette. A CONTINUOUS ramp (not bands) because the
+        // hue is a continuous function of the singing timbre: dark-warm at the
+        // low end (chest voice / bass strings) → bright-cool at the high end
+        // (falsetto / bright strum). Deterministic; no time anywhere.
+        // 夜と真綿。彩度はほとんど無い。真綿は「白」だが純白ではなく、
+        // 生成りの絹の白(僅かに黄がかる)。濡れるとその白が抜けて暗い灰へ落ちる。
+        const CHUNK_PALETTE = `
+          const vec3 NIGHT = vec3(0.026, 0.030, 0.040);   // 夜の地
+          const vec3 FLOSS_DRY = vec3(0.955, 0.945, 0.915); // 生成りの絹
+          const vec3 FLOSS_WET = vec3(0.225, 0.240, 0.280); // 吸って重くなった絹
+          const vec3 VOICE = vec3(0.860, 0.900, 0.960);   // 着弾の閃光(青白い)
+          const vec3 PRIDE = vec3(0.940, 0.870, 0.760);   // 胸のうちの温度
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+        `;
+
+        // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
+        // working scene buffer. Everything downstream is screen-aligned to it.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeScene(vUv, uCx, uCy, uSwing, uAspect, uScale), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.10, 0.10, 0.13),
+                vec3(0.20, 0.18, 0.24), vUv.y), 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scale = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scale + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — the mask / motion field:
+        //   R = fast person-mask EMA (the body as it is NOW; the sprouting band
+        //       and the "keep the singer legible" core come from this)
+        //   G = slow person-mask EMA (the body a moment ago; R-G is where the
+        //       body just moved, which is where sprouting is favoured)
+        //   BA = motion field (frame-difference pseudo flow, EMA-smoothed) — the
+        //       gust that blows petals around when the performer moves
+        const maskFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uScenePrev;
+          uniform sampler2D uPrev;
+          uniform sampler2D uSeg;
+          uniform vec2 uTexel;
+          uniform vec2 uSegScale;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform float uDt;
+          uniform float uAlphaFast;
+          uniform float uAlphaSlow;
+          uniform float uAlphaMot;
+          uniform int uReset;
+          uniform int uSource;
+          uniform int uMirror;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_FAKE}
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            float rawMask = 0.0;
+            if (uSource == 0) {
+              rawMask = fakeMask(vUv, uCx, uCy, uSwing, uAspect, uScale);
+            } else if (uSource == 1) {
+              // Real-camera segmentation mask. Coordinate convention matched to
+              // kiin-seido / gas-head so the mask overlaps the real person
+              // pixel-for-pixel with the P0 background:
+              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
+              //     to the P0 scene, so scene and mask stay in register.
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — the same crop as P0.
+              //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
+              //     image-space (top-left origin) and segTexture is uploaded
+              //     UNPACK_FLIP_Y=false, while the video texture is uploaded
+              //     UNPACK_FLIP_Y=true (upright). Without the explicit flip the
+              //     mask lands upside-down (CRAFT §C1: "only the face" bug).
+              vec2 uv = vUv;
+              if (uMirror == 1) uv.x = 1.0 - uv.x;
+              vec2 suv = (uv - 0.5) * uSegScale + 0.5;
+              float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              // firm the soft confidence mask toward 0/1 so the real body is a
+              // solid figure (the singer must stay legible inside it)
+              rawMask = smoothstep(0.32, 0.70, rawSeg);
+            }
+            vec4 prev = texture(uPrev, vUv);
+            float fastM = uReset == 1 ? rawMask : mix(prev.r, rawMask, uAlphaFast);
+            float slowM = uReset == 1 ? rawMask : mix(prev.g, rawMask, uAlphaSlow);
+
+            // pseudo optical flow from the scene frame difference
+            vec3 cur = texture(uScene, vUv).rgb;
+            float l0 = lumaf(texture(uScenePrev, vUv).rgb);
+            float l1 = lumaf(cur);
+            float lx = lumaf(texture(uScene, vUv + vec2(uTexel.x, 0.0)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(uTexel.x, 0.0)).rgb);
+            float ly = lumaf(texture(uScene, vUv + vec2(0.0, uTexel.y)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(0.0, uTexel.y)).rgb);
+            vec2 grd = vec2(lx / (2.0 * uTexel.x), ly / (2.0 * uTexel.y));
+            float it = (l1 - l0) / max(uDt, 1e-3);
+            vec2 flowRaw = -it * grd / (dot(grd, grd) + 40.0);
+            flowRaw = clamp(flowRaw, vec2(-VMAX), vec2(VMAX));
+            vec2 flow = uReset == 1 ? vec2(0.0)
+              : mix(decV(prev.ba), flowRaw, uAlphaMot);
+
+            fragColor = vec4(clamp(fastM, 0.0, 1.0), clamp(slowM, 0.0, 1.0), encV(flow));
+          }
+        `;
+
+        // Separable Gaussian (all channels). Softens the mask edge into the
+        // sprouting band (P2), builds the wide proximity aura (P3) and blurs the
+        // flower layer for the bloom (P7).
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -10; i <= 10; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P3 — the WETNESS FIELD. Ping-ponged, one texel per screen cell:
+        //   R = wetness now
+        //   G = the FLOOR it can never dry below (確かな誇り — what arrived stays)
+        //   BA = the direction the water is running (encoded)
+        //
+        // Where the voice lands is geometry, not decoration. Rain arrives from
+        // above, so it can only wet a surface that FACES UP and is not standing
+        // under something. Both of those are read off the mask:
+        //   * facing up   = the blurred mask gradient points up (-grad.y)
+        //   * not sheltered = a short march upward finds no body above
+        // 「そっと肩にかかる雨」: the shoulders and the crown wet first, and the
+        // underside of an arm stays dry. Skip either test and the whole body
+        // wets uniformly, which is a wash, not rain.
+        const wetFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrev;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform vec2 uTexel;
+          uniform float uDt;
+          uniform float uAspect;
+          uniform float uRain;
+          uniform float uSoak;
+          uniform float uReach;      // how much of the voice is arriving as rain
+          uniform int uReset;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_PALETTE}
+          void main() {
+            vec4 prev = texture(uPrev, vUv);
+            float body = texture(uMask, vUv).r;
+            float soft = texture(uSoft, vUv).r;
+
+            // the surface normal of the silhouette, from the SOFTENED mask —
+            // the raw confidence mask has block edges and its gradient is noise
+            float gx = texture(uSoft, vUv + vec2(uTexel.x, 0.0)).r -
+                       texture(uSoft, vUv - vec2(uTexel.x, 0.0)).r;
+            float gy = texture(uSoft, vUv + vec2(0.0, uTexel.y)).r -
+                       texture(uSoft, vUv - vec2(0.0, uTexel.y)).r;
+            vec2 nrm = -normalize(vec2(gx, gy) + vec2(1e-6));
+            // uv.y grows upward here (P0 uploads the video upright), so a
+            // surface facing the sky has a normal with POSITIVE y
+            float faceUp = clamp(nrm.y, 0.0, 1.0);
+            faceUp = pow(faceUp, 0.75);
+
+            // 庇の下は濡れない: march up and see whether a body is in the way
+            float shelter = 0.0;
+            for (int k = 1; k <= 10; k++) {
+              float up = float(k) * 4.0 * uTexel.y;
+              shelter = max(shelter, texture(uSoft, vUv + vec2(0.0, up)).r *
+                (1.0 - float(k) / 12.0));
+            }
+            float sky = 1.0 - smoothstep(0.20, 0.70, shelter);
+
+            // the rain only wets what it can reach
+            float gain = uReach * uRain * body * faceUp * sky;
+            // a little unevenness so the wet edge is not a clean band
+            gain *= 0.70 + 0.60 * vnoise(vUv * vec2(uAspect, 1.0) * 26.0);
+            gain *= 1.65;
+
+            float wet = uReset == 1 ? 0.0 : prev.r;
+            float floor0 = uReset == 1 ? 0.0 : prev.g;
+            wet += uDt * gain * 1.35;
+
+            // Gravity. This carries the whole invariant: the wetting SITE is a
+            // thin band on the upward-facing contour (a silhouette has no other
+            // 3D information), so unless the water actually runs down the body
+            // the wetness covers about 1% of the figure and cannot be read at
+            // all — which is exactly what happened at 1.1.
+            float above = texture(uPrev, vUv + vec2(0.0, uTexel.y * 3.4)).r;
+            float bodyAbove = texture(uSoft, vUv + vec2(0.0, uTexel.y * 3.4)).r;
+            wet += uDt * 3.4 * max(above - wet, 0.0) * bodyAbove * body;
+
+            // sideways spread is tiny — silk floss wicks, it does not flow
+            float lr = texture(uPrev, vUv + vec2(uTexel.x * 1.6, 0.0)).r +
+                       texture(uPrev, vUv - vec2(uTexel.x * 1.6, 0.0)).r;
+            wet += uDt * 0.22 * (lr * 0.5 - wet) * body;
+
+            // 確かな誇り: the floor rises with what has arrived and saturates.
+            // Bounded on purpose — an unbounded floor would slowly whiten the
+            // whole figure and the longrun check would (rightly) fail.
+            float cap = 0.20 + 0.55 * uSoak;
+            floor0 += uDt * 0.055 * uSoak * max(wet - floor0, 0.0);
+            floor0 = min(floor0, cap);
+            // off the body there is nothing to hold water
+            floor0 *= smoothstep(0.05, 0.35, body);
+
+            // drying back to the floor
+            float dry = mix(0.30, 0.055, uSoak);
+            wet += (floor0 - wet) * (1.0 - exp(-uDt * dry));
+            wet = clamp(wet, 0.0, 1.0);
+            wet *= smoothstep(0.02, 0.30, body);
+
+            vec2 run = vec2(0.0, -1.0) * wet;
+            fragColor = vec4(wet, clamp(floor0, 0.0, 1.0), encV(run));
+          }
+        `;
+
+        // P4 — the RAIN. 「この声が…あなたに見える日まで」
+        //
+        // The drops are NEVER drawn while they fall. They exist only to find the
+        // body: the instant one enters the silhouette it flares once and dies.
+        // That flare is the only place the voice is visible anywhere in the
+        // picture, which is the whole proposition — drawing the rain in the air
+        // would turn this into a rain effect and throw the idea away.
+        //
+        // A drop that is born while the voice is being pushed is born as MIST
+        // (B.w = 1): it ignores the body, passes straight through, deposits
+        // nothing, and is likewise invisible. 「何も語らず静かに」 is enforced
+        // here, in what the particle is allowed to become.
+        const rainFS = `#version 300 es
+          precision highp float;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform sampler2D uMask;
+          uniform float uTexW;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uSeed;
+          uniform float uAspect;
+          uniform float uRain;
+          uniform float uWind;
+          uniform float uReach;      // 0 = every drop is mist, 1 = every drop lands
+          uniform vec4 uAudA;        // rms, centroid, steadiness, onset
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          void main() {
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexW + float(tc.x);
+            vec4 A = texture(uStateA, gl_FragCoord.xy / vec2(textureSize(uStateA, 0)));
+            vec4 B = texture(uStateB, gl_FragCoord.xy / vec2(textureSize(uStateB, 0)));
+            if (uDt <= 0.0) { outA = A; outB = B; return; }
+            vec2 pos = A.xy;
+            vec2 vel = decV(A.zw);
+            float age = B.x;      // >= 1 = dormant; 0..1 falling; < 0 = flaring
+            float size = B.y;
+            float seed = B.z;
+            float mist = B.w;
+
+            float wind = (0.10 + 0.55 * uWind) *
+              (0.6 + 0.5 * sin(uTime * 0.21 + seed * 5.0));
+
+            if (age >= 0.999) {
+              // spawn along the top. The RATE follows the voice that is actually
+              // arriving, so a shouted voice makes barely any rain at all — it
+              // makes mist, and mist that nobody can see.
+              float rate = (2.0 + 26.0 * uRain) * (0.18 + 1.5 * uReach) *
+                uDt / max(uTexW * uTexW, 1.0);
+              if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate * uTexW * uTexW / 64.0) {
+                seed = hash12(vec2(idx * 13.1, uSeed * 6.7));
+                pos = vec2(hash12(vec2(idx * 4.17, uSeed * 3.31)) * 1.4 - 0.2, 1.06);
+                vel = vec2(wind * 0.30, -(0.55 + 0.45 * hash12(vec2(seed * 7.0, 2.0))));
+                age = 0.001;
+                size = 0.0055 + 0.0075 * hash12(vec2(seed * 21.0, 3.3));
+                // 声を張ると霧になる。uReach は安定度と音量から作られる。
+                mist = hash12(vec2(idx * 5.1, uSeed * 2.2)) > uReach ? 1.0 : 0.0;
+              }
+            } else if (age < 0.0) {
+              // flaring: a contact lasts a fraction of a second and is over
+              age += uDt * 5.5;
+              if (age >= 0.0) age = 1.0;
+            } else {
+              vel.x += (wind - vel.x) * min(1.0, uDt * 2.2);
+              vel.y -= uDt * 0.55;
+              pos += vel * uDt / vec2(uAspect, 1.0);
+              age += uDt * 0.30;
+              // contact. Mist has no business here: it goes straight through.
+              float body = texture(uMask, clamp(pos, 0.0, 1.0)).r;
+              if (mist < 0.5 && body > 0.55) {
+                age = -0.55;                  // begin the flare, stop moving
+                vel = vec2(0.0);
+              } else if (pos.y < -0.06 || pos.x < -0.25 || pos.x > 1.25 || age >= 1.0) {
+                age = 1.0;
+              }
+            }
+            outA = vec4(pos, encV(vel));
+            outB = vec4(age, size, seed, mist);
+          }
+        `;
+
+        // P5a — 真綿. Attributeless instanced quads, one short filament each.
+        //
+        // A silhouette filled with a flat white is a sticker (CRAFT §A1/§A2) —
+        // the two failures this material exists to avoid. So: thousands of fine
+        // filaments, each hashing itself to a place on the body, densest and
+        // longest at the contour where they reach OUT past the mask so the edge
+        // is fuzz rather than a cut line.
+        //
+        // Wet filaments do not shine. They darken, they clump, and they hang.
+        // (Making them specular is what would turn this into 水のひと.)
+        const flossVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform sampler2D uWet;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uFloss;
+          uniform float uWind;
+          uniform float uCount;
+          out vec2 vLocal;
+          out vec4 vAttr;    // wet, seed, edgeness, alongLen
+          ${CHUNK_NOISE}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
+          void main() {
+            vLocal = vec2(0.0);
+            vAttr = vec4(0.0);
+            float fi = float(gl_InstanceID);
+            // position from the INDEX only — never from uTime, or the whole
+            // body crawls and ?freeze=1 flickers (repo rule)
+            vec2 h = hash22(vec2(fi * 0.7371, fi * 1.3137 + 4.4));
+            vec2 uv = h;
+            float body = texture(uMask, uv).r;
+            float soft = texture(uSoft, uv).r;
+            // keep only the filaments that landed on the body or just outside it
+            if (soft < 0.10) { gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return; }
+
+            // the contour: where the softened mask is mid-way. Filaments here are
+            // longer and stick outward, which is what makes the edge fibrous.
+            float edge = 1.0 - abs(soft * 2.0 - 1.0);
+            edge = pow(clamp(edge, 0.0, 1.0), 0.85);
+            // drop most of the interior filaments so the density is not uniform
+            // the procedural surface handles the interior, so almost every
+            // filament here goes to the contour where it is actually needed
+            float keep = 0.06 + 0.94 * edge;
+            if (hash12(vec2(fi * 3.17, 7.7)) > keep) {
+              gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return;
+            }
+
+            vec2 texel = vec2(1.0) / vec2(textureSize(uSoft, 0));
+            float gx = texture(uSoft, uv + vec2(texel.x, 0.0)).r -
+                       texture(uSoft, uv - vec2(texel.x, 0.0)).r;
+            float gy = texture(uSoft, uv + vec2(0.0, texel.y)).r -
+                       texture(uSoft, uv - vec2(0.0, texel.y)).r;
+            vec2 outward = -normalize(vec2(gx, gy) + vec2(1e-6));
+
+            float wet = texture(uWet, uv).r;
+            float seed = hash12(vec2(fi * 5.31, 1.9));
+
+            // combing: dry floss is teased by the wind, wet floss is pulled down
+            // by its own weight. This is the only place the two states differ in
+            // GEOMETRY, and it is what makes wetness read as heaviness.
+            float breath = sin(uTime * 0.55 + seed * PI2 + uv.x * 5.0);
+            vec2 windDir = normalize(vec2(0.85 + 0.3 * breath, 0.32 * breath) + vec2(1e-6));
+            vec2 dir = mix(
+              normalize(mix(outward, windDir, 0.30 + 0.45 * uWind) + vec2(1e-6)),
+              normalize(vec2(0.10 * breath, -1.0)),
+              smoothstep(0.06, 0.65, wet));
+            // outside the body the filaments always point out, or they would
+            // lie across the contour and read as a line again
+            dir = normalize(mix(dir, outward, edge * 0.45) + vec2(1e-6));
+
+            // short. The first pass used up to 0.026 and the contour grew
+            // thorns; floss fuzz is a fifth of that and there is a lot of it.
+            float len = (0.0022 + 0.0060 * uFloss) *
+              (0.30 + 1.10 * edge) * (0.45 + 1.10 * seed) *
+              (1.0 - 0.30 * wet);
+            float wid = len * (0.10 + 0.14 * hash12(vec2(fi * 9.1, 2.3)));
+
+            vec2 q = QUAD[gl_VertexID];
+            vLocal = q;
+            float t = q.x * 0.5 + 0.5;
+            vec2 perp = vec2(-dir.y, dir.x);
+            // a filament is a fine arc, not a straight bristle
+            float bow = (seed - 0.5) * 0.55;
+            vec2 P = uv * vec2(uAspect, 1.0) + dir * t * len +
+              perp * (q.y * wid + bow * len * t * t);
+            vAttr = vec4(wet, seed, edge, t);
+            gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const flossFS = `#version 300 es
+          precision highp float;
+          in vec2 vLocal;
+          in vec4 vAttr;
+          out vec4 fragColor;
+          uniform float uFloss;
+          ${CHUNK_NOISE}
+          ${CHUNK_PALETTE}
+          void main() {
+            float wet = vAttr.x;
+            float seed = vAttr.y;
+            float edge = vAttr.z;
+            vec2 p = vLocal;
+            // along the filament: 0 root … 1 tip. It tapers to nothing.
+            float t = p.x * 0.5 + 0.5;
+            float prof = pow(1.0 - t, 0.55);
+            float across = abs(p.y);
+            float cov = (1.0 - smoothstep(prof * 0.55, prof, across)) * prof;
+            if (cov <= 0.004) discard;
+
+            // 生成りの絹 → 吸って重い灰。反射は作らない。
+            vec3 col = mix(FLOSS_DRY, FLOSS_WET, smoothstep(0.03, 0.75, wet));
+            // a dry filament is brightest where it catches the room light along
+            // its length; a wet one is flat, because water kills the scatter
+            col *= mix(0.80 + 0.42 * (1.0 - t), 0.92, smoothstep(0.0, 0.6, wet));
+            col *= 0.86 + 0.28 * seed;
+
+            // wet floss goes translucent and clumps: fewer, denser strands
+            float a = cov * (0.34 + 0.46 * uFloss) * (0.40 + 0.80 * edge);
+            a *= mix(1.0, 0.72, smoothstep(0.05, 0.8, wet));
+            fragColor = vec4(col * a, a);
+          }
+        `;
+
+        // P5b — the CONTACT. One quad per flaring drop: the only visible sign of
+        // the voice anywhere in the piece. A soft bloom of light with a brief
+        // ring travelling out of it, the size of a raindrop meeting cloth — not
+        // a splash, not a droplet, not a highlight.
+        const rainDrawVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform float uTexW;
+          uniform float uAspect;
+          out vec2 vLocal;
+          out vec3 vAttr;   // flare phase 0..1, seed, size
+          ${CHUNK_ENC}
+          const vec2 QUAD[6] = vec2[6](
+            vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+            vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+          );
+          void main() {
+            vLocal = vec2(0.0);
+            vAttr = vec3(0.0);
+            int i = gl_InstanceID;
+            int tw = int(uTexW);
+            ivec2 tc = ivec2(i % tw, i / tw);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            // ONLY the flaring drops (age < 0) are drawn. Everything in flight
+            // is discarded here — that is invariant 1, enforced structurally.
+            if (B.x >= 0.0) { gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return; }
+            float ph = clamp(1.0 + B.x / 0.55, 0.0, 1.0);   // 0 just landed … 1 gone
+            vec2 q = QUAD[gl_VertexID];
+            vLocal = q;
+            vAttr = vec3(ph, B.z, B.y);
+            // a contact is the size of a raindrop on cloth. The first version
+            // used 2.2..8.2x the drop size and produced grey bokeh discs the
+            // size of a head — which read as lens blur, not as a voice arriving.
+            float r = B.y * (0.9 + 1.3 * ph);
+            vec2 P = A.xy * vec2(uAspect, 1.0) + q * r;
+            gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const rainDrawFS = `#version 300 es
+          precision highp float;
+          in vec2 vLocal;
+          in vec3 vAttr;
+          out vec4 fragColor;
+          ${CHUNK_NOISE}
+          ${CHUNK_PALETTE}
+          void main() {
+            float ph = vAttr.x;
+            float seed = vAttr.y;
+            float r = length(vLocal);
+            if (r > 1.0) discard;
+            // a soft centre that fades fast, and a thin ring running outward
+            float core = (1.0 - smoothstep(0.0, 0.62, r)) * (1.0 - ph * 0.85);
+            float ring = (1.0 - smoothstep(0.06, 0.30, abs(r - (0.40 + 0.55 * ph)))) *
+              (1.0 - ph) * 0.70;
+            float a = clamp(core * 0.95 + ring * 0.55, 0.0, 1.0);
+            if (a <= 0.004) discard;
+            // rgb above alpha so the bloom pass turns the contact into light:
+            // this is the voice becoming visible
+            // a flash, not a bead. Beads of light sitting on the surface are
+            // exactly the water-droplet reading this piece must avoid.
+            vec3 col = VOICE * (0.95 + 0.75 * (1.0 - ph));
+            fragColor = vec4(col * a, a);
+          }
+        `;
+
+        // P7 — bloom bright pass: only the parts of the flower layer that are
+        // genuinely luminous (the stamens, the brightest petal flanks) are
+        // allowed to glow. Downsamples at the same time.
+        const brightFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          void main() {
+            vec3 c = texture(uSrc, vUv).rgb;
+            float l = dot(c, vec3(0.299, 0.587, 0.114));
+            // only the genuinely emissive parts (stamens, the hottest petal
+            // flanks — the ones written above 1.0) are allowed to glow. A low
+            // threshold makes every petal halo and the field reads as sparkles.
+            fragColor = vec4(c * smoothstep(0.80, 1.60, l), 1.0);
+          }
+        `;
+
+        // P7 — composite. The ground is the REAL WORLD at night: the camera is
+        // projected as it is, only darkened. The person is replaced by floss —
+        // 「真綿のように生きて居る」 is about あなた, not about the room — so the
+        // figure/ground split is: real dim room, silk-floss body, and the voice
+        // visible only where it touched.
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform sampler2D uWet;
+          uniform sampler2D uLayer;
+          uniform sampler2D uB1;
+          uniform sampler2D uB2;
+          uniform vec2 uResolution;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uExposure;
+          uniform float uFilmGrain;
+          uniform float uFloss;
+          uniform float uReach;
+          uniform float uPresent;
+          uniform vec4 uAudA;   // rms, centroid, steadiness, onset
+          uniform vec4 uAudB;   // sustain, pitch, vibrato, arc
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_PALETTE}
+          void main() {
+            vec2 ar = vec2(uAspect, 1.0);
+            vec3 room = texture(uScene, vUv).rgb;
+            vec4 mk = texture(uMask, vUv);
+            float soft = texture(uSoft, vUv).r;
+            vec4 wt = texture(uWet, vUv);
+            vec4 L = texture(uLayer, vUv);
+
+            // ---- the room, at night. Real, just turned down and drained.
+            float rl = lumaf(room);
+            vec3 night = NIGHT + vec3(pow(clamp(rl, 0.0, 1.0), 1.25)) * 0.62;
+            night = mix(night, room * 0.42, 0.28);
+            vec3 col = night;
+
+            // ---- 真綿の面. Instanced filaments alone cannot fill a body: at any
+            // affordable count the interior stays empty (it came out black). So
+            // the surface is a procedural fibre here, and the instanced
+            // filaments in the layer do the one thing only they can — break the
+            // contour so the edge is fuzz and not a cut line (§A2).
+            //
+            // The strands are ANISOTROPIC: stretched hard along a slowly turning
+            // direction. That is the whole difference between silk floss and a
+            // flat white fill (§A1), and it is seeded by position only, so
+            // ?freeze=1 holds it still.
+            float bodyIn = smoothstep(0.30, 0.72, soft);
+            // 真綿 is a TANGLE, not a grain. A single smooth direction field gave
+            // long coherent swirls that read as wood or marble; the cure is a
+            // direction that turns quickly plus two layers that disagree, at high
+            // frequency and low contrast.
+            // a long ramp: the field falls off sharply, and a short ramp turned
+            // the wet region into a hard-edged black patch
+            float w = smoothstep(0.05, 0.95, wt.r) * 0.92;
+            float ang = 1.15 + 3.4 * fbm(vUv * ar * 9.0);
+            vec2 fdir = vec2(cos(ang), sin(ang));
+            vec2 fp = vec2(dot(vUv * ar, fdir), dot(vUv * ar, vec2(-fdir.y, fdir.x)));
+            float ang2 = ang + 1.05 + 1.9 * fbm(vUv * ar * 13.0 + 21.0);
+            vec2 gdir = vec2(cos(ang2), sin(ang2));
+            vec2 gp = vec2(dot(vUv * ar, gdir), dot(vUv * ar, vec2(-gdir.y, gdir.x)));
+            // Frequencies chosen in PIXELS, not by feel: a strand about 3-4px
+            // across and 30-40px long, at roughly 9:1. Pushed higher (620/940)
+            // the strands land under one pixel, alias to grain, and the body
+            // goes flat — the §A1 plateau this texture exists to prevent.
+            float fib = fbm(vec2(fp.x * 17.0, fp.y * 175.0));
+            float fib2 = fbm(vec2(gp.x * 29.0, gp.y * 290.0));
+            float fine = vnoise(vUv * ar * vec2(170.0, 180.0));
+            float tex = 0.92 + 0.50 * (fib - 0.5) + 0.30 * (fib2 - 0.5) +
+              0.06 * (fine - 0.5);
+            // wet floss clumps: fewer, heavier strands, so the contrast rises
+            // while the colour falls
+            tex = mix(tex, 0.62 + 0.72 * (fib - 0.5) + 0.42 * (fib2 - 0.5), w);
+            vec3 flossCol = mix(FLOSS_DRY, FLOSS_WET, w) * clamp(tex, 0.0, 1.6);
+            // Lit FROM ABOVE, by the same sky the rain falls out of. This is
+            // what gives the figure three-dimensional form after its
+            // photographic detail is gone: shoulders and the crown catch the
+            // light, undersides fall away. It also means the lighting and the
+            // wetting agree, which is why the wet shoulders read as wet.
+            vec2 texel0 = vec2(1.0) / vec2(textureSize(uSoft, 0));
+            float sgx = texture(uSoft, vUv + vec2(texel0.x, 0.0)).r -
+                        texture(uSoft, vUv - vec2(texel0.x, 0.0)).r;
+            float sgy = texture(uSoft, vUv + vec2(0.0, texel0.y)).r -
+                        texture(uSoft, vUv - vec2(0.0, texel0.y)).r;
+            // Deep inside the body the gradient is ~0, so normalize() of it is
+            // numerically arbitrary — the first version lit the whole contour as
+            // a bright band because of exactly that. Weight the term by gradient
+            // MAGNITUDE and fall back to flat in the interior.
+            float gmag = length(vec2(sgx, sgy));
+            float rim = smoothstep(0.004, 0.030, gmag);
+            vec2 snrm = -normalize(vec2(sgx, sgy) + vec2(1e-6));
+            float sky = 0.90 + 0.42 * clamp(snrm.y, -1.0, 1.0) * rim;
+            flossCol *= sky * (0.90 + 0.26 * pow(clamp(rl, 0.0, 1.0), 0.85));
+            col = mix(col, flossCol, bodyIn * 0.94);
+
+            // ---- the floss layer (premultiplied over)
+            col = col * (1.0 - clamp(L.a, 0.0, 1.0)) + L.rgb;
+
+            // ---- bloom: only the contacts are bright enough to reach it, so
+            // the glow in this picture IS the voice
+            vec3 b = texture(uB1, vUv).rgb * 0.42 + texture(uB2, vUv).rgb * 0.62;
+            col += b * 0.85;
+
+            // ---- 確かな誇り。「今 私の胸のうちに息衝くのは 確かな誇り」
+            // The floor of the wetness — the part that will not dry — carries a
+            // faint warmth. It does not flicker with the voice: it holds.
+            float pride = smoothstep(0.06, 0.42, wt.g);
+            col += (PRIDE - col) * pride * 0.16;
+
+            // ---- tone. Shouldered, so the contacts bloom without clipping.
+            col = clamp(col * uExposure, 0.0, 6.0);
+            col = col / (1.0 + col * 0.72);
+            col = (col - 0.5) * 1.06 + 0.5;
+            // vignette
+            vec2 d = (vUv - 0.5) * ar;
+            col *= 1.0 - 0.30 * smoothstep(0.32, 0.92, length(d));
+            // static grain (position-seeded, so ?freeze=1 does not flicker)
+            float gr = hash12(floor(vUv * uResolution / 1.5)) - 0.5;
+            col += gr * uFilmGrain * 0.055;
+
+            if (uDebug == 1) {
+              vec2 texel = vec2(1.0) / vec2(textureSize(uSoft, 0));
+              float gx = texture(uSoft, vUv + vec2(texel.x, 0.0)).r -
+                         texture(uSoft, vUv - vec2(texel.x, 0.0)).r;
+              float gy = texture(uSoft, vUv + vec2(0.0, texel.y)).r -
+                         texture(uSoft, vUv - vec2(0.0, texel.y)).r;
+              vec2 nrm = -normalize(vec2(gx, gy) + vec2(1e-6));
+              col = vec3(mk.r, clamp(nrm.y, 0.0, 1.0), soft);
+            } else if (uDebug == 2) {
+              col = vec3(wt.r, wt.g, 0.10);
+            } else if (uDebug == 3) {
+              float vals[6];
+              vals[0] = uAudA.x;   // 音量
+              vals[1] = uAudA.z;   // 安定度
+              vals[2] = uReach;    // 届く割合(=雨になれた分)
+              vals[3] = uAudB.x;   // 持続
+              vals[4] = uAudA.y;   // 声色
+              vals[5] = uAudA.w;   // アタック
+              col = vec3(0.03, 0.035, 0.05);
+              for (int i = 0; i < 6; i++) {
+                float y0 = 0.14 + 0.115 * float(i);
+                float band = 1.0 - smoothstep(0.030, 0.038, abs(vUv.y - y0));
+                float fill = step(vUv.x, 0.08 + 0.84 * clamp(vals[i], 0.0, 1.0));
+                col = mix(col, i == 2 ? VOICE : vec3(0.72, 0.76, 0.84),
+                  band * fill * 0.95);
+                col = mix(col, vec3(0.16), band * (1.0 - fill) * 0.6);
+              }
+            } else if (uDebug == 4) {
+              col = L.rgb + vec3(0.08) * clamp(L.a, 0.0, 1.0);
+            } else if (uDebug == 5) {
+              float row = floor(vUv.y * 3.0);
+              col = row < 1.0 ? mix(NIGHT, vec3(0.86), vUv.x)
+                : (row < 2.0 ? mix(FLOSS_WET, FLOSS_DRY, vUv.x)
+                : mix(NIGHT, VOICE, vUv.x));
+            }
+            col = min(col, vec3(0.985));
+            fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program / target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgramVS(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function createProgram(fsSource) {
+          return createProgramVS(fullscreenVS, fsSource);
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          mask: createProgram(maskFS),
+          blur: createProgram(blurFS),
+          wet: createProgram(wetFS),
+          rain: createProgram(rainFS),
+          floss: createProgramVS(flossVS, flossFS),
+          rainDraw: createProgramVS(rainDrawVS, rainDrawFS),
+          bright: createProgram(brightFS),
+          composite: createProgram(compositeFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uCx", "uCy",
+            "uSwing", "uScale", "uMirror", "uFake", "uHasVideo",
+          ]),
+          mask: getLocations(programs.mask, [
+            "uScene", "uScenePrev", "uPrev", "uSeg", "uTexel", "uSegScale",
+            "uAspect", "uCx", "uCy", "uSwing", "uScale", "uDt", "uAlphaFast",
+            "uAlphaSlow", "uAlphaMot", "uReset", "uSource", "uMirror",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          wet: getLocations(programs.wet, [
+            "uPrev", "uMask", "uSoft", "uTexel", "uDt", "uAspect", "uRain",
+            "uSoak", "uReach", "uReset",
+          ]),
+          rain: getLocations(programs.rain, [
+            "uStateA", "uStateB", "uMask", "uTexW", "uDt", "uTime", "uSeed",
+            "uAspect", "uRain", "uWind", "uReach", "uAudA",
+          ]),
+          floss: getLocations(programs.floss, [
+            "uMask", "uSoft", "uWet", "uAspect", "uTime", "uFloss", "uWind",
+            "uCount",
+          ]),
+          rainDraw: getLocations(programs.rainDraw, [
+            "uStateA", "uStateB", "uTexW", "uAspect",
+          ]),
+          bright: getLocations(programs.bright, ["uSrc"]),
+          composite: getLocations(programs.composite, [
+            "uScene", "uMask", "uSoft", "uWet", "uLayer", "uB1", "uB2",
+            "uResolution", "uAspect", "uTime", "uExposure", "uFloss", "uReach",
+            "uFilmGrain", "uPresent", "uAudA", "uAudB", "uDebug",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type, filter) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          const f = filter || gl.LINEAR;
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          return tex;
+        }
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type, gl.LINEAR);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+        // A ping-pong-able STATE set: two data textures (NEAREST — pure state,
+        // read with texelFetch) sharing one MRT framebuffer.
+        function createStateSet(width, height) {
+          const internal = floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const texA = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const texB = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, texB, 0);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { texA, texB, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          if (target.tex) gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        // Empty VAO for attributeless draws (fullscreen tri + instanced quads).
+        const vao = gl.createVertexArray();
+
+        // Rain state ping-pong (allocated once; canvas-size independent).
+        const rainSets = [
+          createStateSet(RAIN_W, RAIN_H),
+          createStateSet(RAIN_W, RAIN_H),
+        ];
+        let rainPing = false;
+        let wetPing = false;
+
+        // Video texture (DOM source → UNPACK_FLIP_Y). The segmentation texture is
+        // a plain R8 upload from MediaPipe (image space, no flip on upload).
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const segTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, segTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        // 8 bytes, not 4: R8 rows are padded to UNPACK_ALIGNMENT (4) so a 2x2
+        // upload needs 4 bytes per row
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 2, 2, 0, gl.RED, gl.UNSIGNED_BYTE,
+          new Uint8Array(8));
+        let segSize = [2, 2];
+
+        let targets = null;
+        let paintW = 2, paintH = 2, fieldW = 2, fieldH = 2, glowW = 2, glowH = 2;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          const b1W = Math.max(4, Math.round(glowW / 2));
+          const b1H = Math.max(4, Math.round(glowH / 2));
+          const b2W = Math.max(4, Math.round(glowW / 4));
+          const b2H = Math.max(4, Math.round(glowH / 4));
+          targets = {
+            sceneA: createTarget(paintW, paintH, false),
+            sceneB: createTarget(paintW, paintH, false),
+            maskA: createTarget(fieldW, fieldH, true),
+            maskB: createTarget(fieldW, fieldH, true),
+            softT: createTarget(fieldW, fieldH, true),
+            softTmp: createTarget(fieldW, fieldH, true),
+            wetA: createTarget(fieldW, fieldH, true),
+            wetB: createTarget(fieldW, fieldH, true),
+            layer: createTarget(paintW, paintH, true),
+            b1Src: createTarget(b1W, b1H, true),
+            b1Tmp: createTarget(b1W, b1H, true),
+            b1: createTarget(b1W, b1H, true),
+            b2Tmp: createTarget(b2W, b2H, true),
+            b2: createTarget(b2W, b2H, true),
+          };
+          needsReset = true;
+        }
+
+        // Encoded targets must clear to encoded zero (0.5) for the flow channel.
+        // The plant / petal pools clear to DORMANT (wilt = 1, ageF = 1).
+        function clearSimTargets() {
+          clearTarget(targets.sceneA, 0.22, 0.22, 0.25, 1);
+          clearTarget(targets.sceneB, 0.22, 0.22, 0.25, 1);
+          clearTarget(targets.maskA, 0, 0, 0.5, 0.5);
+          clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softTmp, 0, 0, 0.5, 0.5);
+          clearTarget(targets.wetA, 0, 0, 0.5, 0.5);
+          clearTarget(targets.wetB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.layer, 0, 0, 0, 0);
+          clearTarget(targets.b1Src, 0, 0, 0, 1);
+          clearTarget(targets.b1, 0, 0, 0, 1);
+          clearTarget(targets.b2, 0, 0, 0, 1);
+        }
+
+        // Dormant pools. attachment 0 (A) = (root/pos, stage/vel), attachment 1
+        // (B) = (seed, hue, ...). wilt / ageF live in A.w / B.x respectively, so
+        // the two attachments need DIFFERENT clear values → clear them one at a
+        // time with drawBuffers masking.
+        function clearStateSet(set, aClear, bClear) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, set.fbo);
+          gl.viewport(0, 0, set.width, set.height);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.NONE]);
+          gl.clearColor(aClear[0], aClear[1], aClear[2], aClear[3]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawBuffers([gl.NONE, gl.COLOR_ATTACHMENT1]);
+          gl.clearColor(bClear[0], bClear[1], bClear[2], bClear[3]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+        }
+        function resetPools() {
+          // rain: A = (pos 0.5,0.5, vel encoded 0 = 0.5), B.x = age 1 = dormant
+          rainSets.forEach((s) => clearStateSet(s, [0.5, 0.5, 0.5, 0.5], [1, 0, 0, 0]));
+          rainPing = false;
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            const paintScale = Math.min(1, 1280 / maxSide);
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            const fieldScale = Math.min(1, 448 / maxSide);
+            fieldW = Math.max(8, Math.round(width * fieldScale));
+            fieldH = Math.max(8, Math.round(height * fieldScale));
+            const glowScale = Math.min(0.5, 960 / maxSide);
+            glowW = Math.max(8, Math.round(width * glowScale));
+            glowH = Math.max(8, Math.round(height * glowScale));
+            rebuildTargets();
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        // stride lets a 21-tap kernel reach far (the proximity aura) without
+        // turning into a truncated, boxy blur.
+        function blurPass(src, tmp, dst, sigma, stride) {
+          const st = stride || 1;
+          renderPass(tmp, programs.blur, () => {
+            bindTexture(0, src.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, st / tmp.width, 0);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 0, st / dst.height);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+        }
+        // True GPU sync for this environment: gl.finish() is effectively
+        // non-blocking under swiftshader, a 1x1 readPixels is not (CRAFT §C4).
+        const syncPixel = new Uint8Array(4);
+        function glSync() {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+        }
+
+        /* ------------------------------------------------------------------
+           Detection state (person mask + presence). Everything lives in SCREEN
+           UV so fakesource and MediaPipe drive the exact same shader path, and
+           every quantity is EMA-smoothed. Only ImageSegmenter is loaded — no
+           pose model, because nothing here needs landmarks (CRAFT §C3).
+        ------------------------------------------------------------------ */
+
+        const det = {
+          cx: 0.5, cy: 0, present: 0,
+          tcx: 0.5, tcy: 0, tpresent: 0,
+          swing: 0,
+          segScale: [1, 1],
+          segReady: false,
+        };
+
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+
+        let mpSegmenter = null;
+        let mpState = "idle"; // idle | loading | ready | error
+        let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
+        let segU8 = new Uint8Array(4);
+        // Inference reads a SMALL offscreen copy of the video, never the full
+        // frame: the mask is consumed at field resolution (≤448) anyway, and a
+        // ~288px input is 10-20x cheaper (CRAFT §C3).
+        const SEG_MAX_SIDE = 288;
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;   // EMA of inference ms → adaptive cadence + readout
+        let segBadRun = 0;  // consecutive degenerate masks (GPU-health check)
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
+
+        async function loadMediaPipe() {
+          if (FAKE || mpState === "loading" || mpState === "ready") return;
+          mpState = "loading";
+          mpProgress = 0.05;
+          try {
+            const mod = await import(/* @vite-ignore */ MP_PKG);
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
+            try {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
+            } catch (_e) {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
+            }
+            mpProgress = 1;
+            mpState = "ready";
+          } catch (error) {
+            console.error("MediaPipe load failed", error);
+            mpState = "error";
+          }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("hana: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
+        }
+
+        // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
+        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
+        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the real
+        // mask. The person occupies the TOP ~60% of the image, so a correct
+        // Y-flip sprouts the flowers around a figure in the TOP of the screen.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const inTop = y < h * 0.6;
+              const inBand = x > w * 0.22 && x < w * 0.78;
+              arr[y * w + x] = inTop && inBand ? 255 : 0;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+          det.tpresent = 1;
+        }
+
+        // Uploads the confidence mask and returns its mean coverage (0..1).
+        function uploadSegMask(mask) {
+          const w = mask.width, h = mask.height;
+          const f = mask.getAsFloat32Array();
+          if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
+          let sum = 0;
+          for (let i = 0; i < w * h; i++) {
+            const v = Math.max(0, Math.min(255, (f[i] * 255) | 0));
+            segU8[i] = v;
+            sum += v;
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (segSize[0] !== w || segSize[1] !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, segU8);
+            segSize = [w, h];
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, segU8);
+          }
+          det.segReady = true;
+          return sum / (w * h * 255);
+        }
+
+        // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
+        function runDetection(now) {
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
+          try {
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
+            const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
+            if (cm) {
+              const cover = uploadSegMask(cm);
+              // presence from real coverage — sprouting around the body stops
+              // when nobody is in frame instead of clinging to a stale mask
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
+            if (seg && seg.close) seg.close();
+          } catch (_e) {
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
+          }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
+        }
+
+        let detTimer = 0;
+        function detectionTick() {
+          if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
+            runDetection(performance.now());
+          }
+          // Adaptive cadence: inference must never own the main thread.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
+        }
+
+        /* ------------------------------------------------------------------
+           SOUND → the growth signals. Three drivers behind ONE meter set:
+             mic  — AnalyserNode: RMS (fast + slow EMA), spectral centroid,
+                    zero-crossing rate, dominant-pitch estimate, and an onset
+                    detector (hysteresis + refractory) for string attacks.
+             fake — ?fakesource=1: a deterministic 18s song. WebAudio and the
+                    microphone are NEVER opened, so verification is offline.
+             demo — mic denied / unavailable: a slow procedural breath so the
+                    piece still grows flowers instead of standing empty.
+           Every meter is normalised to 0..1 and all smoothing is dt-driven, so
+           ?freeze=1 (dt = 0) holds them exactly and ?prewarm= is deterministic.
+        ------------------------------------------------------------------ */
+
+        const aud = {
+          mode: FAKE ? "fake" : "demo",
+          ctx: null, analyser: null, stream: null,
+          timeData: null, freqData: null,
+          rmsF: 0, rmsS: 0, cen: 0.3, zcr: 0.2, pitF: 0.4, pitS: 0.4,
+          armed: true, refr: 0, level: 0,
+          err: "",
+        };
+        // rms = instant loudness, sus = sustained voice (the growth fuel),
+        // cen = spectral centroid (timbre → hue), zcr = breathiness,
+        // pitch = dominant pitch (→ stem height), vib = vibrato, onset = attack
+        // steady = how UNWAVERING the voice is (the inverse of short-window
+        //   loudness變動 + timbre flux). This is the axis the piece runs on.
+        // reach  = how much of the voice becomes rain that can land, from
+        //   steadiness AND a penalty for pushing. 「何も語らず静かに」
+        const meters = {
+          rms: 0, sus: 0, cen: 0.3, zcr: 0.2, pitch: 0.4, vib: 0, onset: 0,
+          steady: 0, reach: 0,
+        };
+        // running state for the steadiness estimate
+        const stab = { mean: 0, dev: 0, cenPrev: 0.3, flux: 0 };
+
+        // 声が雨になれる割合。この作品の中心の判定。
+        //   * 声が出ていないと雨にならない(無音では届くものが無い)
+        //   * 揺れている声・立ち上がりの連続は霧になる
+        //   * そして音量が閾値を超えると、超えた分だけ霧に転じる
+        // quiet スライダーは閾値の位置と罰の傾きの両方を動かす。
+        function updateReach(dt) {
+          const push = smoothstep01(
+            0.42 + 0.30 * (1 - state.quiet), 0.92, meters.rms);
+          // only actual silence is unvoiced: a quiet voice is the point
+          const voiced = smoothstep01(0.02, 0.14, meters.rms);
+          const target = voiced * meters.steady *
+            (1 - push * (0.45 + 0.55 * state.quiet));
+          // slew-limited so a single syllable cannot flip the picture
+          const k = 1 - Math.exp(-Math.max(dt, 1e-4) / (target > meters.reach ? 0.55 : 0.30));
+          meters.reach += (Math.max(0, Math.min(1, target)) - meters.reach) * k;
+        }
+        function smoothstep01(a, b, x) {
+          const t = Math.max(0, Math.min(1, (x - a) / Math.max(b - a, 1e-5)));
+          return t * t * (3 - 2 * t);
+        }
+        let arc = 0;          // 楽章: the accumulated arc of the song (0..1)
+        let fakeOnsetK = 0;
+        let demoOnsetT = 1.4;
+
+        // The scripted song for ?fakesource=1 — 18s: 前奏 / A メロ / サビ /
+        // 間奏 / 余韻. A pure function of the (frozen-able) art clock.
+        // The scripted song for ?fakesource=1 — 20s. It MUST contain a long,
+        // genuinely quiet, genuinely STEADY passage, or invariant 5 (the whole
+        // proposition of the piece) goes unexercised offline and the verifier
+        // passes on a picture nobody has actually driven. In samoarinan a
+        // metric turned out to be measuring the wrong thing for exactly this
+        // reason; this song is built so that cannot happen here.
+        function fakeSong(t) {
+          const T = t % 20;
+          let vol, cen, pit, zcr;
+          if (T < 1.2) {                       // 前奏: almost silent
+            vol = 0.05 + 0.03 * Math.sin(T * 3.0);
+            cen = 0.22; pit = 0.30; zcr = 0.30;
+          } else if (T < 8.4) {                // 静かな持続: this is the one that
+            // has to reach. Almost no wobble, almost no timbre movement — the
+            // quiet held voice the piece is written for.
+            vol = 0.20 + 0.012 * Math.sin(T * 0.55);
+            cen = 0.28 + 0.010 * Math.sin(T * 0.30);
+            pit = 0.36 + 0.020 * Math.sin(T * 0.8);
+            zcr = 0.24;
+          } else if (T < 14.0) {               // 張り上げ: loud AND unsteady, so
+            // the rain should turn to mist and stop landing
+            const u = (T - 8.4) / 5.6;
+            vol = 0.72 + 0.24 * Math.sin(T * 3.1) * (0.6 + 0.4 * u);
+            cen = 0.55 + 0.26 * Math.sin(T * 2.3);
+            pit = 0.64 + 0.18 * Math.sin(T * 2.9);
+            zcr = 0.30;
+          } else if (T < 17.6) {               // 息だけの間: breathy, quiet, wobbly
+            vol = 0.17 + 0.09 * Math.sin(T * 2.9);
+            cen = 0.40 + 0.10 * Math.sin(T * 1.9);
+            pit = 0.45; zcr = 0.58;
+          } else {                             // 余韻: quiet and steady again
+            const u = (T - 17.6) / 2.4;
+            vol = 0.17 * (1.0 - u * 0.7);
+            cen = 0.26; pit = 0.34; zcr = 0.30;
+          }
+          return { vol: Math.max(0, vol), cen, pit, zcr, playing: T > 1.15 };
+        }
+
+        // A gentle self-driven breath for visitors with no microphone: slow
+        // swells with a soft attack, so the piece still opens flowers.
+        function demoSong(t) {
+          const s = 0.5 + 0.5 * Math.sin(t * 0.42);
+          const s2 = 0.5 + 0.5 * Math.sin(t * 0.17 + 1.3);
+          const vol = 0.10 + 0.26 * Math.pow(s, 1.6) * (0.5 + 0.5 * s2);
+          return {
+            vol,
+            cen: 0.30 + 0.22 * s2,
+            pit: 0.34 + 0.24 * s,
+            zcr: 0.24 + 0.14 * (1 - s),
+            playing: true,
+          };
+        }
+
+        function micFeatures(dt) {
+          const an = aud.analyser;
+          an.getFloatTimeDomainData(aud.timeData);
+          const N = aud.timeData.length;
+          let sum = 0;
+          let zc = 0;
+          let prev = aud.timeData[0];
+          for (let i = 1; i < N; i++) {
+            const v = aud.timeData[i];
+            sum += v * v;
+            if ((v >= 0) !== (prev >= 0)) zc++;
+            prev = v;
+          }
+          const rms = Math.sqrt(sum / N);
+          const zcrRaw = Math.min(1, (zc / N) * 2.4);
+          an.getByteFrequencyData(aud.freqData);
+          const bins = aud.freqData.length;
+          const binHz = (aud.ctx ? aud.ctx.sampleRate : 48000) / (2 * bins);
+          let msum = 0;
+          let mw = 0;
+          let peak = 0;
+          let peakBin = 0;
+          const lo = Math.max(1, Math.floor(70 / binHz));
+          const hi = Math.min(bins - 1, Math.ceil(1200 / binHz));
+          for (let i = 0; i < bins; i++) {
+            const v = aud.freqData[i];
+            msum += v;
+            mw += v * i;
+            if (i >= lo && i <= hi && v > peak) { peak = v; peakBin = i; }
+          }
+          const cenRaw = msum > 4 ? (mw / msum) / (bins * 0.5) : 0;
+          // dominant pitch → a log-scale 0..1 (80Hz..1200Hz)
+          const f0 = peakBin * binHz;
+          const pitRaw = peak > 24 && f0 > 60
+            ? Math.min(1, Math.max(0, Math.log2(f0 / 80) / Math.log2(1200 / 80)))
+            : aud.pitS;
+          const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
+          aud.rmsF += (rms - aud.rmsF) * k(0.05);
+          aud.rmsS += (rms - aud.rmsS) * k(1.8);
+          aud.cen += (cenRaw - aud.cen) * k(0.20);
+          aud.zcr += (zcrRaw - aud.zcr) * k(0.20);
+          aud.pitF += (pitRaw - aud.pitF) * k(0.06);
+          aud.pitS += (pitRaw - aud.pitS) * k(0.9);
+          aud.level = aud.rmsF;
+          // sensitivity: a lower reference makes a quiet room fill with flowers
+          const ref = 0.030 + 0.190 * (1 - state.micGain);
+          meters.rms = Math.min(1, aud.rmsF / ref);
+          meters.sus = Math.min(1, aud.rmsS / (ref * 0.95));
+          meters.cen = Math.min(1, aud.cen * 1.15);
+          meters.zcr = aud.zcr;
+          meters.pitch = aud.pitF;
+          meters.vib = Math.min(1, Math.abs(aud.pitF - aud.pitS) * 9);
+          // onset (string attack / consonant): the fast RMS crossing a threshold
+          // above the slow one, with hysteresis and a refractory period
+          aud.refr = Math.max(0, aud.refr - dt);
+          const thHi = aud.rmsS * 1.75 + 0.008 * (1.4 - state.micGain);
+          const thLo = aud.rmsS * 1.12 + 0.003;
+          if (aud.armed && aud.refr <= 0 && aud.rmsF > thHi && aud.rmsF > 0.006) {
+            aud.armed = false;
+            aud.refr = 0.13;
+            meters.onset = Math.min(1, 0.55 + meters.rms * 0.7);
+          } else if (!aud.armed && aud.rmsF < thLo) {
+            aud.armed = true;
+          }
+          updateSteady(dt, meters.rms, meters.cen);
+          updateReach(dt);
+        }
+
+        // 安定度. Two things make a voice unsteady: its loudness wobbles, and its
+        // timbre keeps moving. Both are measured against slow means so a long
+        // held note scores high however loud or quiet it is, and a shouted or
+        // choppy phrase scores low. Loudness itself is NOT part of this — the
+        // penalty for pushing lives in updateReach, separately, so the two can
+        // be read apart in debug view 3.
+        function updateSteady(dt, rmsN, cenN) {
+          const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
+          stab.mean += (rmsN - stab.mean) * k(0.9);
+          const dev = Math.abs(rmsN - stab.mean);
+          stab.dev += (dev - stab.dev) * k(0.45);
+          const fl = Math.abs(cenN - stab.cenPrev) / Math.max(dt, 1e-3);
+          stab.cenPrev = cenN;
+          stab.flux += (Math.min(1, fl * 0.35) - stab.flux) * k(0.40);
+          // RELATIVE deviation, not absolute. An absolute threshold penalises a
+          // loud steady voice more than a quiet steady one simply because its
+          // deviations are bigger in magnitude — which would smuggle loudness
+          // back into a meter that has to be about steadiness alone.
+          const rel = stab.dev / Math.max(stab.mean, 0.055);
+          const wob = 1 - smoothstep01(0.12, 0.62, rel);
+          const clean = 1 - smoothstep01(0.10, 0.55, stab.flux);
+          meters.steady = Math.max(0, Math.min(1, wob * 0.62 + clean * 0.38));
+        }
+
+        function scriptedFeatures(dt, song, onsetPeriod, seedBase) {
+          const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
+          aud.rmsF += (song.vol - aud.rmsF) * k(0.06);
+          aud.rmsS += (song.vol - aud.rmsS) * k(1.6);
+          aud.cen += (song.cen - aud.cen) * k(0.25);
+          aud.zcr += (song.zcr - aud.zcr) * k(0.25);
+          aud.pitF += (song.pit - aud.pitF) * k(0.08);
+          aud.pitS += (song.pit - aud.pitS) * k(0.9);
+          aud.level = aud.rmsF;
+          meters.rms = Math.min(1, aud.rmsF / 0.55);
+          meters.sus = Math.min(1, aud.rmsS / 0.30);
+          meters.cen = aud.cen;
+          meters.zcr = aud.zcr;
+          meters.pitch = aud.pitF;
+          meters.vib = Math.min(1, Math.abs(aud.pitF - aud.pitS) * 7);
+          // strums on a fixed grid (deterministic; frozen art clock = no onsets)
+          if (song.playing) {
+            while (seedBase.next <= animTime) {
+              meters.onset = Math.min(1, 0.5 + meters.rms * 0.8);
+              seedBase.next += onsetPeriod;
+            }
+          } else {
+            seedBase.next = Math.max(seedBase.next, animTime + onsetPeriod);
+          }
+          updateSteady(dt, meters.rms, meters.cen);
+          updateReach(dt);
+        }
+
+        const fakeClock = { next: 1.2 };
+        const demoClock = { next: 1.4 };
+
+        function updateAudio(dt) {
+          // ?freeze=1: hold every meter exactly. The flower head breathes with
+          // the loudness, so letting the EMAs creep at dt=0 would make a frozen
+          // frame drift (the determinism check would catch it eventually — this
+          // makes it bit-exact by construction).
+          if (dt <= 0) return;
+          if (aud.mode === "mic" && aud.analyser) {
+            micFeatures(dt);
+          } else if (aud.mode === "fake") {
+            scriptedFeatures(dt, fakeSong(animTime), 0.52, fakeClock);
+          } else {
+            const song = demoSong(animTime);
+            scriptedFeatures(dt, song, 1.7, demoClock);
+            // the demo breath must stay gentle: it is a holding pattern
+            meters.rms *= 0.85;
+            meters.sus *= 0.9;
+          }
+          // the attack is consumed as a short envelope by every shader
+          meters.onset *= Math.exp(-dt * 5.5);
+          // 楽章: the song's accumulated arc. It rises while there is real
+          // singing and falls back in silence, and it biases hue, shedding and
+          // the density of the field — the piece has a beginning and an end.
+          const drive = meters.sus * 0.75 + meters.rms * 0.35;
+          arc += dt * (drive - 0.16) * 0.085;
+          arc = Math.max(0, Math.min(1, arc));
+        }
+
+        let micStarted = false;
+        async function startMic() {
+          if (FAKE || micStarted) return;
+          micStarted = true;
+          if (!window.isSecureContext ||
+              !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            aud.err = "非対応";
+            micStarted = false;
+            return;
+          }
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            if (!stream.getAudioTracks || stream.getAudioTracks().length === 0) {
+              throw new Error("no audio track");
+            }
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!aud.ctx) aud.ctx = new Ctx();
+            try { await aud.ctx.resume(); } catch (_e) { /* needs a gesture */ }
+            const src = aud.ctx.createMediaStreamSource(stream);
+            aud.analyser = aud.ctx.createAnalyser();
+            aud.analyser.fftSize = 2048;
+            aud.analyser.smoothingTimeConstant = 0;
+            src.connect(aud.analyser);
+            aud.stream = stream;
+            aud.timeData = new Float32Array(aud.analyser.fftSize);
+            aud.freqData = new Uint8Array(aud.analyser.frequencyBinCount);
+            aud.mode = "mic";
+            aud.err = "";
+          } catch (error) {
+            // A missing microphone is never fatal: the demo breath keeps the
+            // piece alive and the panel offers a retry.
+            aud.analyser = null;
+            aud.mode = "demo";
+            micStarted = false;
+            const name = error && error.name ? error.name : "";
+            aud.err = name === "NotAllowedError" ? "許可なし"
+              : (name === "NotFoundError" ? "見つからない" : "使用不可");
+          }
+        }
+
+        function stopMic() {
+          if (aud.stream) {
+            aud.stream.getTracks().forEach((t) => t.stop());
+            aud.stream = null;
+          }
+          aud.analyser = null;
+          if (aud.mode === "mic") aud.mode = "demo";
+        }
+
+        document.getElementById("micRetry").addEventListener("click", () => {
+          stopMic();
+          micStarted = false;
+          aud.err = "";
+          startMic();
+        });
+        // browsers suspend a fresh AudioContext until a user gesture
+        const resumeAudio = () => {
+          if (aud.ctx && aud.ctx.state === "suspended") aud.ctx.resume();
+          if (!FAKE && !micStarted && aud.mode !== "mic") startMic();
+        };
+        window.addEventListener("pointerdown", resumeAudio, { passive: true });
+        window.addEventListener("keydown", resumeAudio);
+
+        /* ------------------------------------------------------------------
+           Simulation + present
+        ------------------------------------------------------------------ */
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let seedCounter = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let scenePing = false, maskPing = false;
+        let haveVideo = false;
+        let readyStamped = false;
+        let poolsReady = false;
+        let prewarmLeft = Math.min(480, Math.round(PREWARM / PREWARM_DT));
+
+        const readout = document.getElementById("readout");
+        const levelBar = document.getElementById("levelBar");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        function updateDetection(dt) {
+          const canvasAspect = canvas.width / Math.max(canvas.height, 1);
+          const videoAspect = (video.videoWidth && video.videoHeight)
+            ? video.videoWidth / video.videoHeight : 4 / 3;
+          det.segScale = videoAspect > canvasAspect
+            ? [canvasAspect / videoAspect, 1]
+            : [1, videoAspect / canvasAspect];
+
+          if (FAKE) {
+            // sway + bob + limb swing so the mask moves like a real performer:
+            // this is what feeds the motion field, the gusts and the moving
+            // sprouting band offline (verify_runtime --motion depends on it).
+            det.tcx = 0.5 + 0.075 * Math.sin(animTime * 0.42);
+            det.tcy = 0.022 * Math.sin(animTime * 0.71 + 1.0);
+            det.swing = Math.sin(animTime * 1.25);
+            det.tpresent = 1;
+          } else if (FAKESEG) {
+            det.tpresent = 1;
+          } else if (mpState !== "ready") {
+            det.tpresent = 0;
+          }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
+          const k = FREEZE ? 0 : 1 - Math.exp(-dt * 6);
+          det.cx += (det.tcx - det.cx) * k;
+          det.cy += (det.tcy - det.cy) * k;
+          det.present += (det.tpresent - det.present) * k;
+        }
+
+        function audioUniforms(u) {
+          gl.uniform4f(u.uAudA, meters.rms, meters.cen, meters.zcr, meters.onset);
+          gl.uniform4f(u.uAudB, meters.sus, meters.pitch, meters.vib, arc);
+        }
+
+        // One simulation step: every pass except the final composite. Called once
+        // per frame, or repeatedly with a fixed dt while ?prewarm= fast-forwards.
+        function stepSim(dt) {
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+          if (!poolsReady || doReset) {
+            resetPools();
+            poolsReady = true;
+          }
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          // FAKESEG forces the real-camera seg path (uSource==1) with the
+          // synthetic mask so the Y-flip can be validated offline.
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
+          seedCounter = (seedCounter + 1) % 65536;
+          const seed = dt > 0 ? seedCounter * 0.017 + 0.31 : 0.31;
+          const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
+          const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
+          const maskOut = maskPing ? targets.maskA : targets.maskB;
+          const maskPrev = maskPing ? targets.maskB : targets.maskA;
+          const wetOut = wetPing ? targets.wetA : targets.wetB;
+          const wetPrev = wetPing ? targets.wetB : targets.wetA;
+          const rainSrc = rainPing ? rainSets[1] : rainSets[0];
+          const rainDst = rainPing ? rainSets[0] : rainSets[1];
+          const fieldTexel = [1 / fieldW, 1 / fieldH];
+
+          // P0 — scene (camera cover-fit / synthetic room)
+          renderPass(sceneCur, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize,
+              Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+          });
+
+          // P1 — mask (fast + slow EMA) and motion field
+          renderPass(maskOut, programs.mask, () => {
+            const u = locations.mask;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, scenePrev.tex);
+            bindTexture(2, maskPrev.tex);
+            bindTexture(3, segTexture);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uScenePrev, 1);
+            gl.uniform1i(u.uPrev, 2);
+            gl.uniform1i(u.uSeg, 3);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAlphaFast, 1 - Math.exp(-Math.max(dt, 1e-4) * 16));
+            gl.uniform1f(u.uAlphaSlow, 1 - Math.exp(-Math.max(dt, 1e-4) * 2.3));
+            gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+            gl.uniform1i(u.uSource, source);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // P2 — soften the mask. The normals and the shelter march both read
+          // from this: the raw confidence mask has block edges and its gradient
+          // is noise, so "which way does this surface face" is meaningless on it.
+          blurPass(maskOut, targets.softTmp, targets.softT, 3.2, 1);
+
+          // P3 — the wetness field
+          renderPass(wetOut, programs.wet, () => {
+            const u = locations.wet;
+            bindTexture(0, wetPrev.tex);
+            bindTexture(1, maskOut.tex);
+            bindTexture(2, targets.softT.tex);
+            gl.uniform1i(u.uPrev, 0);
+            gl.uniform1i(u.uMask, 1);
+            gl.uniform1i(u.uSoft, 2);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uRain, state.rain);
+            gl.uniform1f(u.uSoak, state.soak);
+            gl.uniform1f(u.uReach, meters.reach);
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+          });
+
+          // P4 — the rain: fall, find the body, flare, die
+          renderPass(rainDst, programs.rain, () => {
+            const u = locations.rain;
+            bindTexture(0, rainSrc.texA);
+            bindTexture(1, rainSrc.texB);
+            bindTexture(2, maskOut.tex);
+            gl.uniform1i(u.uStateA, 0);
+            gl.uniform1i(u.uStateB, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1f(u.uTexW, RAIN_W);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uSeed, seed);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uRain, state.rain);
+            gl.uniform1f(u.uWind, state.wind);
+            gl.uniform1f(u.uReach, meters.reach);
+            gl.uniform4f(u.uAudA,
+              meters.rms, meters.cen, meters.steady, meters.onset);
+          });
+
+          // P5 — the layer. Cleared to transparent and built with PREMULTIPLIED
+          // alpha: the floss first (it is the body), then the contacts over it
+          // (they are the voice, and they must not be hidden by fibre).
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.layer.fbo);
+          gl.viewport(0, 0, targets.layer.width, targets.layer.height);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.enable(gl.BLEND);
+          gl.blendEquation(gl.FUNC_ADD);
+          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+          gl.bindVertexArray(vao);
+
+          gl.useProgram(programs.floss);
+          {
+            const u = locations.floss;
+            bindTexture(0, maskOut.tex);
+            bindTexture(1, targets.softT.tex);
+            bindTexture(2, wetOut.tex);
+            gl.uniform1i(u.uMask, 0);
+            gl.uniform1i(u.uSoft, 1);
+            gl.uniform1i(u.uWet, 2);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uFloss, state.floss);
+            gl.uniform1f(u.uWind, state.wind);
+            gl.uniform1f(u.uCount, FLOSS_N);
+          }
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, FLOSS_N);
+
+          gl.useProgram(programs.rainDraw);
+          {
+            const u = locations.rainDraw;
+            bindTexture(0, rainDst.texA);
+            bindTexture(1, rainDst.texB);
+            gl.uniform1i(u.uStateA, 0);
+            gl.uniform1i(u.uStateB, 1);
+            gl.uniform1f(u.uTexW, RAIN_W);
+            gl.uniform1f(u.uAspect, aspect);
+          }
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, RAIN_N);
+
+          gl.bindVertexArray(null);
+          gl.disable(gl.BLEND);
+
+          // P7 — bloom: threshold + downsample, then two blur stages
+          renderPass(targets.b1Src, programs.bright, () => {
+            bindTexture(0, targets.layer.tex);
+            gl.uniform1i(locations.bright.uSrc, 0);
+          });
+          blurPass(targets.b1Src, targets.b1Tmp, targets.b1, 2.6, 1);
+          blurPass(targets.b1, targets.b2Tmp, targets.b2, 2.6, 1);
+
+          scenePing = !scenePing;
+          maskPing = !maskPing;
+          wetPing = !wetPing;
+          rainPing = !rainPing;
+        }
+
+        // P7 — composite to the canvas.
+        function present() {
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const sceneCur = scenePing ? targets.sceneB : targets.sceneA;
+          const maskCur = maskPing ? targets.maskB : targets.maskA;
+          const wetCur = wetPing ? targets.wetB : targets.wetA;
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, maskCur.tex);
+            bindTexture(2, targets.softT.tex);
+            bindTexture(3, wetCur.tex);
+            bindTexture(4, targets.layer.tex);
+            bindTexture(5, targets.b1.tex);
+            bindTexture(6, targets.b2.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uMask, 1);
+            gl.uniform1i(u.uSoft, 2);
+            gl.uniform1i(u.uWet, 3);
+            gl.uniform1i(u.uLayer, 4);
+            gl.uniform1i(u.uB1, 5);
+            gl.uniform1i(u.uB2, 6);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uExposure, state.exposure);
+            gl.uniform1f(u.uFloss, state.floss);
+            gl.uniform1f(u.uReach, meters.reach);
+            gl.uniform1f(u.uFilmGrain, state.filmGrain);
+            gl.uniform1f(u.uPresent, det.present);
+            gl.uniform4f(u.uAudA,
+              meters.rms, meters.cen, meters.steady, meters.onset);
+            gl.uniform4f(u.uAudB, meters.sus, meters.pitch, meters.vib, arc);
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+        }
+
+        function detectionLabel() {
+          if (FAKE) return "合成";
+          if (FAKESEG) return "合成マスク";
+          if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
+          if (mpState === "error") return "検知エラー";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
+          return "待機";
+        }
+
+        function audioLabel() {
+          if (aud.mode === "fake") return "合成の歌";
+          if (aud.mode === "mic") {
+            const db = aud.level > 1e-5 ? Math.round(20 * Math.log10(aud.level)) : -99;
+            const susp = aud.ctx && aud.ctx.state === "suspended" ? "·要タップ" : "";
+            return `マイク ${db}dB${susp}`;
+          }
+          return `デモ呼吸${aud.err ? `(マイク:${aud.err})` : ""}`;
+        }
+
+        function updateChip() {
+          statusChip.textContent = FAKE
+            ? "入力 · 合成 (fakesource=1)"
+            : `音 · ${audioLabel()} / 検知 · ${detectionLabel()}`;
+          statusChip.classList.toggle(
+            "hidden", FAKE ? performance.now() - bootWall > 4000 : false);
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          const dt = FREEZE ? 0 : rawDt;
+
+          haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || FAKESEG || haveVideo || mpState === "ready";
+
+          if (!state.pauseAnim) animTime += dt;
+          updateAudio(dt);
+          updateDetection(dt);
+
+          // ?prewarm=<sec>: deterministic fast-forward before __artReady, spread
+          // over several rAF frames and synced with a 1x1 readPixels so the
+          // preroll never parks the compositor for tens of seconds — under
+          // swiftshader a single blocking preroll stalls everything (CRAFT §C4).
+          if (prewarmLeft > 0) {
+            const n = Math.min(12, prewarmLeft);
+            for (let i = 0; i < n; i++) {
+              if (!state.pauseAnim) animTime += PREWARM_DT;
+              updateAudio(PREWARM_DT);
+              updateDetection(PREWARM_DT);
+              stepSim(PREWARM_DT);
+            }
+            prewarmLeft -= n;
+            glSync();
+          }
+
+          stepSim(dt);
+          present();
+
+          if (!readyStamped && hasInput && prewarmLeft <= 0) {
+            glSync();               // the first REAL frame has completed
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
+              canvas.height} / 繊維 ${FLOSS_N.toLocaleString()} / 雨 ${
+              RAIN_N.toLocaleString()} / 音 ${audioLabel()} / 安定 ${
+              meters.steady.toFixed(2)} / 届 ${meters.reach.toFixed(2)} / 検知 ${
+              detectionLabel()}`;
+            levelBar.style.width = `${Math.round(Math.min(1, meters.rms) * 100)}%`;
+            updateChip();
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. With ?fakesource=1 the synthetic scene and the scripted
+           song drive the pipeline and neither MediaPipe nor the microphone is
+           touched, but getUserMedia still runs so the three camera error paths
+           stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay("requesting", "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.");
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay("error", "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8899) or HTTPS, then reload.");
+            retryCamera.disabled = false;
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.");
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 }, height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            retryCamera.disabled = false;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+            if (!FAKE) {
+              loadMediaPipe();
+              startMic();     // the microphone is opened separately (never fatal)
+            }
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay("error", "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true });
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay("error", "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true });
+            } else {
+              setOverlay("error", "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true });
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => { startCamera(); });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+        window.addEventListener("beforeunload", () => { stopCamera(); stopMic(); });
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
+          // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
+          // scene drives the whole pipeline regardless of the camera (the video
+          // texture is never sampled, MediaPipe and the mic stay untouched), so
+          // the camera is only exercised to keep the three error overlays
+          // observable: on success the overlay hides and the fake art shows; on
+          // denial / no-camera the matching error overlay appears over the
+          // still-rendering art.
+          startCamera();
+          detectionTick();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay("error", "WEBGL SETUP ERROR",
+            error && error.message ? error.message : "Could not initialize the renderer.");
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
