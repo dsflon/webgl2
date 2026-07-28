@@ -90,7 +90,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>OPUS5 · 花 — WebGL2 mic+cam song of flowers</title>
+    <title>OPUS5 · 声 — WebGL2 mic+cam voice as rain</title>
     <style>
       :root {
         color-scheme: dark;
@@ -349,12 +349,13 @@
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
           <div class="panel-body">
-          <h1>OPUS5 · 花</h1>
+          <h1>OPUS5 · 声</h1>
           <p>
-            歌とギターの音で花が育ちます。声が続くと芽が出て茎が伸び、弦のアタックで
-            蕾がほどけ、盛り上がりで一斉に開花し、静けさが続けば萎れて散ります。
-            声色が色相、音高が茎の高さ、息のノイズが綿毛になります。人物は実写のまま、
-            背景は周縁から夜の花園へ溶けます。マイクとカメラは端末内で処理されます。
+            あなたに向けて歌うと、声は雨になって降ります。ただし声は空中では見えず、
+            肩に触れた瞬間だけ見えます。映っている人は真綿でできていて、届いた声を
+            吸って暗く重くなり、濡れは乾ききりません。そして<strong>大声では届き
+            ません</strong> — 声を張ると雨は霧になって身体をすり抜けます。静かに、
+            長く。マイクとカメラは端末内で処理されます。
           </p>
           <div class="select-row">
             <span>デバッグ表示</span>
@@ -394,7 +395,7 @@
             <button id="micRetry" type="button">マイク再試行</button>
           </div>
           <div class="status">
-            <div id="readout">FPS -- / 解像度 -- / 株 -- / 花びら -- / 音 -- / 検知 --</div>
+            <div id="readout">FPS -- / 解像度 -- / 繊維 -- / 雨 -- / 音 -- / 検知 --</div>
             <span class="badge">WebGL2 · Mic + MediaPipe · GPU Plants</span>
           </div>
           </div>
@@ -453,7 +454,7 @@
         document.getElementById("savePng").addEventListener("click", () => {
           const link = document.createElement("a");
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          link.download = `opus5-hana-${stamp}.png`;
+          link.download = `opus5-koe-${stamp}.png`;
           link.href = canvas.toDataURL("image/png");
           link.click();
         });
@@ -1803,7 +1804,7 @@
             mpSegmenter = next;
             mpDelegate = "CPU";
             segBadRun = 0;
-            console.warn("hana: GPU segmentation output looked broken — switched to CPU delegate");
+            console.warn("koe: GPU segmentation output looked broken — switched to CPU delegate");
           } catch (_e) { /* keep the GPU segmenter */ }
           mpSwitching = false;
         }
