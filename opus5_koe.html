@@ -2,68 +2,67 @@
 <!--
   opus5_koe.html — WebGL2 マイク+カメラ →「声 / Voice」
   森山直太朗「声」(映画『半落ち』主題歌)のための映像。
-  **あなたに向けて歌うと、声は雨になって降る。ただし声は空中では見えない。
-  あなたの肩に触れた瞬間だけ、見える。** カメラに映る人は真綿でできていて、
-  届いた声を吸って暗く重くなる。そして**大声では届かない** — 声を張ると雨は霧に
-  なって身体をすり抜ける。静かに、長く、穏やかな声だけが肩に着く。
+  **静けさには雨が降る。歌えば、声は身体の中で光になる。** カメラに映る人は
+  真綿でできていて、無音の夜には雨に打たれて肩から濡れてゆく。歌い続けると
+  声が胸から光として昇り、絹が内側から灯り、光が増えるにつれ雨は上がって
+  晴れていく(この声が いつの日か あなたに見える日まで/光の庭で 永遠に唄うよ)。
+  黙ればまた、静かな雨が戻る(何も語らず 静かに そっと肩にかかる雨)。
   派生元エンジン: opus5_hana.html(ImageSegmenter のモバイル手順・マイク解析・
   合成の歌・カメラと UI と検証フック)。
 
   様式解析(視覚的不変量。優先度 1>2>5>3>4>6):
-    1. 声は触れたところだけで見える — 落下中の雨は完全に不可視。人物のシルエットに
-       達した瞬間だけ着弾が光り、すぐ消える。空中に雨の線・粒・軌跡を一切描かない。
-       (声の可視化を波形やスペクトルのような読み取り表示で代用しない。それは声の
-        記述であって声ではない。)
-    2. あなたは真綿でできている — 人物は数千本の細い繊維の集合。マット・白・空気を
-       含む。輪郭は線ではなく毛羽で、繊維は輪郭の外へはみ出す。内部を平坦な白で
-       塗らない。
-    3. 濡れは上を向いた面から — 肩と頭頂が先に濡れ、腕の下側は乾いたまま。上に
-       身体がある場所(庇の下)は濡れない。マスク勾配の法線と、上方マーチによる
-       遮蔽判定で決める。
-    4. 濡れた真綿は重くなる — 吸った繊維は暗く、束になり、半透明になって垂れる。
-       水滴の反射で光らせない(光らせると「水のひと」になり、吸水が消える)。
-    5. 静けさが条件 — 雨量は音量ではなく**声の安定度**で決まる。閾値を超える音量では
-       雨が霧に変わり、身体をすり抜けて届かない。声を張るほど報われる設計の反転。
-    6. 確かな誇り — 濡れは乾ききらない。下限が 0 ではなく、届いたものは残る。
-       ただし上限があり発散しない。
+    1. 天候の弧 — 雨と光は同じ一つの状態(shine)の両端。無音=雨、歌えば光が
+       満ちて雨が上がる。天気なので一音では変わらない(満ちるのに十数秒、
+       引くのに数十秒)。雨は見える — 夜の雨らしい細い斜めの筋。
+    2. あなたは真綿でできている — 人物は繊維の絡み。マットで白く空気を含む。
+       輪郭は毛羽。内部は異方性の繊維テクスチャで、平坦な白で塗らない。
+    3. 雨は肩にかかる — ぼかしたマスクの勾配=法線と上方マーチの遮蔽判定で、
+       上を向いた面(肩・頭頂)だけが濡れる。腕の下側は乾いたまま。
+       着弾は淡い閃光、濡れは重力で流れ落ちて身体を覆う。
+    4. 濡れた真綿は重くなる — 吸った繊維は暗く、束になる。反射で光らせない。
+    5. 声の光は胸から昇る — 光は空から降らず、歌っている身体の深部で湧き、
+       上へ昇って肩と頭に満ちる。絹の縞に沿って灯り(繊維が光を変調する)、
+       ブルームで身体の外へ僅かに漏れる。灯っても縞は消えない(§A1)。
+    6. 確かな誇り — 濡れの床は乾ききらない。届いたものは残る。上限で飽和。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
     入力: カメラ映像 + ImageSegmenter / fakeScene(GLSL 室内+動く人型) + マイク or 合成の歌
     [P0 scene]  cover-fit+mirror                        sceneA/B RGBA8 長辺≤1280
     [P1 mask]   R=速いマスクEMA G=遅いマスクEMA BA=運動ベクトル  maskA/B★ ≤448
-    [P2 blur]   マスクのソフト化(法線を取るため。生マスクの勾配はブロックになる) softT★
-    [P3 wet]    濡れ場 ping-pong★。R=濡れ G=床(乾ききらない分) BA=流れ落ちる向き
-                注入 = 雨量 ×(上向きの面)×(上方マーチで庇に入っていない)×マスク
-                重力で下へ移流し、わずかに拡散し、床まで減衰して止まる
+    [P2 blur]   マスクのソフト化(法線を取るため)            softT★
+    [P3 wet]    濡れと光の場 ping-pong★。R=濡れ G=誇りの床 B=声の光
+                濡れ: 雨量×上向きの面×遮蔽なし×マスク → 重力で流下、床まで減衰
+                光: 歌う声がマスク深部で湧き、下から上へ昇り、ゆっくり減衰
     [P4 rain]   雨粒プール ping-pong(MRT 2枚, RAIN_W×RAIN_H)★
-                A=(x, y, encV(速度)) B=(齢, 大きさ, seed, 霧フラグ)
-                落下中は**描画しない**。マスクに入った瞬間に着弾の閃光を出して死ぬ。
-                霧粒はマスクを無視して通過し、堆積もしない
+                A=(x, y, encV(速度)) B=(齢, 大きさ, seed, 奥行き)
+                発生率=いまの雨量(=天候)。奥行きで3層の視差。近い粒だけが
+                身体に届いて閃光になり、濡れを足す
     [P5 layer]  layerT★ を透明にクリアし前乗算アルファで重ねる:
-                真綿の繊維(instanced quad。乾=白くマット/濡=暗く束ねて垂れる)
-                → 着弾の閃光(instanced quad。声が見える唯一の場所)
+                真綿の繊維(輪郭の毛羽)→ 声の光(全画面・エミッシブ)→
+                雨(落下中の筋+着弾の閃光)
     [P6 bloom]  layerT の明部を抽出 → 2段ダウンサンプル+ぼかし        b1 b2
-    [P7 comp]   夜の実写(暗く)→ 真綿の層を前乗算合成 → ブルーム →
-                胸のうちの確かな誇り(濡れの床が最も高い所の淡い温度)→
-                肩付きトーンマップ・粒子・周辺減光
+    [P7 comp]   夜の実写 → 真綿の面(異方性繊維。濡=暗く/光=内側から灯る)→
+                layer 前乗算合成 → ブルーム(=光の庭のハロー)→
+                誇りの淡い温度 → 肩付きトーンマップ・粒子・周辺減光
 
   実行方法:
     python3 -m http.server 8899 → http://localhost:8899/opus5_koe.html を開き
     カメラとマイクを許可(どちらも端末内で処理。外部送信なし)。
     (カメラ/マイク API はセキュアコンテキスト必須。file:// では動きません)
-    **静かに、長く歌ってください。張り上げると届きません。**
-    ?fakesource=1 … カメラ/マイク不使用。合成室内+動く人型+合成の歌(20秒ループ。
-                    静かな持続区間を含む)で全パス駆動(検証用)
+    **歌ってください。歌い続けると雨が上がり、身体が灯ります。黙ると雨が戻ります。**
+    ?fakesource=1 … カメラ/マイク不使用。合成室内+動く人型+合成の歌(24秒ループ。
+                    無音→静かな持続→ふくらみ→無音の天候弧)で全パス駆動(検証用)
     ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
-    ?prewarm=<秒> … 初回描画前に固定 dt で早送りし「濡れが育った」絵を出す(検証用)
+    ?prewarm=<秒> … 初回描画前に固定 dt で早送り(検証用。上限20秒)
     ?fakeseg=1   … 実カメラのマスク経路を合成マスクで駆動(Y反転の検査)
     ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
-    デバッグ表示: 0=最終 1=マスクと法線 2=濡れ場 3=音の特徴量(安定度を含む)
+    デバッグ表示: 0=最終 1=マスクと法線 2=濡れと光 3=音の特徴量(光=天候を含む)
                   4=雨と繊維 5=配色標本
 
   スライダーの説明:
-    声の雨      声が雨になる量
-    静けさの条件 声を張ったときに霧へ転じる厳しさ(既定は中間)
+    雨          静けさに降る雨の量
+    晴れ        歌の光がどれだけ雨を上がらせるか(天候の結合)
+    声の光      声が身体に灯る光の量
     真綿の毛羽  繊維の長さと毛羽立ち
     濡れの残り  濡れが残る強さ(=乾きにくさ)
     風          風の強さ(雨の傾きと繊維の梳かれ)
@@ -310,7 +309,7 @@
         const DEBUG_MODES = [
           "最終",
           "マスクと法線",
-          "濡れ場",
+          "濡れと光",
           "音の特徴量",
           "雨と繊維",
           "配色標本",
@@ -318,7 +317,8 @@
 
         const DEFAULTS = {
           rain: 0.60,
-          quiet: 0.50,      // 2026-07-28 ユーザー判断: 静けさの条件は中間から
+          clear: 0.75,
+          glowAmt: 0.60,
           floss: 0.55,
           soak: 0.50,
           wind: 0.45,
@@ -336,8 +336,9 @@
         };
 
         const uiRows = [
-          ["rain", "声の雨", "声が雨になる量", 0, 1, 0.01],
-          ["quiet", "静けさの条件", "声を張ったときに霧へ転じる厳しさ", 0, 1, 0.01],
+          ["rain", "雨", "静けさに降る雨の量", 0, 1, 0.01],
+          ["clear", "晴れ", "歌の光がどれだけ雨を上がらせるか", 0, 1, 0.01],
+          ["glowAmt", "声の光", "声が身体に灯る光の量", 0, 1, 0.01],
           ["floss", "真綿の毛羽", "繊維の長さと毛羽立ち", 0, 1, 0.01],
           ["soak", "濡れの残り", "濡れが残る強さ(=乾きにくさ)", 0, 1, 0.01],
           ["wind", "風", "風の強さ(雨の傾きと繊維の梳かれ)", 0, 1, 0.01],
@@ -893,9 +894,10 @@
           uniform vec2 uTexel;
           uniform float uDt;
           uniform float uAspect;
-          uniform float uRain;
           uniform float uSoak;
-          uniform float uReach;      // how much of the voice is arriving as rain
+          uniform float uRainAmt;    // the weather: how much rain is falling now
+          uniform float uVoice;      // the voice arriving as light, right now
+          uniform float uGlowAmt;
           uniform int uReset;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
@@ -927,7 +929,7 @@
             float sky = 1.0 - smoothstep(0.20, 0.70, shelter);
 
             // the rain only wets what it can reach
-            float gain = uReach * uRain * body * faceUp * sky;
+            float gain = uRainAmt * body * faceUp * sky;
             // a little unevenness so the wet edge is not a clean band
             gain *= 0.70 + 0.60 * vnoise(vUv * vec2(uAspect, 1.0) * 26.0);
             gain *= 1.65;
@@ -965,23 +967,40 @@
             wet = clamp(wet, 0.0, 1.0);
             wet *= smoothstep(0.02, 0.30, body);
 
+            // ---- 声の光. The voice does not fall from anywhere: it RISES in
+            // the body that is singing. It fills from within, breathes with the
+            // held voice, spills a little upward past the crown, and it fades
+            // slowly — light is the piece's good weather, and weather does not
+            // flinch at a syllable. Bounded: source is capped, decay is
+            // proportional, so longrun cannot blow it up.
+            float glow = uReset == 1 ? 0.0 : prev.b;
+            // the light wells up from the MIDDLE of the body (the chest, as far
+            // as a silhouette can know one): deep inside the mask, weighted low
+            float depth = smoothstep(0.35, 0.95, soft);
+            glow += uDt * uGlowAmt * uVoice * depth * 0.85;
+            // it rises: each cell also receives from the cell below, so a long
+            // note climbs from the chest into the shoulders and the head
+            float below = texture(uPrev, vUv - vec2(0.0, uTexel.y * 2.6)).b;
+            float bodyBelow = texture(uSoft, vUv - vec2(0.0, uTexel.y * 2.6)).r;
+            glow += uDt * 1.6 * max(below - glow, 0.0) * bodyBelow *
+              smoothstep(0.04, 0.30, soft);
+            glow -= uDt * glow * 0.30;
+            glow = clamp(glow, 0.0, 1.0);
+
             vec2 run = vec2(0.0, -1.0) * wet;
-            fragColor = vec4(wet, clamp(floor0, 0.0, 1.0), encV(run));
+            fragColor = vec4(wet, clamp(floor0, 0.0, 1.0), glow, 1.0);
           }
         `;
 
-        // P4 — the RAIN. 「この声が…あなたに見える日まで」
+        // P4 — the RAIN. 「ああ愛とは 何も語らず 静かに そっと肩にかかる雨」
         //
-        // The drops are NEVER drawn while they fall. They exist only to find the
-        // body: the instant one enters the silhouette it flares once and dies.
-        // That flare is the only place the voice is visible anywhere in the
-        // picture, which is the whole proposition — drawing the rain in the air
-        // would turn this into a rain effect and throw the idea away.
-        //
-        // A drop that is born while the voice is being pushed is born as MIST
-        // (B.w = 1): it ignores the body, passes straight through, deposits
-        // nothing, and is likewise invisible. 「何も語らず静かに」 is enforced
-        // here, in what the particle is allowed to become.
+        // The rain is the SILENCE of the piece: it falls when nobody sings, and
+        // as the body fills with light the weather clears and the rain thins
+        // out. It is drawn — thin slanted streaks, the way night rain shows
+        // against a dark room — and where a drop meets the body it flares
+        // faintly and wets the floss. (An earlier version kept the drops
+        // invisible in flight on principle, and the principle cost the picture
+        // everything: there was no rain to see.)
         const rainFS = `#version 300 es
           precision highp float;
           layout(location = 0) out vec4 outA;
@@ -994,9 +1013,8 @@
           uniform float uTime;
           uniform float uSeed;
           uniform float uAspect;
-          uniform float uRain;
+          uniform float uRainAmt;    // the weather (0 = clear sky, 1 = full rain)
           uniform float uWind;
-          uniform float uReach;      // 0 = every drop is mist, 1 = every drop lands
           uniform vec4 uAudA;        // rms, centroid, steadiness, onset
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
@@ -1011,38 +1029,35 @@
             float age = B.x;      // >= 1 = dormant; 0..1 falling; < 0 = flaring
             float size = B.y;
             float seed = B.z;
-            float mist = B.w;
+            float depth = B.w;    // 0 near … 1 far (parallax layer of this drop)
 
             float wind = (0.10 + 0.55 * uWind) *
               (0.6 + 0.5 * sin(uTime * 0.21 + seed * 5.0));
 
             if (age >= 0.999) {
-              // spawn along the top. The RATE follows the voice that is actually
-              // arriving, so a shouted voice makes barely any rain at all — it
-              // makes mist, and mist that nobody can see.
-              float rate = (2.0 + 26.0 * uRain) * (0.18 + 1.5 * uReach) *
-                uDt / max(uTexW * uTexW, 1.0);
-              if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate * uTexW * uTexW / 64.0) {
+              // the spawn rate IS the weather
+              float rate = (1.2 + 30.0 * uRainAmt) * uDt / 64.0;
+              if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate) {
                 seed = hash12(vec2(idx * 13.1, uSeed * 6.7));
-                pos = vec2(hash12(vec2(idx * 4.17, uSeed * 3.31)) * 1.4 - 0.2, 1.06);
-                vel = vec2(wind * 0.30, -(0.55 + 0.45 * hash12(vec2(seed * 7.0, 2.0))));
+                depth = hash12(vec2(idx * 3.7, uSeed * 1.9));
+                pos = vec2(hash12(vec2(idx * 4.17, uSeed * 3.31)) * 1.5 - 0.25, 1.08);
+                // far drops fall slower on screen (they are further away)
+                float fall = mix(1.15, 0.55, depth);
+                vel = vec2(wind * 0.30, -fall * (0.85 + 0.30 * hash12(vec2(seed * 7.0, 2.0))));
                 age = 0.001;
                 size = 0.0055 + 0.0075 * hash12(vec2(seed * 21.0, 3.3));
-                // 声を張ると霧になる。uReach は安定度と音量から作られる。
-                mist = hash12(vec2(idx * 5.1, uSeed * 2.2)) > uReach ? 1.0 : 0.0;
               }
             } else if (age < 0.0) {
               // flaring: a contact lasts a fraction of a second and is over
               age += uDt * 5.5;
               if (age >= 0.0) age = 1.0;
             } else {
-              vel.x += (wind - vel.x) * min(1.0, uDt * 2.2);
-              vel.y -= uDt * 0.55;
+              vel.x += (wind * mix(1.3, 0.6, depth) - vel.x) * min(1.0, uDt * 2.2);
               pos += vel * uDt / vec2(uAspect, 1.0);
-              age += uDt * 0.30;
-              // contact. Mist has no business here: it goes straight through.
+              age += uDt * 0.16;
+              // contact: only the NEAR drops can reach the person
               float body = texture(uMask, clamp(pos, 0.0, 1.0)).r;
-              if (mist < 0.5 && body > 0.55) {
+              if (depth < 0.45 && body > 0.55) {
                 age = -0.55;                  // begin the flare, stop moving
                 vel = vec2(0.0);
               } else if (pos.y < -0.06 || pos.x < -0.25 || pos.x > 1.25 || age >= 1.0) {
@@ -1050,7 +1065,7 @@
               }
             }
             outA = vec4(pos, encV(vel));
-            outB = vec4(age, size, seed, mist);
+            outB = vec4(age, size, seed, depth);
           }
         `;
 
@@ -1183,10 +1198,10 @@
           }
         `;
 
-        // P5b — the CONTACT. One quad per flaring drop: the only visible sign of
-        // the voice anywhere in the piece. A soft bloom of light with a brief
-        // ring travelling out of it, the size of a raindrop meeting cloth — not
-        // a splash, not a droplet, not a highlight.
+        // P5b — the rain, drawn. A falling drop is a thin streak along its own
+        // velocity — night rain reads as short slanted lines, nothing else. A
+        // drop that has met the body is a brief soft flare. Far drops are
+        // dimmer and shorter: three cheap parallax layers out of one pool.
         const rainDrawVS = `#version 300 es
           precision highp float;
           uniform sampler2D uStateA;
@@ -1194,7 +1209,7 @@
           uniform float uTexW;
           uniform float uAspect;
           out vec2 vLocal;
-          out vec3 vAttr;   // flare phase 0..1, seed, size
+          out vec4 vAttr;   // kind(0 streak / 1 flare), phase, seed, depth
           ${CHUNK_ENC}
           const vec2 QUAD[6] = vec2[6](
             vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
@@ -1202,24 +1217,32 @@
           );
           void main() {
             vLocal = vec2(0.0);
-            vAttr = vec3(0.0);
+            vAttr = vec4(0.0);
             int i = gl_InstanceID;
             int tw = int(uTexW);
             ivec2 tc = ivec2(i % tw, i / tw);
             vec4 A = texelFetch(uStateA, tc, 0);
             vec4 B = texelFetch(uStateB, tc, 0);
-            // ONLY the flaring drops (age < 0) are drawn. Everything in flight
-            // is discarded here — that is invariant 1, enforced structurally.
-            if (B.x >= 0.0) { gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return; }
-            float ph = clamp(1.0 + B.x / 0.55, 0.0, 1.0);   // 0 just landed … 1 gone
+            if (B.x >= 0.999) { gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return; }
             vec2 q = QUAD[gl_VertexID];
             vLocal = q;
-            vAttr = vec3(ph, B.z, B.y);
-            // a contact is the size of a raindrop on cloth. The first version
-            // used 2.2..8.2x the drop size and produced grey bokeh discs the
-            // size of a head — which read as lens blur, not as a voice arriving.
-            float r = B.y * (0.9 + 1.3 * ph);
-            vec2 P = A.xy * vec2(uAspect, 1.0) + q * r;
+            vec2 P;
+            if (B.x < 0.0) {
+              // contact flare
+              float ph = clamp(1.0 + B.x / 0.55, 0.0, 1.0);
+              vAttr = vec4(1.0, ph, B.z, B.w);
+              float r = B.y * (0.9 + 1.3 * ph);
+              P = A.xy * vec2(uAspect, 1.0) + q * r;
+            } else {
+              // falling streak, stretched along the velocity
+              vec2 vel = decV(A.zw);
+              vec2 dir = normalize(vel + vec2(1e-5));
+              vec2 perp = vec2(-dir.y, dir.x);
+              float len = (0.030 + 0.055 * length(vel)) * mix(1.0, 0.45, B.w);
+              float wid = B.y * mix(0.55, 0.30, B.w);
+              vAttr = vec4(0.0, B.x, B.z, B.w);
+              P = A.xy * vec2(uAspect, 1.0) + dir * q.x * len + perp * q.y * wid;
+            }
             gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
           }
         `;
@@ -1227,33 +1250,76 @@
         const rainDrawFS = `#version 300 es
           precision highp float;
           in vec2 vLocal;
-          in vec3 vAttr;
+          in vec4 vAttr;
           out vec4 fragColor;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
           void main() {
-            float ph = vAttr.x;
-            float seed = vAttr.y;
-            float r = length(vLocal);
-            if (r > 1.0) discard;
-            // a soft centre that fades fast, and a thin ring running outward
-            float core = (1.0 - smoothstep(0.0, 0.62, r)) * (1.0 - ph * 0.85);
-            float ring = (1.0 - smoothstep(0.06, 0.30, abs(r - (0.40 + 0.55 * ph)))) *
-              (1.0 - ph) * 0.70;
-            float a = clamp(core * 0.95 + ring * 0.55, 0.0, 1.0);
-            if (a <= 0.004) discard;
-            // rgb above alpha so the bloom pass turns the contact into light:
-            // this is the voice becoming visible
-            // a flash, not a bead. Beads of light sitting on the surface are
-            // exactly the water-droplet reading this piece must avoid.
-            vec3 col = VOICE * (0.95 + 0.75 * (1.0 - ph));
-            fragColor = vec4(col * a, a);
+            float kind = vAttr.x;
+            float ph = vAttr.y;
+            float depth = vAttr.w;
+            vec2 p = vLocal;
+            if (kind > 0.5) {
+              // the flare where the rain met the body
+              float r = length(p);
+              if (r > 1.0) discard;
+              float core = (1.0 - smoothstep(0.0, 0.62, r)) * (1.0 - ph * 0.85);
+              float ring = (1.0 - smoothstep(0.06, 0.30, abs(r - (0.40 + 0.55 * ph)))) *
+                (1.0 - ph) * 0.70;
+              float a = clamp(core * 0.95 + ring * 0.55, 0.0, 1.0);
+              if (a <= 0.004) discard;
+              vec3 col = VOICE * (0.95 + 0.75 * (1.0 - ph));
+              fragColor = vec4(col * a, a);
+            } else {
+              // a falling streak: brightest in the middle of its length, hair
+              // thin, and FAINT — the rain must read in sum, not per drop
+              float along = 1.0 - abs(p.x);
+              float across = 1.0 - smoothstep(0.35, 1.0, abs(p.y));
+              float a = along * along * across * mix(0.30, 0.10, depth);
+              if (a <= 0.004) discard;
+              vec3 col = vec3(0.62, 0.68, 0.80) * mix(1.0, 0.6, depth);
+              fragColor = vec4(col * a, a);
+            }
           }
         `;
 
         // P7 — bloom bright pass: only the parts of the flower layer that are
         // genuinely luminous (the stamens, the brightest petal flanks) are
         // allowed to glow. Downsamples at the same time.
+        // P5c — the LIGHT, into the layer. The voice risen in the body, drawn
+        // emissive (rgb written above alpha) so the bloom pass builds the halo:
+        // the light has to LEAVE the body a little, or it reads as a brightness
+        // setting instead of as a thing the body is doing. Modulated by the
+        // same fibre direction the surface uses, so the silk glows as strands.
+        const glowFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uWet;
+          uniform sampler2D uSoft;
+          uniform float uAspect;
+          uniform float uGlowAmt;
+          ${CHUNK_NOISE}
+          ${CHUNK_PALETTE}
+          void main() {
+            float glow = texture(uWet, vUv).b * uGlowAmt;
+            float soft = texture(uSoft, vUv).r;
+            if (glow * soft <= 0.004) discard;
+            vec2 ar = vec2(uAspect, 1.0);
+            float ang = 1.15 + 3.4 * fbm(vUv * ar * 9.0);
+            vec2 fdir = vec2(cos(ang), sin(ang));
+            vec2 fp = vec2(dot(vUv * ar, fdir), dot(vUv * ar, vec2(-fdir.y, fdir.x)));
+            float fib = fbm(vec2(fp.x * 17.0, fp.y * 175.0));
+            // deep modulation: the strands must survive INTO the lit state, or
+            // the glow turns the body into one white blob (§A1, again)
+            float strand = 0.42 + 0.95 * fib;
+            vec3 lampCol = vec3(1.00, 0.93, 0.80);
+            float g = glow * smoothstep(0.10, 0.70, soft) * strand;
+            // rgb above alpha: this is what feeds the bloom
+            fragColor = vec4(lampCol * g * 1.15, clamp(g * 0.38, 0.0, 1.0));
+          }
+        `;
+
         const brightFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -1265,7 +1331,7 @@
             // only the genuinely emissive parts (stamens, the hottest petal
             // flanks — the ones written above 1.0) are allowed to glow. A low
             // threshold makes every petal halo and the field reads as sparkles.
-            fragColor = vec4(c * smoothstep(0.80, 1.60, l), 1.0);
+            fragColor = vec4(c * smoothstep(0.72, 1.45, l), 1.0);
           }
         `;
 
@@ -1281,7 +1347,7 @@
           uniform sampler2D uScene;
           uniform sampler2D uMask;
           uniform sampler2D uSoft;
-          uniform sampler2D uWet;
+          uniform sampler2D uWet;   // R=濡れ G=誇りの床 B=声の光
           uniform sampler2D uLayer;
           uniform sampler2D uB1;
           uniform sampler2D uB2;
@@ -1291,7 +1357,8 @@
           uniform float uExposure;
           uniform float uFilmGrain;
           uniform float uFloss;
-          uniform float uReach;
+          uniform float uGlowAmt;
+          uniform float uShine;
           uniform float uPresent;
           uniform vec4 uAudA;   // rms, centroid, steadiness, onset
           uniform vec4 uAudB;   // sustain, pitch, vibrato, arc
@@ -1350,6 +1417,16 @@
             // while the colour falls
             tex = mix(tex, 0.62 + 0.72 * (fib - 0.5) + 0.42 * (fib2 - 0.5), w);
             vec3 flossCol = mix(FLOSS_DRY, FLOSS_WET, w) * clamp(tex, 0.0, 1.6);
+            // ---- 声の光. The voice rises IN the body: the silk lights from
+            // within, and the light lives in the gaps between the strands (the
+            // fibre texture MODULATES it), so it reads as material glowing, not
+            // as a brightness slider. Wet silk lets more light through — the
+            // rain that soaked in is what the light now shines out of.
+            float glow = texture(uWet, vUv).b * uGlowAmt;
+            vec3 lampCol = vec3(1.00, 0.94, 0.82);
+            float lamp = glow * (0.55 + 0.75 * clamp(tex, 0.0, 1.5)) *
+              (1.0 + 0.35 * w);
+            flossCol += lampCol * lamp * 0.30;
             // Lit FROM ABOVE, by the same sky the rain falls out of. This is
             // what gives the figure three-dimensional form after its
             // photographic detail is gone: shoulders and the crown catch the
@@ -1374,10 +1451,13 @@
             // ---- the floss layer (premultiplied over)
             col = col * (1.0 - clamp(L.a, 0.0, 1.0)) + L.rgb;
 
-            // ---- bloom: only the contacts are bright enough to reach it, so
-            // the glow in this picture IS the voice
+            // ---- bloom: the lit body and the rain flares reach it, so the
+            // halo around the figure IS the voice — 光の庭
             vec3 b = texture(uB1, vUv).rgb * 0.42 + texture(uB2, vUv).rgb * 0.62;
             col += b * 0.85;
+            // the room itself catches a breath of the body's light
+            float shine = clamp(uShine, 0.0, 1.0);
+            col += vec3(0.055, 0.050, 0.040) * shine * (1.0 - smoothstep(0.18, 0.80, soft));
 
             // ---- 確かな誇り。「今 私の胸のうちに息衝くのは 確かな誇り」
             // The floor of the wetness — the part that will not dry — carries a
@@ -1405,12 +1485,12 @@
               vec2 nrm = -normalize(vec2(gx, gy) + vec2(1e-6));
               col = vec3(mk.r, clamp(nrm.y, 0.0, 1.0), soft);
             } else if (uDebug == 2) {
-              col = vec3(wt.r, wt.g, 0.10);
+              col = vec3(wt.r, wt.g, wt.b);   // R=濡れ G=床 B=光
             } else if (uDebug == 3) {
               float vals[6];
               vals[0] = uAudA.x;   // 音量
               vals[1] = uAudA.z;   // 安定度
-              vals[2] = uReach;    // 届く割合(=雨になれた分)
+              vals[2] = uShine;    // 光(=天候。増えるほど雨が上がる)
               vals[3] = uAudB.x;   // 持続
               vals[4] = uAudA.y;   // 声色
               vals[5] = uAudA.w;   // アタック
@@ -1478,6 +1558,7 @@
           rain: createProgram(rainFS),
           floss: createProgramVS(flossVS, flossFS),
           rainDraw: createProgramVS(rainDrawVS, rainDrawFS),
+          glow: createProgram(glowFS),
           bright: createProgram(brightFS),
           composite: createProgram(compositeFS),
         };
@@ -1494,12 +1575,12 @@
           ]),
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
           wet: getLocations(programs.wet, [
-            "uPrev", "uMask", "uSoft", "uTexel", "uDt", "uAspect", "uRain",
-            "uSoak", "uReach", "uReset",
+            "uPrev", "uMask", "uSoft", "uTexel", "uDt", "uAspect",
+            "uSoak", "uRainAmt", "uVoice", "uGlowAmt", "uReset",
           ]),
           rain: getLocations(programs.rain, [
             "uStateA", "uStateB", "uMask", "uTexW", "uDt", "uTime", "uSeed",
-            "uAspect", "uRain", "uWind", "uReach", "uAudA",
+            "uAspect", "uRainAmt", "uWind", "uAudA",
           ]),
           floss: getLocations(programs.floss, [
             "uMask", "uSoft", "uWet", "uAspect", "uTime", "uFloss", "uWind",
@@ -1508,10 +1589,14 @@
           rainDraw: getLocations(programs.rainDraw, [
             "uStateA", "uStateB", "uTexW", "uAspect",
           ]),
+          glow: getLocations(programs.glow, [
+            "uWet", "uSoft", "uAspect", "uGlowAmt",
+          ]),
           bright: getLocations(programs.bright, ["uSrc"]),
           composite: getLocations(programs.composite, [
             "uScene", "uMask", "uSoft", "uWet", "uLayer", "uB1", "uB2",
-            "uResolution", "uAspect", "uTime", "uExposure", "uFloss", "uReach",
+            "uResolution", "uAspect", "uTime", "uExposure", "uFloss",
+            "uGlowAmt", "uShine",
             "uFilmGrain", "uPresent", "uAudA", "uAudB", "uDebug",
           ]),
         };
@@ -1635,8 +1720,8 @@
           clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
           clearTarget(targets.softT, 0, 0, 0.5, 0.5);
           clearTarget(targets.softTmp, 0, 0, 0.5, 0.5);
-          clearTarget(targets.wetA, 0, 0, 0.5, 0.5);
-          clearTarget(targets.wetB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.wetA, 0, 0, 0, 1);
+          clearTarget(targets.wetB, 0, 0, 0, 1);
           clearTarget(targets.layer, 0, 0, 0, 0);
           clearTarget(targets.b1Src, 0, 0, 0, 1);
           clearTarget(targets.b1, 0, 0, 0, 1);
@@ -1926,31 +2011,32 @@
         // cen = spectral centroid (timbre → hue), zcr = breathiness,
         // pitch = dominant pitch (→ stem height), vib = vibrato, onset = attack
         // steady = how UNWAVERING the voice is (the inverse of short-window
-        //   loudness變動 + timbre flux). This is the axis the piece runs on.
-        // reach  = how much of the voice becomes rain that can land, from
-        //   steadiness AND a penalty for pushing. 「何も語らず静かに」
+        //   loudness変動 + timbre flux).
+        // shine  = the WEATHER of the piece: how much light the body has built
+        //   up by singing. Silence lets it fade and the rain comes back.
         const meters = {
           rms: 0, sus: 0, cen: 0.3, zcr: 0.2, pitch: 0.4, vib: 0, onset: 0,
-          steady: 0, reach: 0,
+          steady: 0, shine: 0,
         };
         // running state for the steadiness estimate
         const stab = { mean: 0, dev: 0, cenPrev: 0.3, flux: 0 };
 
-        // 声が雨になれる割合。この作品の中心の判定。
-        //   * 声が出ていないと雨にならない(無音では届くものが無い)
-        //   * 揺れている声・立ち上がりの連続は霧になる
-        //   * そして音量が閾値を超えると、超えた分だけ霧に転じる
-        // quiet スライダーは閾値の位置と罰の傾きの両方を動かす。
-        function updateReach(dt) {
-          const push = smoothstep01(
-            0.42 + 0.30 * (1 - state.quiet), 0.92, meters.rms);
-          // only actual silence is unvoiced: a quiet voice is the point
-          const voiced = smoothstep01(0.02, 0.14, meters.rms);
-          const target = voiced * meters.steady *
-            (1 - push * (0.45 + 0.55 * state.quiet));
-          // slew-limited so a single syllable cannot flip the picture
-          const k = 1 - Math.exp(-Math.max(dt, 1e-4) / (target > meters.reach ? 0.55 : 0.30));
-          meters.reach += (Math.max(0, Math.min(1, target)) - meters.reach) * k;
+        // 天候。静けさには雨が降り、歌い続けるほど身体の光が増して晴れていく。
+        // shine は歌で満ち(全力で 12 秒ほど)、黙ると 35 秒ほどかけて薄れる —
+        // 天気なので、一音では変わらない。保たれた声がいちばんよく満たし、
+        // 揺れる声・叫びは steady が下がる分だけ満ちが遅い(罰は無い)。
+        function updateShine(dt) {
+          const voiced = smoothstep01(0.03, 0.16, meters.rms);
+          const charge = voiced * meters.sus * (0.40 + 0.60 * meters.steady);
+          meters.shine += dt * (charge / 12.0);
+          meters.shine -= dt * (meters.shine / 35.0);
+          meters.shine = Math.max(0, Math.min(1, meters.shine));
+        }
+        // 実効の雨量: 光が増すほど雨は上がっていく(晴れる)。
+        // clear スライダーは光と天候の結合の強さ。
+        function rainNow() {
+          return state.rain *
+            (1 - state.clear * smoothstep01(0.08, 0.75, meters.shine));
         }
         function smoothstep01(a, b, x) {
           const t = Math.max(0, Math.min(1, (x - a) / Math.max(b - a, 1e-5)));
@@ -1962,42 +2048,35 @@
 
         // The scripted song for ?fakesource=1 — 18s: 前奏 / A メロ / サビ /
         // 間奏 / 余韻. A pure function of the (frozen-able) art clock.
-        // The scripted song for ?fakesource=1 — 20s. It MUST contain a long,
-        // genuinely quiet, genuinely STEADY passage, or invariant 5 (the whole
-        // proposition of the piece) goes unexercised offline and the verifier
-        // passes on a picture nobody has actually driven. In samoarinan a
-        // metric turned out to be measuring the wrong thing for exactly this
-        // reason; this song is built so that cannot happen here.
+        // The scripted song for ?fakesource=1 — 24s, built as the WEATHER ARC
+        // this piece runs on: real silence first (the rain must be seen), then
+        // a long sustained sing (the light must grow and the sky must clear),
+        // then silence again (the rain must come back). If the song never goes
+        // quiet, the rain never appears offline and invariant 1 goes
+        // unexercised — the samoarinan lesson, applied in advance.
         function fakeSong(t) {
-          const T = t % 20;
+          const T = t % 24;
           let vol, cen, pit, zcr;
-          if (T < 1.2) {                       // 前奏: almost silent
-            vol = 0.05 + 0.03 * Math.sin(T * 3.0);
-            cen = 0.22; pit = 0.30; zcr = 0.30;
-          } else if (T < 8.4) {                // 静かな持続: this is the one that
-            // has to reach. Almost no wobble, almost no timbre movement — the
-            // quiet held voice the piece is written for.
-            vol = 0.20 + 0.012 * Math.sin(T * 0.55);
-            cen = 0.28 + 0.010 * Math.sin(T * 0.30);
-            pit = 0.36 + 0.020 * Math.sin(T * 0.8);
+          if (T < 5.0) {                       // 無音: the rain's scene
+            vol = 0.015 + 0.010 * Math.sin(T * 1.7);
+            cen = 0.24; pit = 0.32; zcr = 0.30;
+          } else if (T < 15.0) {               // 静かな持続: the light grows
+            vol = 0.26 + 0.020 * Math.sin(T * 0.6);
+            cen = 0.30 + 0.012 * Math.sin(T * 0.33);
+            pit = 0.38 + 0.025 * Math.sin(T * 0.7);
             zcr = 0.24;
-          } else if (T < 14.0) {               // 張り上げ: loud AND unsteady, so
-            // the rain should turn to mist and stop landing
-            const u = (T - 8.4) / 5.6;
-            vol = 0.72 + 0.24 * Math.sin(T * 3.1) * (0.6 + 0.4 * u);
-            cen = 0.55 + 0.26 * Math.sin(T * 2.3);
-            pit = 0.64 + 0.18 * Math.sin(T * 2.9);
-            zcr = 0.30;
-          } else if (T < 17.6) {               // 息だけの間: breathy, quiet, wobbly
-            vol = 0.17 + 0.09 * Math.sin(T * 2.9);
-            cen = 0.40 + 0.10 * Math.sin(T * 1.9);
-            pit = 0.45; zcr = 0.58;
-          } else {                             // 余韻: quiet and steady again
-            const u = (T - 17.6) / 2.4;
-            vol = 0.17 * (1.0 - u * 0.7);
-            cen = 0.26; pit = 0.34; zcr = 0.30;
+          } else if (T < 19.0) {               // ふくらみ: still held, fuller
+            const u = (T - 15.0) / 4.0;
+            vol = 0.40 + 0.06 * u + 0.03 * Math.sin(T * 1.1);
+            cen = 0.38 + 0.05 * Math.sin(T * 0.8);
+            pit = 0.50 + 0.06 * Math.sin(T * 0.9);
+            zcr = 0.22;
+          } else {                             // 余韻 → 無音: the rain returns
+            const u = (T - 19.0) / 5.0;
+            vol = Math.max(0.0, 0.22 * (1.0 - u * 1.15));
+            cen = 0.27; pit = 0.35; zcr = 0.28;
           }
-          return { vol: Math.max(0, vol), cen, pit, zcr, playing: T > 1.15 };
+          return { vol: Math.max(0, vol), cen, pit, zcr, playing: T > 4.9 && T < 21.5 };
         }
 
         // A gentle self-driven breath for visitors with no microphone: slow
@@ -2080,15 +2159,14 @@
             aud.armed = true;
           }
           updateSteady(dt, meters.rms, meters.cen);
-          updateReach(dt);
+          updateShine(dt);
         }
 
         // 安定度. Two things make a voice unsteady: its loudness wobbles, and its
         // timbre keeps moving. Both are measured against slow means so a long
         // held note scores high however loud or quiet it is, and a shouted or
-        // choppy phrase scores low. Loudness itself is NOT part of this — the
-        // penalty for pushing lives in updateReach, separately, so the two can
-        // be read apart in debug view 3.
+        // choppy phrase scores low. Loudness itself is NOT part of this, so the
+        // two can be read apart in debug view 3.
         function updateSteady(dt, rmsN, cenN) {
           const k = (tc) => 1 - Math.exp(-Math.max(dt, 1e-4) / tc);
           stab.mean += (rmsN - stab.mean) * k(0.9);
@@ -2132,7 +2210,7 @@
             seedBase.next = Math.max(seedBase.next, animTime + onsetPeriod);
           }
           updateSteady(dt, meters.rms, meters.cen);
-          updateReach(dt);
+          updateShine(dt);
         }
 
         const fakeClock = { next: 1.2 };
@@ -2385,9 +2463,13 @@
             gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
             gl.uniform1f(u.uDt, dt);
             gl.uniform1f(u.uAspect, aspect);
-            gl.uniform1f(u.uRain, state.rain);
             gl.uniform1f(u.uSoak, state.soak);
-            gl.uniform1f(u.uReach, meters.reach);
+            gl.uniform1f(u.uRainAmt, rainNow());
+            // the light breathes with the held voice, over the weather floor
+            gl.uniform1f(u.uVoice,
+              meters.sus * (0.35 + 0.65 * meters.steady) *
+              (0.45 + 0.55 * meters.shine));
+            gl.uniform1f(u.uGlowAmt, state.glowAmt);
             gl.uniform1i(u.uReset, doReset ? 1 : 0);
           });
 
@@ -2405,9 +2487,8 @@
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uSeed, seed);
             gl.uniform1f(u.uAspect, aspect);
-            gl.uniform1f(u.uRain, state.rain);
+            gl.uniform1f(u.uRainAmt, rainNow());
             gl.uniform1f(u.uWind, state.wind);
-            gl.uniform1f(u.uReach, meters.reach);
             gl.uniform4f(u.uAudA,
               meters.rms, meters.cen, meters.steady, meters.onset);
           });
@@ -2440,6 +2521,19 @@
             gl.uniform1f(u.uCount, FLOSS_N);
           }
           gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, FLOSS_N);
+
+          // the light of the voice (fullscreen, emissive)
+          gl.useProgram(programs.glow);
+          {
+            const u = locations.glow;
+            bindTexture(0, wetOut.tex);
+            bindTexture(1, targets.softT.tex);
+            gl.uniform1i(u.uWet, 0);
+            gl.uniform1i(u.uSoft, 1);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uGlowAmt, state.glowAmt);
+          }
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
 
           gl.useProgram(programs.rainDraw);
           {
@@ -2497,7 +2591,8 @@
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uExposure, state.exposure);
             gl.uniform1f(u.uFloss, state.floss);
-            gl.uniform1f(u.uReach, meters.reach);
+            gl.uniform1f(u.uGlowAmt, state.glowAmt);
+            gl.uniform1f(u.uShine, meters.shine);
             gl.uniform1f(u.uFilmGrain, state.filmGrain);
             gl.uniform1f(u.uPresent, det.present);
             gl.uniform4f(u.uAudA,
@@ -2585,7 +2680,7 @@
             readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
               canvas.height} / 繊維 ${FLOSS_N.toLocaleString()} / 雨 ${
               RAIN_N.toLocaleString()} / 音 ${audioLabel()} / 安定 ${
-              meters.steady.toFixed(2)} / 届 ${meters.reach.toFixed(2)} / 検知 ${
+              meters.steady.toFixed(2)} / 光 ${meters.shine.toFixed(2)} / 検知 ${
               detectionLabel()}`;
             levelBar.style.width = `${Math.round(Math.min(1, meters.rms) * 100)}%`;
             updateChip();

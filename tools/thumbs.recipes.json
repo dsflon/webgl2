@@ -372,7 +372,7 @@
     "hideCss": "#hud,#hint{display:none!important}"
   },
   "opus5_koe": {
-    "query": "fakesource=1&prewarm=7",
+    "query": "fakesource=1&prewarm=14",
     "warmMs": 5000,
     "click": [],
     "hide": [
@@ -380,7 +380,7 @@
     ],
     "readyFlag": true,
     "audio": false,
-    "note": "合成の歌は20秒ループ。prewarm=7 は「静かな持続」区間の終わり=声が最も届いている瞬間で、肩と頭頂が濡れて着弾が見える状態を撮る。張り上げ区間(8.4〜14秒)は乾いていくので避ける。",
+    "note": "合成の歌は24秒の天候弧(無音5s→静かな持続10s→ふくらみ4s→無音)。prewarm=14 は歌の中盤 = 身体が灯り始めて雨がまだ残る、両方が一枚に入る瞬間。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
