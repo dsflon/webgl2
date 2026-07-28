@@ -2,11 +2,13 @@
 <!--
   opus5_koe.html — WebGL2 マイク+カメラ →「声 / Voice」
   森山直太朗「声」(映画『半落ち』主題歌)のための映像。
-  **静けさには雨が降る。歌えば、声は身体の中で光になる。** カメラに映る人は
-  真綿でできていて、無音の夜には雨に打たれて肩から濡れてゆく。歌い続けると
-  声が胸から光として昇り、絹が内側から灯り、光が増えるにつれ雨は上がって
-  晴れていく(この声が いつの日か あなたに見える日まで/光の庭で 永遠に唄うよ)。
+  **静けさには雨が降る。歌えば、声は身体の中で光になる。** 人物は実写のまま。
+  無音の夜には見える雨に打たれて肩から濡れてゆき、歌い続けると声が胸から光と
+  して昇って身体を内側から灯し、光が増えるにつれ雨は上がって晴れていく
+  (この声が いつの日か あなたに見える日まで/光の庭で 永遠に唄うよ)。
   黙ればまた、静かな雨が戻る(何も語らず 静かに そっと肩にかかる雨)。
+  真綿は身体を覆わない — 「真綿のように生きて居る」は生き方の直喩なので、
+  綿毛として宙を漂い、風に吹かれて流れ、雲は暗がりをゆっくり渡る。
   派生元エンジン: opus5_hana.html(ImageSegmenter のモバイル手順・マイク解析・
   合成の歌・カメラと UI と検証フック)。
 
@@ -14,15 +16,20 @@
     1. 天候の弧 — 雨と光は同じ一つの状態(shine)の両端。無音=雨、歌えば光が
        満ちて雨が上がる。天気なので一音では変わらない(満ちるのに十数秒、
        引くのに数十秒)。雨は見える — 夜の雨らしい細い斜めの筋。
-    2. あなたは真綿でできている — 人物は繊維の絡み。マットで白く空気を含む。
-       輪郭は毛羽。内部は異方性の繊維テクスチャで、平坦な白で塗らない。
+    2. 人物は実写のまま — 「花」と同じ図地の割り方(2026-07-28 の是正。素材
+       置換はシルエット化を招き、直喩の読みとしても誤りだった)。夜のグレードの
+       中でマスクが人物だけを淡く持ち上げ、人が人として読める。
+       真綿・風・雲は抽象表現として空中に出す:
+       綿毛が風に吹かれて漂い(真綿のように/風に吹かれ)、
+       ゆっくり渡る雲が暗がりに掛かり、晴れるにつれ薄れる(雲に焦がれ)。
     3. 雨は肩にかかる — ぼかしたマスクの勾配=法線と上方マーチの遮蔽判定で、
        上を向いた面(肩・頭頂)だけが濡れる。腕の下側は乾いたまま。
        着弾は淡い閃光、濡れは重力で流れ落ちて身体を覆う。
     4. 濡れた真綿は重くなる — 吸った繊維は暗く、束になる。反射で光らせない。
     5. 声の光は胸から昇る — 光は空から降らず、歌っている身体の深部で湧き、
-       上へ昇って肩と頭に満ちる。絹の縞に沿って灯り(繊維が光を変調する)、
-       ブルームで身体の外へ僅かに漏れる。灯っても縞は消えない(§A1)。
+       上へ昇って肩と頭に満ちる。**実写の輝度が光を運ぶ**(顔や皺の明るい所が
+       灯り、影は影のまま)ので、身体の実形に沿って灯る。ブルームで外へ僅かに
+       漏れる=光の庭。一様に光らせない(§A1)。
     6. 確かな誇り — 濡れの床は乾ききらない。届いたものは残る。上限で飽和。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
@@ -37,11 +44,15 @@
                 A=(x, y, encV(速度)) B=(齢, 大きさ, seed, 奥行き)
                 発生率=いまの雨量(=天候)。奥行きで3層の視差。近い粒だけが
                 身体に届いて閃光になり、濡れを足す
+    [P4b wisp]  綿毛プール ping-pong(MRT 2枚, WISP_W×WISP_H)★
+                浮力で漂い、風に流れ、カールノイズで蛇行。落ちない。
+                晴れるほど身体の光を受けて明るむ
     [P5 layer]  layerT★ を透明にクリアし前乗算アルファで重ねる:
-                真綿の繊維(輪郭の毛羽)→ 声の光(全画面・エミッシブ)→
+                綿毛(宙を漂う)→ 声の光(全画面・エミッシブ。実写輝度が変調)→
                 雨(落下中の筋+着弾の閃光)
     [P6 bloom]  layerT の明部を抽出 → 2段ダウンサンプル+ぼかし        b1 b2
-    [P7 comp]   夜の実写 → 真綿の面(異方性繊維。濡=暗く/光=内側から灯る)→
+    [P7 comp]   夜の実写 → 人物を淡く持ち上げ(実写のまま)→ 濡れで暗く沈め →
+                雲(暗がりのみ・晴れで薄れる)→ 声の光(実写輝度が運ぶ)→
                 layer 前乗算合成 → ブルーム(=光の庭のハロー)→
                 誇りの淡い温度 → 肩付きトーンマップ・粒子・周辺減光
 
@@ -57,13 +68,13 @@
     ?fakeseg=1   … 実カメラのマスク経路を合成マスクで駆動(Y反転の検査)
     ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
     デバッグ表示: 0=最終 1=マスクと法線 2=濡れと光 3=音の特徴量(光=天候を含む)
-                  4=雨と繊維 5=配色標本
+                  4=雨と綿毛 5=配色標本
 
   スライダーの説明:
     雨          静けさに降る雨の量
     晴れ        歌の光がどれだけ雨を上がらせるか(天候の結合)
     声の光      声が身体に灯る光の量
-    真綿の毛羽  繊維の長さと毛羽立ち
+    真綿        宙を漂う綿毛の量
     濡れの残り  濡れが残る強さ(=乾きにくさ)
     風          風の強さ(雨の傾きと繊維の梳かれ)
     音の感度    マイク入力のゲイン
@@ -311,7 +322,7 @@
           "マスクと法線",
           "濡れと光",
           "音の特徴量",
-          "雨と繊維",
+          "雨と綿毛",
           "配色標本",
         ];
 
@@ -339,7 +350,7 @@
           ["rain", "雨", "静けさに降る雨の量", 0, 1, 0.01],
           ["clear", "晴れ", "歌の光がどれだけ雨を上がらせるか", 0, 1, 0.01],
           ["glowAmt", "声の光", "声が身体に灯る光の量", 0, 1, 0.01],
-          ["floss", "真綿の毛羽", "繊維の長さと毛羽立ち", 0, 1, 0.01],
+          ["floss", "真綿", "宙を漂う綿毛の量", 0, 1, 0.01],
           ["soak", "濡れの残り", "濡れが残る強さ(=乾きにくさ)", 0, 1, 0.01],
           ["wind", "風", "風の強さ(雨の傾きと繊維の梳かれ)", 0, 1, 0.01],
           ["micGain", "音の感度", "マイク入力のゲイン(小声で届かせるなら上げる)", 0, 1, 0.01],
@@ -509,11 +520,13 @@
         const IS_SOFT = /swiftshader|llvmpipe|software|basic|subzero/i.test(RENDERER);
         const COARSE = window.matchMedia("(pointer: coarse)").matches;
 
-        // 真綿の繊維. Attributeless instanced quads: each instance hashes itself
-        // to a position and only draws where the mask is. The pool is FIXED, so
-        // the floss can never accumulate — and it must be big enough that the
-        // body reads as a fibrous MASS rather than as scattered hairs (§B1).
-        const FLOSS_N = IS_SOFT ? 12000 : (COARSE ? 26000 : 64000);
+        // 真綿の綿毛. 「真綿のように生きて居る」は空気を含んだ柔らかさの直喩で
+        // あって、人体を覆う布ではない(2026-07-28 の是正)。宙をゆっくり漂う
+        // 綿毛のプール — 生きた数は百前後、風に吹かれて流れていく。
+        const WISP_SIDE = IS_SOFT ? 12 : (COARSE ? 16 : 20);
+        const WISP_W = WISP_SIDE;
+        const WISP_H = WISP_SIDE;
+        const WISP_N = WISP_W * WISP_H;         // 144 / 256 / 400
 
         // 声の雨. Free particles, two MRT attachments. Sized to the live
         // population: drops are invisible in flight and only matter at the
@@ -1069,28 +1082,87 @@
           }
         `;
 
-        // P5a — 真綿. Attributeless instanced quads, one short filament each.
+        // P5a — 真綿の綿毛. 「あの夏の日 風に吹かれ」「真綿のように生きて居る」
         //
-        // A silhouette filled with a flat white is a sticker (CRAFT §A1/§A2) —
-        // the two failures this material exists to avoid. So: thousands of fine
-        // filaments, each hashing itself to a place on the body, densest and
-        // longest at the contour where they reach OUT past the mask so the edge
-        // is fuzz rather than a cut line.
-        //
-        // Wet filaments do not shine. They darken, they clump, and they hang.
-        // (Making them specular is what would turn this into 水のひと.)
-        const flossVS = `#version 300 es
+        // Tufts of silk floss adrift in the room's air: buoyant, unhurried,
+        // combed along by the wind, never falling. They are the abstract
+        // register of the piece — the body itself stays REAL (the 2026-07-28
+        // correction: the simile describes how someone lives, it does not
+        // wrap them in cloth). In the clear weather they catch the body's
+        // light and the air itself becomes the 光の庭.
+        const wispFS = `#version 300 es
           precision highp float;
-          uniform sampler2D uMask;
-          uniform sampler2D uSoft;
-          uniform sampler2D uWet;
+          layout(location = 0) out vec4 outA;
+          layout(location = 1) out vec4 outB;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform float uTexW;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uSeed;
+          uniform float uAspect;
+          uniform float uWisp;
+          uniform float uWind;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          void main() {
+            ivec2 tc = ivec2(gl_FragCoord.xy);
+            float idx = float(tc.y) * uTexW + float(tc.x);
+            vec4 A = texture(uStateA, gl_FragCoord.xy / vec2(textureSize(uStateA, 0)));
+            vec4 B = texture(uStateB, gl_FragCoord.xy / vec2(textureSize(uStateB, 0)));
+            if (uDt <= 0.0) { outA = A; outB = B; return; }
+            vec2 pos = A.xy;
+            vec2 vel = decV(A.zw);
+            float age = B.x;
+            float size = B.y;
+            float seed = B.z;
+            float phase = B.w;
+
+            if (age >= 0.999) {
+              float rate = (0.35 + 2.6 * uWisp) * uDt / 24.0;
+              if (hash12(vec2(idx * 1.93, uSeed * 0.71)) < rate) {
+                seed = hash12(vec2(idx * 13.1, uSeed * 6.7));
+                // most fade in anywhere in the air; some drift in from windward.
+                // Spawning ONLY at the edge piled them up along one side.
+                float fromEdge = step(0.78, hash12(vec2(idx * 9.3, uSeed)));
+                pos = mix(
+                  hash22(vec2(idx * 4.17, uSeed * 3.31)) * vec2(1.1, 1.05) - 0.03,
+                  vec2(-0.10, hash12(vec2(idx * 4.17, uSeed * 3.31)) * 1.05),
+                  fromEdge);
+                vel = vec2(0.02, 0.0);
+                age = 0.001;
+                size = 0.006 + 0.011 * pow(hash12(vec2(seed * 21.0, 3.3)), 1.6);
+                phase = hash12(vec2(seed * 31.0, 7.7));
+              }
+            } else {
+              // buoyant: it rides the wind, wanders on curl noise, and BREATHES
+              // up and down instead of falling — floss holds air
+              float wind = (0.035 + 0.085 * uWind) *
+                (0.75 + 0.35 * sin(uTime * 0.17 + seed * 6.28));
+              vec2 drift = curlN(pos * vec2(uAspect, 1.0) * 1.9 + seed * 13.0);
+              vec2 want = vec2(wind, 0.012 * sin(uTime * 0.5 + phase * 6.28))
+                + drift * 0.020;
+              vel += (want - vel) * min(1.0, uDt * 0.8);
+              pos += vel * uDt / vec2(uAspect, 1.0);
+              // a long, gentle life; it dissolves before it gets anywhere fast
+              age += uDt / (16.0 + 14.0 * hash12(vec2(seed * 3.3, 1.7)));
+              if (pos.x > 1.15 || pos.y < -0.10 || pos.y > 1.12 || age >= 1.0) age = 1.0;
+            }
+            outA = vec4(pos, encV(vel));
+            outB = vec4(clamp(age, 0.0, 1.0), size, seed, phase);
+          }
+        `;
+
+        const wispDrawVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uStateA;
+          uniform sampler2D uStateB;
+          uniform float uTexW;
           uniform float uAspect;
           uniform float uTime;
-          uniform float uFloss;
-          uniform float uWind;
-          uniform float uCount;
           out vec2 vLocal;
-          out vec4 vAttr;    // wet, seed, edgeness, alongLen
+          out vec4 vAttr;   // age, seed, phase, tumble
+          ${CHUNK_ENC}
           ${CHUNK_NOISE}
           const vec2 QUAD[6] = vec2[6](
             vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
@@ -1099,101 +1171,51 @@
           void main() {
             vLocal = vec2(0.0);
             vAttr = vec4(0.0);
-            float fi = float(gl_InstanceID);
-            // position from the INDEX only — never from uTime, or the whole
-            // body crawls and ?freeze=1 flickers (repo rule)
-            vec2 h = hash22(vec2(fi * 0.7371, fi * 1.3137 + 4.4));
-            vec2 uv = h;
-            float body = texture(uMask, uv).r;
-            float soft = texture(uSoft, uv).r;
-            // keep only the filaments that landed on the body or just outside it
-            if (soft < 0.10) { gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return; }
-
-            // the contour: where the softened mask is mid-way. Filaments here are
-            // longer and stick outward, which is what makes the edge fibrous.
-            float edge = 1.0 - abs(soft * 2.0 - 1.0);
-            edge = pow(clamp(edge, 0.0, 1.0), 0.85);
-            // drop most of the interior filaments so the density is not uniform
-            // the procedural surface handles the interior, so almost every
-            // filament here goes to the contour where it is actually needed
-            float keep = 0.06 + 0.94 * edge;
-            if (hash12(vec2(fi * 3.17, 7.7)) > keep) {
-              gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return;
-            }
-
-            vec2 texel = vec2(1.0) / vec2(textureSize(uSoft, 0));
-            float gx = texture(uSoft, uv + vec2(texel.x, 0.0)).r -
-                       texture(uSoft, uv - vec2(texel.x, 0.0)).r;
-            float gy = texture(uSoft, uv + vec2(0.0, texel.y)).r -
-                       texture(uSoft, uv - vec2(0.0, texel.y)).r;
-            vec2 outward = -normalize(vec2(gx, gy) + vec2(1e-6));
-
-            float wet = texture(uWet, uv).r;
-            float seed = hash12(vec2(fi * 5.31, 1.9));
-
-            // combing: dry floss is teased by the wind, wet floss is pulled down
-            // by its own weight. This is the only place the two states differ in
-            // GEOMETRY, and it is what makes wetness read as heaviness.
-            float breath = sin(uTime * 0.55 + seed * PI2 + uv.x * 5.0);
-            vec2 windDir = normalize(vec2(0.85 + 0.3 * breath, 0.32 * breath) + vec2(1e-6));
-            vec2 dir = mix(
-              normalize(mix(outward, windDir, 0.30 + 0.45 * uWind) + vec2(1e-6)),
-              normalize(vec2(0.10 * breath, -1.0)),
-              smoothstep(0.06, 0.65, wet));
-            // outside the body the filaments always point out, or they would
-            // lie across the contour and read as a line again
-            dir = normalize(mix(dir, outward, edge * 0.45) + vec2(1e-6));
-
-            // short. The first pass used up to 0.026 and the contour grew
-            // thorns; floss fuzz is a fifth of that and there is a lot of it.
-            float len = (0.0022 + 0.0060 * uFloss) *
-              (0.30 + 1.10 * edge) * (0.45 + 1.10 * seed) *
-              (1.0 - 0.30 * wet);
-            float wid = len * (0.10 + 0.14 * hash12(vec2(fi * 9.1, 2.3)));
-
+            int i = gl_InstanceID;
+            int tw = int(uTexW);
+            ivec2 tc = ivec2(i % tw, i / tw);
+            vec4 A = texelFetch(uStateA, tc, 0);
+            vec4 B = texelFetch(uStateB, tc, 0);
+            if (B.x >= 0.999) { gl_Position = vec4(3.0, 3.0, 0.0, 1.0); return; }
             vec2 q = QUAD[gl_VertexID];
             vLocal = q;
-            float t = q.x * 0.5 + 0.5;
-            vec2 perp = vec2(-dir.y, dir.x);
-            // a filament is a fine arc, not a straight bristle
-            float bow = (seed - 0.5) * 0.55;
-            vec2 P = uv * vec2(uAspect, 1.0) + dir * t * len +
-              perp * (q.y * wid + bow * len * t * t);
-            vAttr = vec4(wet, seed, edge, t);
+            // a slow tumble, different for every tuft
+            float tum = uTime * (0.10 + 0.22 * B.z) + B.w * 6.28;
+            vAttr = vec4(B.x, B.z, B.w, tum);
+            float cr = cos(tum), sr = sin(tum);
+            vec2 rq = vec2(q.x * cr - q.y * sr, q.x * sr + q.y * cr);
+            // much wider than tall: a combed tuft trailing on the wind
+            vec2 P = A.xy * vec2(uAspect, 1.0) + rq * B.y * vec2(2.6, 0.8);
             gl_Position = vec4(vec2(P.x / uAspect, P.y) * 2.0 - 1.0, 0.0, 1.0);
           }
         `;
 
-        const flossFS = `#version 300 es
+        const wispDrawFS = `#version 300 es
           precision highp float;
           in vec2 vLocal;
           in vec4 vAttr;
           out vec4 fragColor;
-          uniform float uFloss;
+          uniform float uShine;
           ${CHUNK_NOISE}
           ${CHUNK_PALETTE}
           void main() {
-            float wet = vAttr.x;
+            float age = vAttr.x;
             float seed = vAttr.y;
-            float edge = vAttr.z;
             vec2 p = vLocal;
-            // along the filament: 0 root … 1 tip. It tapers to nothing.
-            float t = p.x * 0.5 + 0.5;
-            float prof = pow(1.0 - t, 0.55);
-            float across = abs(p.y);
-            float cov = (1.0 - smoothstep(prof * 0.55, prof, across)) * prof;
-            if (cov <= 0.004) discard;
-
-            // 生成りの絹 → 吸って重い灰。反射は作らない。
-            vec3 col = mix(FLOSS_DRY, FLOSS_WET, smoothstep(0.03, 0.75, wet));
-            // a dry filament is brightest where it catches the room light along
-            // its length; a wet one is flat, because water kills the scatter
-            col *= mix(0.80 + 0.42 * (1.0 - t), 0.92, smoothstep(0.0, 0.6, wet));
-            col *= 0.86 + 0.28 * seed;
-
-            // wet floss goes translucent and clumps: fewer, denser strands
-            float a = cov * (0.34 + 0.46 * uFloss) * (0.40 + 0.80 * edge);
-            a *= mix(1.0, 0.72, smoothstep(0.05, 0.8, wet));
+            float r = length(p);
+            if (r > 1.0) discard;
+            // a BREATH, not a splat: a soft elongated core, faint fibre streaks
+            // riding along it, and an edge that dissolves. The first version had
+            // hard lace at the rim and read as flicked paint.
+            float streak = fbm(vec2(p.x * 2.2 + seed * 19.0, p.y * 7.0 + seed * 7.0));
+            float body = (1.0 - smoothstep(0.05, 1.0, r)) *
+              (0.55 + 0.45 * streak);
+            float fade = smoothstep(0.0, 0.20, age) * (1.0 - smoothstep(0.55, 1.0, age));
+            float a = clamp(body * 0.16, 0.0, 1.0) * fade;
+            if (a <= 0.004) discard;
+            // dim silk in the rain; in the clear weather it catches the light
+            vec3 col = FLOSS_DRY * (0.40 + 0.45 * uShine);
+            col += vec3(1.00, 0.93, 0.80) * 0.16 * uShine * (1.0 - r);
             fragColor = vec4(col * a, a);
           }
         `;
@@ -1283,9 +1305,6 @@
           }
         `;
 
-        // P7 — bloom bright pass: only the parts of the flower layer that are
-        // genuinely luminous (the stamens, the brightest petal flanks) are
-        // allowed to glow. Downsamples at the same time.
         // P5c — the LIGHT, into the layer. The voice risen in the body, drawn
         // emissive (rgb written above alpha) so the bloom pass builds the halo:
         // the light has to LEAVE the body a little, or it reads as a brightness
@@ -1297,6 +1316,7 @@
           out vec4 fragColor;
           uniform sampler2D uWet;
           uniform sampler2D uSoft;
+          uniform sampler2D uScene;
           uniform float uAspect;
           uniform float uGlowAmt;
           ${CHUNK_NOISE}
@@ -1305,18 +1325,15 @@
             float glow = texture(uWet, vUv).b * uGlowAmt;
             float soft = texture(uSoft, vUv).r;
             if (glow * soft <= 0.004) discard;
-            vec2 ar = vec2(uAspect, 1.0);
-            float ang = 1.15 + 3.4 * fbm(vUv * ar * 9.0);
-            vec2 fdir = vec2(cos(ang), sin(ang));
-            vec2 fp = vec2(dot(vUv * ar, fdir), dot(vUv * ar, vec2(-fdir.y, fdir.x)));
-            float fib = fbm(vec2(fp.x * 17.0, fp.y * 175.0));
-            // deep modulation: the strands must survive INTO the lit state, or
-            // the glow turns the body into one white blob (§A1, again)
-            float strand = 0.42 + 0.95 * fib;
+            // modulated by the person's OWN image, so the light rides their
+            // real form — bright skin and folds carry it, shadow keeps it —
+            // instead of turning the figure into one white blob (§A1)
+            float rl = lumaf(texture(uScene, vUv).rgb);
+            float carry = 0.30 + 1.10 * pow(clamp(rl, 0.0, 1.0), 0.80);
             vec3 lampCol = vec3(1.00, 0.93, 0.80);
-            float g = glow * smoothstep(0.10, 0.70, soft) * strand;
+            float g = glow * smoothstep(0.10, 0.70, soft) * carry;
             // rgb above alpha: this is what feeds the bloom
-            fragColor = vec4(lampCol * g * 1.15, clamp(g * 0.38, 0.0, 1.0));
+            fragColor = vec4(lampCol * g * 0.85, clamp(g * 0.24, 0.0, 1.0));
           }
         `;
 
@@ -1335,11 +1352,12 @@
           }
         `;
 
-        // P7 — composite. The ground is the REAL WORLD at night: the camera is
-        // projected as it is, only darkened. The person is replaced by floss —
-        // 「真綿のように生きて居る」 is about あなた, not about the room — so the
-        // figure/ground split is: real dim room, silk-floss body, and the voice
-        // visible only where it touched.
+        // P7 — composite. EVERYTHING real stays real (the 2026-07-28
+        // correction, same as 花): the room AND the person are the camera,
+        // graded to night. The person is NOT covered — 「真綿のように」 is a
+        // simile for how someone lives, so the floss drifts in the air instead.
+        // Over the real night: slow clouds of longing (雲に焦がれ), the rain of
+        // silence, the wisps on the wind, and the light the singing body makes.
         const compositeFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -1356,7 +1374,6 @@
           uniform float uTime;
           uniform float uExposure;
           uniform float uFilmGrain;
-          uniform float uFloss;
           uniform float uGlowAmt;
           uniform float uShine;
           uniform float uPresent;
@@ -1380,73 +1397,42 @@
             night = mix(night, room * 0.42, 0.28);
             vec3 col = night;
 
-            // ---- 真綿の面. Instanced filaments alone cannot fill a body: at any
-            // affordable count the interior stays empty (it came out black). So
-            // the surface is a procedural fibre here, and the instanced
-            // filaments in the layer do the one thing only they can — break the
-            // contour so the edge is fuzz and not a cut line (§A2).
-            //
-            // The strands are ANISOTROPIC: stretched hard along a slowly turning
-            // direction. That is the whole difference between silk floss and a
-            // flat white fill (§A1), and it is seeded by position only, so
-            // ?freeze=1 holds it still.
-            float bodyIn = smoothstep(0.30, 0.72, soft);
-            // 真綿 is a TANGLE, not a grain. A single smooth direction field gave
-            // long coherent swirls that read as wood or marble; the cure is a
-            // direction that turns quickly plus two layers that disagree, at high
-            // frequency and low contrast.
-            // a long ramp: the field falls off sharply, and a short ramp turned
-            // the wet region into a hard-edged black patch
-            float w = smoothstep(0.05, 0.95, wt.r) * 0.92;
-            float ang = 1.15 + 3.4 * fbm(vUv * ar * 9.0);
-            vec2 fdir = vec2(cos(ang), sin(ang));
-            vec2 fp = vec2(dot(vUv * ar, fdir), dot(vUv * ar, vec2(-fdir.y, fdir.x)));
-            float ang2 = ang + 1.05 + 1.9 * fbm(vUv * ar * 13.0 + 21.0);
-            vec2 gdir = vec2(cos(ang2), sin(ang2));
-            vec2 gp = vec2(dot(vUv * ar, gdir), dot(vUv * ar, vec2(-gdir.y, gdir.x)));
-            // Frequencies chosen in PIXELS, not by feel: a strand about 3-4px
-            // across and 30-40px long, at roughly 9:1. Pushed higher (620/940)
-            // the strands land under one pixel, alias to grain, and the body
-            // goes flat — the §A1 plateau this texture exists to prevent.
-            float fib = fbm(vec2(fp.x * 17.0, fp.y * 175.0));
-            float fib2 = fbm(vec2(gp.x * 29.0, gp.y * 290.0));
-            float fine = vnoise(vUv * ar * vec2(170.0, 180.0));
-            float tex = 0.92 + 0.50 * (fib - 0.5) + 0.30 * (fib2 - 0.5) +
-              0.06 * (fine - 0.5);
-            // wet floss clumps: fewer, heavier strands, so the contrast rises
-            // while the colour falls
-            tex = mix(tex, 0.62 + 0.72 * (fib - 0.5) + 0.42 * (fib2 - 0.5), w);
-            vec3 flossCol = mix(FLOSS_DRY, FLOSS_WET, w) * clamp(tex, 0.0, 1.6);
-            // ---- 声の光. The voice rises IN the body: the silk lights from
-            // within, and the light lives in the gaps between the strands (the
-            // fibre texture MODULATES it), so it reads as material glowing, not
-            // as a brightness slider. Wet silk lets more light through — the
-            // rain that soaked in is what the light now shines out of.
-            float glow = texture(uWet, vUv).b * uGlowAmt;
+            // ---- the person stays REAL. At night they would sink into the
+            // dark with the room, so the mask only LIFTS them gently — more of
+            // the camera's own light survives inside the figure, which is what
+            // keeps them a person and not a silhouette.
+            float bodyIn = smoothstep(0.25, 0.75, soft);
+            vec3 person = NIGHT + vec3(pow(clamp(rl, 0.0, 1.0), 1.02)) * 0.86;
+            person = mix(person, room * 0.80, 0.42);
+            col = mix(col, person, bodyIn);
+
+            // ---- the rain that reached them stays on them: wet cloth and hair
+            // go darker and lose their colour, from the shoulders down. This is
+            // the one place the weather touches the person's own image.
+            float w = smoothstep(0.05, 0.95, wt.r);
+            vec3 wetCol = mix(col, vec3(lumaf(col)) * 0.62, 0.75);
+            col = mix(col, wetCol, w * bodyIn * 0.85);
+
+            // ---- 雲に焦がれ. Slow abstract clouds adrift over the dark room —
+            // never over the person. They belong to the rain's weather and thin
+            // away as the singing clears the sky. Drift is on the (freezable)
+            // art clock; the forms are fbm, so nothing about them is a photo.
+            vec2 cw = vUv * ar * 2.1 + vec2(uTime * 0.014, uTime * 0.004);
+            float cl = fbm(cw + fbm(cw * 1.7) * 0.55);
+            float cloudAmt = (1.0 - uShine * 0.85) * (1.0 - bodyIn);
+            float cband = smoothstep(0.35, 0.85, cl) * smoothstep(-0.1, 0.65, vUv.y);
+            col = mix(col, vec3(0.30, 0.33, 0.40) * (0.5 + 0.5 * cl),
+              cband * cloudAmt * 0.30);
+            col *= 1.0 - 0.18 * (1.0 - cband) * cloudAmt * smoothstep(0.5, 1.0, vUv.y);
+
+            // ---- 声の光. The voice risen in the body lights the person from
+            // within: modulated by the CAMERA's own luminance, so it follows
+            // their real form (face, folds, hands) instead of painting a flat
+            // wash over them.
+            float glow = wt.b * uGlowAmt;
             vec3 lampCol = vec3(1.00, 0.94, 0.82);
-            float lamp = glow * (0.55 + 0.75 * clamp(tex, 0.0, 1.5)) *
-              (1.0 + 0.35 * w);
-            flossCol += lampCol * lamp * 0.30;
-            // Lit FROM ABOVE, by the same sky the rain falls out of. This is
-            // what gives the figure three-dimensional form after its
-            // photographic detail is gone: shoulders and the crown catch the
-            // light, undersides fall away. It also means the lighting and the
-            // wetting agree, which is why the wet shoulders read as wet.
-            vec2 texel0 = vec2(1.0) / vec2(textureSize(uSoft, 0));
-            float sgx = texture(uSoft, vUv + vec2(texel0.x, 0.0)).r -
-                        texture(uSoft, vUv - vec2(texel0.x, 0.0)).r;
-            float sgy = texture(uSoft, vUv + vec2(0.0, texel0.y)).r -
-                        texture(uSoft, vUv - vec2(0.0, texel0.y)).r;
-            // Deep inside the body the gradient is ~0, so normalize() of it is
-            // numerically arbitrary — the first version lit the whole contour as
-            // a bright band because of exactly that. Weight the term by gradient
-            // MAGNITUDE and fall back to flat in the interior.
-            float gmag = length(vec2(sgx, sgy));
-            float rim = smoothstep(0.004, 0.030, gmag);
-            vec2 snrm = -normalize(vec2(sgx, sgy) + vec2(1e-6));
-            float sky = 0.90 + 0.42 * clamp(snrm.y, -1.0, 1.0) * rim;
-            flossCol *= sky * (0.90 + 0.26 * pow(clamp(rl, 0.0, 1.0), 0.85));
-            col = mix(col, flossCol, bodyIn * 0.94);
+            float lamp = glow * (0.40 + 0.90 * pow(clamp(rl, 0.0, 1.0), 0.75));
+            col += lampCol * lamp * 0.34 * bodyIn;
 
             // ---- the floss layer (premultiplied over)
             col = col * (1.0 - clamp(L.a, 0.0, 1.0)) + L.rgb;
@@ -1556,7 +1542,8 @@
           blur: createProgram(blurFS),
           wet: createProgram(wetFS),
           rain: createProgram(rainFS),
-          floss: createProgramVS(flossVS, flossFS),
+          wisp: createProgram(wispFS),
+          wispDraw: createProgramVS(wispDrawVS, wispDrawFS),
           rainDraw: createProgramVS(rainDrawVS, rainDrawFS),
           glow: createProgram(glowFS),
           bright: createProgram(brightFS),
@@ -1582,20 +1569,23 @@
             "uStateA", "uStateB", "uMask", "uTexW", "uDt", "uTime", "uSeed",
             "uAspect", "uRainAmt", "uWind", "uAudA",
           ]),
-          floss: getLocations(programs.floss, [
-            "uMask", "uSoft", "uWet", "uAspect", "uTime", "uFloss", "uWind",
-            "uCount",
+          wisp: getLocations(programs.wisp, [
+            "uStateA", "uStateB", "uTexW", "uDt", "uTime", "uSeed", "uAspect",
+            "uWisp", "uWind",
+          ]),
+          wispDraw: getLocations(programs.wispDraw, [
+            "uStateA", "uStateB", "uTexW", "uAspect", "uTime", "uShine",
           ]),
           rainDraw: getLocations(programs.rainDraw, [
             "uStateA", "uStateB", "uTexW", "uAspect",
           ]),
           glow: getLocations(programs.glow, [
-            "uWet", "uSoft", "uAspect", "uGlowAmt",
+            "uWet", "uSoft", "uScene", "uAspect", "uGlowAmt",
           ]),
           bright: getLocations(programs.bright, ["uSrc"]),
           composite: getLocations(programs.composite, [
             "uScene", "uMask", "uSoft", "uWet", "uLayer", "uB1", "uB2",
-            "uResolution", "uAspect", "uTime", "uExposure", "uFloss",
+            "uResolution", "uAspect", "uTime", "uExposure",
             "uGlowAmt", "uShine",
             "uFilmGrain", "uPresent", "uAudA", "uAudB", "uDebug",
           ]),
@@ -1652,12 +1642,17 @@
         // Empty VAO for attributeless draws (fullscreen tri + instanced quads).
         const vao = gl.createVertexArray();
 
-        // Rain state ping-pong (allocated once; canvas-size independent).
+        // Rain + wisp state ping-pong (allocated once; canvas-size independent).
         const rainSets = [
           createStateSet(RAIN_W, RAIN_H),
           createStateSet(RAIN_W, RAIN_H),
         ];
+        const wispSets = [
+          createStateSet(WISP_W, WISP_H),
+          createStateSet(WISP_W, WISP_H),
+        ];
         let rainPing = false;
+        let wispPing = false;
         let wetPing = false;
 
         // Video texture (DOM source → UNPACK_FLIP_Y). The segmentation texture is
@@ -1744,9 +1739,11 @@
           gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
         }
         function resetPools() {
-          // rain: A = (pos 0.5,0.5, vel encoded 0 = 0.5), B.x = age 1 = dormant
+          // rain/wisp: A = (pos 0.5,0.5, vel encoded 0 = 0.5), B.x = age 1 = dormant
           rainSets.forEach((s) => clearStateSet(s, [0.5, 0.5, 0.5, 0.5], [1, 0, 0, 0]));
+          wispSets.forEach((s) => clearStateSet(s, [0.5, 0.5, 0.5, 0.5], [1, 0, 0, 0]));
           rainPing = false;
+          wispPing = false;
         }
 
         function resize() {
@@ -2399,6 +2396,8 @@
           const wetPrev = wetPing ? targets.wetB : targets.wetA;
           const rainSrc = rainPing ? rainSets[1] : rainSets[0];
           const rainDst = rainPing ? rainSets[0] : rainSets[1];
+          const wispSrc = wispPing ? wispSets[1] : wispSets[0];
+          const wispDst = wispPing ? wispSets[0] : wispSets[1];
           const fieldTexel = [1 / fieldW, 1 / fieldH];
 
           // P0 — scene (camera cover-fit / synthetic room)
@@ -2493,9 +2492,25 @@
               meters.rms, meters.cen, meters.steady, meters.onset);
           });
 
+          // P4b — the wisps adrift
+          renderPass(wispDst, programs.wisp, () => {
+            const u = locations.wisp;
+            bindTexture(0, wispSrc.texA);
+            bindTexture(1, wispSrc.texB);
+            gl.uniform1i(u.uStateA, 0);
+            gl.uniform1i(u.uStateB, 1);
+            gl.uniform1f(u.uTexW, WISP_W);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uSeed, seed);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uWisp, state.floss);
+            gl.uniform1f(u.uWind, state.wind);
+          });
+
           // P5 — the layer. Cleared to transparent and built with PREMULTIPLIED
-          // alpha: the floss first (it is the body), then the contacts over it
-          // (they are the voice, and they must not be hidden by fibre).
+          // alpha: wisps in the air, then the body's light, then the rain in
+          // front of everything.
           gl.bindFramebuffer(gl.FRAMEBUFFER, targets.layer.fbo);
           gl.viewport(0, 0, targets.layer.width, targets.layer.height);
           gl.clearColor(0, 0, 0, 0);
@@ -2505,22 +2520,19 @@
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
           gl.bindVertexArray(vao);
 
-          gl.useProgram(programs.floss);
+          gl.useProgram(programs.wispDraw);
           {
-            const u = locations.floss;
-            bindTexture(0, maskOut.tex);
-            bindTexture(1, targets.softT.tex);
-            bindTexture(2, wetOut.tex);
-            gl.uniform1i(u.uMask, 0);
-            gl.uniform1i(u.uSoft, 1);
-            gl.uniform1i(u.uWet, 2);
+            const u = locations.wispDraw;
+            bindTexture(0, wispDst.texA);
+            bindTexture(1, wispDst.texB);
+            gl.uniform1i(u.uStateA, 0);
+            gl.uniform1i(u.uStateB, 1);
+            gl.uniform1f(u.uTexW, WISP_W);
             gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uTime, animTime);
-            gl.uniform1f(u.uFloss, state.floss);
-            gl.uniform1f(u.uWind, state.wind);
-            gl.uniform1f(u.uCount, FLOSS_N);
+            gl.uniform1f(u.uShine, meters.shine);
           }
-          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, FLOSS_N);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, WISP_N);
 
           // the light of the voice (fullscreen, emissive)
           gl.useProgram(programs.glow);
@@ -2528,8 +2540,10 @@
             const u = locations.glow;
             bindTexture(0, wetOut.tex);
             bindTexture(1, targets.softT.tex);
+            bindTexture(2, sceneCur.tex);
             gl.uniform1i(u.uWet, 0);
             gl.uniform1i(u.uSoft, 1);
+            gl.uniform1i(u.uScene, 2);
             gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uGlowAmt, state.glowAmt);
           }
@@ -2562,6 +2576,7 @@
           maskPing = !maskPing;
           wetPing = !wetPing;
           rainPing = !rainPing;
+          wispPing = !wispPing;
         }
 
         // P7 — composite to the canvas.
@@ -2590,7 +2605,6 @@
             gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uExposure, state.exposure);
-            gl.uniform1f(u.uFloss, state.floss);
             gl.uniform1f(u.uGlowAmt, state.glowAmt);
             gl.uniform1f(u.uShine, meters.shine);
             gl.uniform1f(u.uFilmGrain, state.filmGrain);
@@ -2678,7 +2692,7 @@
             fpsLast = wallNow;
             fpsFrames = 0;
             readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
-              canvas.height} / 繊維 ${FLOSS_N.toLocaleString()} / 雨 ${
+              canvas.height} / 綿毛 ${WISP_N.toLocaleString()} / 雨 ${
               RAIN_N.toLocaleString()} / 音 ${audioLabel()} / 安定 ${
               meters.steady.toFixed(2)} / 光 ${meters.shine.toFixed(2)} / 検知 ${
               detectionLabel()}`;
