@@ -1,5 +1,20 @@
 [
   {
+    "slug": "fable5_kirie-portrait",
+    "file": "fable5_kirie-portrait.html",
+    "title": "切り紙の積層ポートレート",
+    "date": "2026-07-29",
+    "desc": "カメラの人物が、台紙に貼られた多層ペーパーカットになる。肌は陰影で切り分けた紙の積層(切り口の厚みと落ち影)、髪はカールした紙リボン、服は重なる紙の帯。目・眉・唇は精密な小パーツとして残る。Fable 5 で制作。",
+    "model": "Fable 5",
+    "tags": [
+      "WebGL2",
+      "MediaPipe",
+      "Paper Cut"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_kirie-portrait.jpg"
+  },
+  {
     "slug": "opus5_koe",
     "file": "opus5_koe.html",
     "title": "声",
