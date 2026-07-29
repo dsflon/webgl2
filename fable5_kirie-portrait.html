@@ -1,0 +1,2597 @@
+<!doctype html>
+<!--
+  fable5_kirie-portrait.html — WebGL2 webcam →「切り紙の積層ポートレート」
+  カメラに映る人物を、多層ペーパーカット(レイヤード・ペーパーコラージュ)のポートレート
+  としてリアルタイムに再構成する。肌は陰影で切り分けたフラットな紙の積層(各層に切り口の
+  ハイライトと下層への短い落ち影)、髪はカールした紙リボン(クイリング)の集合、服は重なる
+  紙の帯。人物は無地の台紙に貼られた切り紙として、台紙に一つの柔らかい影を落とす。
+  検知: MediaPipe ImageSegmenter 多クラス(背景/髪/体肌/顔肌/服)。
+  規約定型の派生元: fable5_mosaic.html / fable5_gas-head.html(カメラ・UI・エラー3経路・
+  モバイル検知レシピ・座標規約)。
+
+  様式解析(視覚的不変量。優先度 1>2>3>5>6>4):
+    1. 肌の紙積層(マーク/物質) — kuwahara 平滑した輝度を quantile(分位点)しきい値で
+       4〜8段に量子化。しきい値は CPU 統計(低頻度 readback)の ema+hysteresis で時間安定。
+       境界近傍の擬似 sdf 帯(輝度差/勾配)で切り口ハイライト+光方向オフセットの落ち影。
+       面内部は平坦(ポスタライズフィルタでなく層構造から導出)。
+    2. 髪の紙リボン(マーク) — 髪クラス領域に、etf(構造テンソル)に沿う渦巻きリボンを
+       インスタンスクアッドの stroke splatting で描画。円筒の明暗+縁の照り+落ち影。
+       シードは cell-hash の安定空間(時間を混ぜない)。コヒーレンス低下時は髪マスク勾配の
+       接線(輪郭沿い)へフォールバック。
+    3. 台紙(知覚/場) — 背景クラスは完全フラットな台紙色+紙グレイン。人物輪郭は強ぼかし+
+       再しきい値で平滑化・単純化した「ハサミで切った」曲線(seg 生エッジは使わない)。
+       人物全体が台紙へ一つの柔らかいオフセット影を落とす。edge darkening は控えめ。
+    5. 時間安定(時間) — クラスマスク・平滑輝度は ping-pong ema、quantile しきい値は
+       CPU 側 hysteresis(不感帯)+ema。リボンのシードは cell-hash のみ。静止入力で静止。
+    6. 顔の判読性(知覚) — 顔肌領域は局所的に細かい量子化(専用 quantile 段)+細平滑輝度。
+       暗部下限(顔内の暗い小面=目・眉を最暗紙片として保持)+oklab 赤み(a)で唇を紙片化。
+    4. 限定パレット(色) — 量子化面の色を oklab でクラス別パレットへスナップ
+       (肌=近接暖色階段、髪=深い単色系、服=アクセント)。プリセット3種で台紙色との対比を設計。
+
+  パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
+    入力: カメラ映像 / fakeScene(GLSL) / MediaPipe 多クラス seg(RGBA u8: R髪 G顔 B体肌 A服)
+    [P0 scene ] cover-fit+mirror(実映像 or 合成)                sceneT  RGBA8 長辺≤1024
+    [P1 class ] seg(Y反転+cover-fit+mirror=P0と同一変換) or 合成マスク
+                → クラス4ch ema                                  classA/B★ ≤448 ping-pong
+    [P2 soft  ] クラスの分離ガウス(σ小=境界安定)                 softT★  ≤448
+    [P2b shad ] さらに強ぼかし(ハサミ曲線・台紙落ち影用)          shadT★  ≤224
+    [P3 struct] kuwahara(sceneT)+細平滑輝度 → ema               structA/B★ ≤768 ping-pong
+    [P4 etf   ] 構造テンソル(Sobel 3×3 近傍)→二重角+coherence   etfT★   ≤384
+    [P5 stats ] 4象限(顔/体肌/服/髪)の(輝度,重み,oklab a)        statsT RGBA8 128×128
+                → CPU readback ~200ms 毎 → 加重ヒストグラム → quantile →
+                hysteresis+ema → uniform 配列(しきい値)
+    [P6 curls ] インスタンス渦巻きリボン(cell-hash 格子、髪カバレッジでフェード)
+                → premultiplied RGBA                             ribbonT RGBA8 paint 解像度
+    [P7 comp  ] 台紙+人物落ち影+切り紙シルエット+トーン積層(切り口/落ち影)+
+                顔精密(暗部下限・唇)+髪ベース紙+リボン合成+紙グレイン → canvas(DPR≤2)
+
+  実行方法:
+    python3 -m http.server 8888 → http://localhost:8888/fable5_kirie-portrait.html を開き
+    カメラを許可(カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    ?fakesource=1 … カメラ/MediaPipe 不使用。合成人物(頭部+カール髪+肩+服)と合成クラス
+                    マスクで全パイプラインを駆動(検証用。フィギュアはゆっくり動き続ける)
+    ?freeze=1     … 全ての時間駆動を停止し決定的な静止フレーム(合成フィギュアも静止)
+    ?prewarm=<秒> … 初回描画前に固定 dt で決定的に早送り(ema・しきい値の収束済み状態)
+    ?fakescale=<f>… 合成フィギュアを係数 f で拡縮(実機スケール検査。既定 1.0)
+    ?fakeseg=1    … 実カメラ seg 経路に既知向きの合成多クラスマスクを流す(Y反転の offline 診断。
+                    正しければ「髪が画面上部・服が下部」に出る)
+    デバッグ表示: 0=最終 1=クラスマスク 2=量子化トーン面(切り口・影なし) 3=リボンのみ 4=標本
+
+  スライダーの説明(写真らしさ ↔ 紙の様式):
+    紙の段数   肌・服のトーン量子化の段数(4↔8)
+    紙の厚み   切り口ハイライトと落ち影の強さ・オフセット
+    髪のカール リボンの密度とカール曲率(巻き数)
+    リボンの幅 髪リボンの帯幅と長さ
+    紙の色統一 oklab パレットスナップの強さ(0=実写色寄り)
+    落ち着き   しきい値/マスク ema の時定数(静止の安定 ↔ 追従)
+    顔の精密さ 顔肌領域の局所段数と目・眉・唇の保護
+    紙の質感   繊維グレインと紙の色ムラ
+
+  依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
+  モデル: selfie_multiclass_256x256.tflite(URL 実在を HTTP 200 で確認済)。
+  WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Kirie Portrait — WebGL2 webcam layered paper-cut</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #10201f;
+        --ink: #f0e8d6;
+        --muted: rgba(240, 232, 214, 0.66);
+        --panel: rgba(14, 24, 23, 0.88);
+        --line: rgba(240, 232, 214, 0.18);
+        --accent: #e0987a;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #0e1d1c, #142a29 55%, #0e1d1c);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      video {
+        position: fixed; width: 1px; height: 1px; left: -10px; top: -10px;
+        opacity: 0; pointer-events: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(240, 232, 214, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(240, 232, 214, 0.14); }
+      #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
+      @media (pointer: coarse) { #flipCamera { display: block; } }
+      #statusChip {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 11; padding: 7px 12px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: var(--panel); font-size: 10px; letter-spacing: 0.1em;
+        pointer-events: none; transition: opacity 0.6s ease; white-space: nowrap;
+      }
+      #statusChip.hidden { opacity: 0; }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(240, 232, 214, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(240, 232, 214, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(8, 16, 15, 0.78);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
+      .overlay-card button {
+        margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(240, 232, 214, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 layered paper-cut portrait webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
+    <div id="statusChip">起動中</div>
+
+    <section id="panel" class="panel" aria-label="Kirie portrait controls"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces the camera with a synthetic portrait bust
+        // (head + curly hair region + shoulders + clothes) whose class masks
+        // are generated analytically. MediaPipe is never touched; the whole
+        // paper-cut pipeline (quantile stack / curls / card) runs offline.
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: the figure drift and every EMA stop
+        // (deterministic still frame). Seeds never used time to begin with.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakeseg=1 (offline diagnostic; combine with any source): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic RGBA
+        // multiclass mask of KNOWN orientation (hair band in the image TOP,
+        // clothes at the image BOTTOM, top-left origin, uploaded
+        // UNPACK_FLIP_Y=false like MediaPipe). With the Y flip correct, hair
+        // must appear at the TOP of the screen.
+        const FAKESEG = QUERY.get("fakeseg") === "1";
+        // ?fakescale=<f> scales the synthetic figure (real-scale divergence
+        // test, CRAFT §C2). f>1 = big/close, f<1 = far/small. Default 1.0.
+        const FAKESCALE = (() => {
+          const v = parseFloat(QUERY.get("fakescale"));
+          return Number.isFinite(v) && v > 0.05 ? Math.min(4, v) : 1.0;
+        })();
+        // ?prewarm=<sec> deterministically fast-forwards the sim (fixed dt
+        // 1/60) BEFORE the first presented frame, so EMA / quantile thresholds
+        // start converged. Chunked with a true GPU sync (1×1 readPixels) every
+        // 30 steps — swiftshader queues stall otherwise (CRAFT §C4).
+        const PREWARM = (() => {
+          const v = parseFloat(QUERY.get("prewarm"));
+          return Number.isFinite(v) && v > 0 ? Math.min(60, v) : 0;
+        })();
+
+        const DEBUG_MODES = [
+          "最終",
+          "クラスマスク",
+          "量子化トーン面",
+          "リボンのみ",
+          "標本",
+        ];
+
+        const DEFAULTS = {
+          layers: 0.5,
+          relief: 0.55,
+          curls: 0.6,
+          ribbon: 0.5,
+          palette: 0.65,
+          calm: 0.55,
+          detail: 0.6,
+          grain: 0.4,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          preset: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["layers", "紙の段数", "肌・服のトーン量子化の段数(4↔8)", 0, 1, 0.01],
+          ["relief", "紙の厚み", "切り口ハイライトと落ち影の強さ・オフセット", 0, 1, 0.01],
+          ["curls", "髪のカール", "リボンの密度とカール曲率(巻き数)", 0, 1, 0.01],
+          ["ribbon", "リボンの幅", "髪リボンの帯幅と長さ", 0, 1, 0.01],
+          ["palette", "紙の色統一", "oklab パレットスナップの強さ(0=実写色寄り)", 0, 1, 0.01],
+          ["calm", "落ち着き", "しきい値/マスク ema の時定数(安定↔追従)", 0, 1, 0.01],
+          ["detail", "顔の精密さ", "顔肌の局所段数と目・眉・唇の保護", 0, 1, 0.01],
+          ["grain", "紙の質感", "繊維グレインと紙の色ムラ", 0, 1, 0.01],
+        ];
+
+        // Presets switch the card colour + per-class paper palette as a set
+        // (order §6). They do not touch the eight sliders.
+        const PRESETS = ["ティール台紙", "生成り台紙", "夜の台紙"];
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>FABLE5 · 切り紙の積層ポートレート</h1>
+          <p>
+            カメラの人物が、無地の台紙に貼られた多層ペーパーカットになります。
+            肌は紙の積層(切り口と落ち影)、髪はカールした紙リボン(クイリング)、
+            背景はフラットな台紙に置き換わります。
+          </p>
+          <div class="select-row">
+            <span>プリセット</span>
+            <select id="presetSel" aria-label="プリセット">
+              ${PRESETS.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>左右反転(鏡)</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>ゆらぎを停止</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 解像度 -- / 検知 --</div>
+            <span class="badge">WebGL2 · kuwahara+quantile · quilling · oklab · MediaPipe multiclass</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("presetSel").addEventListener("change", (event) => {
+          state.preset = Number(event.currentTarget.value);
+        });
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          state.preset = 0;
+          document.getElementById("presetSel").value = "0";
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode = state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-kirie-portrait-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the class/struct EMAs from banding in
+        // 8 bits. All fields here live in [0,1], so the RGBA8 fallback runs
+        // the exact same shaders, only coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hashes + value noise. Curl placement, paper
+        // grain and per-curl variation are seeded by CELL COORDINATE only —
+        // never by time (repo rule §8-9) — so the collage is deterministic
+        // and truly still under ?freeze=1.
+        const CHUNK_NOISE = `
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          vec2 hash22(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.xx + p3.yz) * p3.zy);
+          }
+          vec3 hash32(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.xxy + p3.yzz) * p3.zyx);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = p - i;
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+        `;
+
+        // Shared: correct oklab transform (sRGB→linear→LMS→oklab and back).
+        // Palette snapping and band colours are mixed in oklab so the paper
+        // tones stay perceptually even (invariant 4).
+        const CHUNK_OKLAB = `
+          vec3 srgb2lin(vec3 c) {
+            return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),
+              step(0.04045, c));
+          }
+          vec3 lin2srgb(vec3 c) {
+            c = clamp(c, 0.0, 1.0);
+            return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+              step(0.0031308, c));
+          }
+          vec3 lin2oklab(vec3 c) {
+            float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+            float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+            float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+            float l_ = pow(max(l, 0.0), 1.0 / 3.0);
+            float m_ = pow(max(m, 0.0), 1.0 / 3.0);
+            float s_ = pow(max(s, 0.0), 1.0 / 3.0);
+            return vec3(
+              0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+              1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+              0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_);
+          }
+          vec3 oklab2srgb(vec3 lab) {
+            float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+            float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+            float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+            float l = l_ * l_ * l_;
+            float m = m_ * m_ * m_;
+            float s = s_ * s_ * s_;
+            vec3 lin = vec3(
+              4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+            return lin2srgb(lin);
+          }
+        `;
+
+        // Shared: per-preset paper palettes (card / skin ramp / hair tones /
+        // clothes ramp / lips / features / paper edge). Preset 0 = teal card
+        // (refs), 1 = natural cream card, 2 = night card.
+        const CHUNK_PAL = `
+          vec3 cardColorP(int pp) {
+            if (pp == 1) return vec3(0.886, 0.845, 0.722);
+            if (pp == 2) return vec3(0.118, 0.141, 0.216);
+            return vec3(0.086, 0.396, 0.412);
+          }
+          vec3 skinRampP(int pp, float f) {
+            vec3 s0; vec3 s1; vec3 s2; vec3 s3; vec3 s4;
+            if (pp == 2) {
+              s0 = vec3(0.36, 0.17, 0.12); s1 = vec3(0.55, 0.28, 0.18);
+              s2 = vec3(0.72, 0.42, 0.27); s3 = vec3(0.86, 0.58, 0.38);
+              s4 = vec3(0.95, 0.76, 0.55);
+            } else if (pp == 1) {
+              s0 = vec3(0.45, 0.24, 0.16); s1 = vec3(0.62, 0.36, 0.24);
+              s2 = vec3(0.78, 0.50, 0.33); s3 = vec3(0.89, 0.66, 0.46);
+              s4 = vec3(0.96, 0.82, 0.64);
+            } else {
+              s0 = vec3(0.51, 0.27, 0.18); s1 = vec3(0.67, 0.39, 0.26);
+              s2 = vec3(0.81, 0.53, 0.35); s3 = vec3(0.91, 0.68, 0.48);
+              s4 = vec3(0.96, 0.83, 0.66);
+            }
+            float t = clamp(f, 0.0, 1.0) * 4.0;
+            vec3 c = mix(s0, s1, clamp(t, 0.0, 1.0));
+            c = mix(c, s2, clamp(t - 1.0, 0.0, 1.0));
+            c = mix(c, s3, clamp(t - 2.0, 0.0, 1.0));
+            c = mix(c, s4, clamp(t - 3.0, 0.0, 1.0));
+            return c;
+          }
+          vec3 hairToneP(int pp, int i) {
+            if (pp == 1) {
+              if (i <= 0) return vec3(0.100, 0.075, 0.055);
+              if (i == 1) return vec3(0.173, 0.125, 0.090);
+              if (i == 2) return vec3(0.270, 0.190, 0.135);
+              return vec3(0.380, 0.270, 0.190);
+            }
+            if (pp == 2) {
+              if (i <= 0) return vec3(0.045, 0.060, 0.100);
+              if (i == 1) return vec3(0.080, 0.110, 0.170);
+              if (i == 2) return vec3(0.130, 0.180, 0.260);
+              return vec3(0.200, 0.270, 0.370);
+            }
+            if (i <= 0) return vec3(0.066, 0.100, 0.145);
+            if (i == 1) return vec3(0.105, 0.150, 0.210);
+            if (i == 2) return vec3(0.155, 0.215, 0.290);
+            return vec3(0.225, 0.300, 0.385);
+          }
+          vec3 hairAccentP(int pp) {
+            if (pp == 1) return vec3(0.16, 0.38, 0.37);
+            if (pp == 2) return vec3(0.50, 0.23, 0.16);
+            return vec3(0.42, 0.18, 0.23);
+          }
+          vec3 clothRampP(int pp, float f) {
+            vec3 a; vec3 b;
+            if (pp == 1) { a = vec3(0.13, 0.20, 0.31); b = vec3(0.36, 0.50, 0.63); }
+            else if (pp == 2) { a = vec3(0.52, 0.36, 0.13); b = vec3(0.84, 0.66, 0.32); }
+            else { a = vec3(0.50, 0.15, 0.12); b = vec3(0.89, 0.44, 0.31); }
+            return mix(a, b, clamp(f, 0.0, 1.0));
+          }
+          vec3 lipColorP(int pp) {
+            if (pp == 2) return vec3(0.66, 0.28, 0.24);
+            return vec3(0.75, 0.34, 0.29);
+          }
+          vec3 featureColorP(int pp) {
+            if (pp == 1) return vec3(0.13, 0.10, 0.08);
+            return vec3(0.085, 0.110, 0.160);
+          }
+          vec3 paperEdgeP(int pp) {
+            if (pp == 2) return vec3(0.90, 0.84, 0.74);
+            return vec3(0.96, 0.92, 0.84);
+          }
+        `;
+
+        // Shared: the quilling curl — an inward-tightening spiral band SDF +
+        // its paper shading (cylinder gradient across the strip, catch-light
+        // on the lit paper edge). Used by the instanced ribbon pass and by
+        // the uDebug==4 specimen.
+        const CHUNK_SPIRAL = `
+          // Signed distance to a spiral band. across = normalized [-1,1]
+          // position across the strip; along = arc progress (0 = outer end).
+          float spiralBand(vec2 q, float r0, float w, float sweep, float a0,
+                           float tight, out float across, out float along) {
+            float rho = length(q);
+            float th = atan(q.y, q.x) - a0;
+            th -= 6.2831853 * floor(th / 6.2831853);   // [0, 2pi)
+            float best = 1e9;
+            across = 0.0;
+            along = 0.0;
+            for (int k = -1; k <= 1; k++) {
+              float phi = th + 6.2831853 * float(k);
+              float cp = clamp(phi, 0.0, sweep);
+              float rad = r0 * (1.0 - tight * cp / max(sweep, 1e-3));
+              float d;
+              if (phi >= 0.0 && phi <= sweep) {
+                d = abs(rho - rad) - w * 0.5;
+              } else {
+                vec2 ep = rad * vec2(cos(a0 + cp), sin(a0 + cp));
+                d = length(q - ep) - w * 0.5;
+              }
+              if (d < best) {
+                best = d;
+                across = clamp((rho - rad) / max(w * 0.5, 1e-5), -1.0, 1.0);
+                along = cp / max(sweep, 1e-3);
+              }
+            }
+            return best;
+          }
+          // Paper-strip shading (ref_2, repair): the strip face is FLAT
+          // matte paper — a gentle linear tilt across the band (which side
+          // of the strip leans into the light) and a soft key-light factor —
+          // plus ONE thin pale line on the outer edge: the cut paper
+          // thickness. No cylinder profile, no gloss ramp — the round
+          // "rubber tube / phone cord" reading dies with the sqrt profile.
+          vec3 shadeCurl(vec3 tone, vec3 hiCol, float across, float along,
+                         vec2 radial) {
+            vec2 ldir = normalize(vec2(-0.55, 0.80));
+            float ld = clamp(dot(radial, ldir), -1.0, 1.0);
+            // flat matte face of the strip (subtle, paper-like)
+            float gain = 0.80 + 0.16 * across * ld + 0.24 * max(ld, 0.0);
+            vec3 c = tone * gain;
+            // faint matte lift on the lit side (paper sheen, not gloss)
+            c = mix(c, hiCol, 0.07 * max(ld, 0.0));
+            // thin cut-edge line = the paper's thickness, outer rim only
+            float edge = smoothstep(0.86, 0.965, across);
+            c = mix(c, hiCol, edge * (0.30 + 0.55 * max(ld, 0.0)));
+            c *= 1.0 - 0.12 * along;
+            return c;
+          }
+        `;
+
+        // Shared: the ?fakesource=1 synthetic portrait bust and its analytic
+        // multiclass coverage (R=hair, G=face skin, B=body skin, A=clothes) —
+        // the same channel layout the MediaPipe upload uses, so both sources
+        // drive one shader path. uFakeScale scales the figure about a fixed
+        // pivot (CRAFT §C2).
+        const CHUNK_FAKE = `
+          float sdSeg2(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+          float sdEll(vec2 p, vec2 c, vec2 r) {
+            return length((p - c) / r) - 1.0;
+          }
+          vec2 figSpace(vec2 uv, float cx, float cy, float aspect, float fscale) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y);
+            vec2 piv = vec2(0.5, 0.55);
+            p = (p - piv) / fscale + piv;
+            p -= vec2(cx - 0.5, cy);
+            return p;
+          }
+          // Distances for each part (figure space).
+          float figFace(vec2 p) { return sdEll(p, vec2(0.5, 0.615), vec2(0.105, 0.142)); }
+          float figHair(vec2 p) {
+            vec2 hc = vec2(0.5, 0.665);
+            float ang = atan(p.y - hc.y, p.x - hc.x);
+            float wob = 0.5 * vnoise(vec2(ang * 2.2 + 9.0, 3.0)) - 0.25;
+            float blob = sdEll(p, hc, vec2(0.168, 0.185) * (1.0 + 0.16 * wob));
+            float ring = max(blob, -(figFace(p) - 0.015));
+            return max(ring, (0.515 - p.y) * 1.8);
+          }
+          float figNeck(vec2 p) { return sdSeg2(p, vec2(0.5, 0.505), vec2(0.5, 0.385)) - 0.048; }
+          float figCloth(vec2 p) {
+            float sh = sdSeg2(p, vec2(0.315, 0.295), vec2(0.685, 0.295)) - 0.115;
+            float tor = sdSeg2(p, vec2(0.5, 0.295), vec2(0.5, -0.05)) - 0.225;
+            return smin2(sh, tor, 0.06);
+          }
+          float covOf(float d) { return 1.0 - smoothstep(-0.004, 0.007, d); }
+          // Class coverage with MediaPipe-like exclusivity (face > hair >
+          // body skin > clothes).
+          vec4 fakeClassMask(vec2 uv, float cx, float cy, float aspect, float fscale) {
+            vec2 p = figSpace(uv, cx, cy, aspect, fscale);
+            float cf = covOf(figFace(p));
+            float ch = covOf(figHair(p)) * (1.0 - cf);
+            float cb = covOf(figNeck(p)) * (1.0 - cf) * (1.0 - ch);
+            float cc = covOf(figCloth(p)) * (1.0 - cf) * (1.0 - ch) * (1.0 - cb);
+            return vec4(ch, cf, cb, cc);
+          }
+          vec3 fakeScene(vec2 uv, float cx, float cy, float aspect, float fscale) {
+            // patterned backdrop (never black, never flat — the card must
+            // visibly REPLACE it)
+            vec3 bg = mix(vec3(0.38, 0.42, 0.45), vec3(0.56, 0.52, 0.45), uv.y);
+            bg += 0.045 * sin((uv.x + uv.y) * 38.0);
+            bg += 0.05 * (vnoise(uv * 5.0) - 0.5);
+            vec2 p = figSpace(uv, cx, cy, aspect, fscale);
+            vec4 cls = fakeClassMask(uv, cx, cy, aspect, fscale);
+            // face: shaded skin + readable eyes / brows / mouth / nose
+            vec2 n = (p - vec2(0.5, 0.615)) / vec2(0.105, 0.142);
+            float shade = 0.52 + 0.48 * clamp(-n.x * 0.62 - n.y * 0.38 + 0.55, 0.0, 1.0);
+            shade *= 1.0 - 0.22 * smoothstep(0.55, 1.0, length(n));
+            vec3 face = vec3(0.88, 0.63, 0.45) * shade;
+            float eyeL = sdEll(p, vec2(0.458, 0.638), vec2(0.020, 0.0095));
+            float eyeR = sdEll(p, vec2(0.542, 0.638), vec2(0.020, 0.0095));
+            float brwL = sdEll(p, vec2(0.456, 0.668), vec2(0.027, 0.0068));
+            float brwR = sdEll(p, vec2(0.544, 0.668), vec2(0.027, 0.0068));
+            float mou = sdEll(p, vec2(0.5, 0.548), vec2(0.031, 0.0115));
+            float nos = sdSeg2(p, vec2(0.5, 0.605), vec2(0.5, 0.576)) - 0.0075;
+            face = mix(face, vec3(0.10, 0.09, 0.10), covOf(min(eyeL, eyeR)));
+            face = mix(face, vec3(0.13, 0.10, 0.08), covOf(min(brwL, brwR)));
+            face = mix(face, vec3(0.63, 0.26, 0.23), covOf(mou));
+            face *= 1.0 - 0.18 * covOf(nos);
+            // hair: deep navy with wavy luminance banding (etf food)
+            vec2 hc = vec2(0.5, 0.665);
+            float hb = sin(atan(p.y - hc.y, p.x - hc.x) * 9.0 +
+              length(p - hc) * 34.0 + 4.0 * vnoise(p * 12.0));
+            vec3 hair = vec3(0.10, 0.13, 0.19) * (0.72 + 0.42 * (0.5 + 0.5 * hb));
+            // neck: skin in jaw shadow
+            vec3 neck = vec3(0.88, 0.63, 0.45) * 0.52;
+            // clothes: muted red with fold stripes (quantization food)
+            float fl = sin(p.x * 46.0 + 2.2 * vnoise(p * 8.0));
+            vec3 cloth = vec3(0.55, 0.24, 0.20) *
+              (0.62 + 0.34 * (0.5 + 0.5 * fl)) * (0.75 + 0.5 * p.y);
+            vec3 c = bg;
+            c = mix(c, cloth, cls.a);
+            c = mix(c, neck, cls.b);
+            c = mix(c, hair, cls.r);
+            c = mix(c, face, cls.g);
+            return clamp(c, 0.0, 1.0);
+          }
+        `;
+
+        // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
+        // working scene buffer. Everything downstream is screen-aligned to it.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uFakeScale;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeScene(vUv, uCx, uCy, uAspect, uFakeScale), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.16, 0.20, 0.20),
+                vec3(0.26, 0.28, 0.26), vUv.y), 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scl = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scl + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — the 4-channel class field (R hair / G face / B body / A cloth),
+        // EMA ping-pong. Real-camera masks apply mirror BEFORE cover-fit and
+        // an explicit Y flip — the exact coordinate convention of
+        // fable5_mosaic / fable5_gas-head / overflowing_aura (CRAFT §C1):
+        // MediaPipe masks are image-space top-left origin uploaded with
+        // UNPACK_FLIP_Y=false, while the video texture is FLIP_Y=true.
+        const classFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSeg;
+          uniform sampler2D uPrev;
+          uniform vec2 uSegScale;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uFakeScale;
+          uniform float uAlpha;
+          uniform int uReset;
+          uniform int uSource;
+          uniform int uMirror;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            vec4 raw = vec4(0.0);
+            if (uSource == 0) {
+              raw = fakeClassMask(vUv, uCx, uCy, uAspect, uFakeScale);
+            } else if (uSource == 1) {
+              vec2 uv = vUv;
+              if (uMirror == 1) uv.x = 1.0 - uv.x;
+              vec2 suv = (uv - 0.5) * uSegScale + 0.5;
+              if (suv.x >= 0.0 && suv.x <= 1.0 && suv.y >= 0.0 && suv.y <= 1.0) {
+                vec4 m = texture(uSeg, vec2(suv.x, 1.0 - suv.y));
+                raw = smoothstep(vec4(0.25), vec4(0.70), m);
+              }
+            }
+            vec4 prev = texture(uPrev, vUv);
+            fragColor = uReset == 1 ? raw : mix(prev, raw, uAlpha);
+          }
+        `;
+
+        // P2 — separable Gaussian (generic RGBA). Used twice: a small sigma
+        // for stable class boundaries, and a large sigma at low resolution
+        // for the simplified "scissor" silhouette + the card drop shadow.
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -8; i <= 8; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P3 — kuwahara smoothing + EMA (ping-pong). Four quadrant sectors of
+        // 3×3 taps; the least-variance sector mean wins → flat interiors with
+        // preserved big edges (the paper faces, invariant 1). Alpha channel
+        // carries a lightly-smoothed FINE luminance: inside the face region
+        // the composite quantizes this instead — the "locally finer kuwahara
+        // radius" of invariant 6.
+        const structFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uPrev;
+          uniform vec2 uTexel;
+          uniform float uAlpha;
+          uniform float uRadius;
+          uniform int uReset;
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            const vec2 SGN[4] = vec2[4](
+              vec2(1.0, 1.0), vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(-1.0, -1.0)
+            );
+            float bestVar = 1e9;
+            vec3 bestC = vec3(0.0);
+            for (int s = 0; s < 4; s++) {
+              vec3 acc = vec3(0.0);
+              float accL = 0.0;
+              float accL2 = 0.0;
+              for (int j = 0; j < 3; j++) {
+                for (int i = 0; i < 3; i++) {
+                  vec2 o = vec2(float(i), float(j)) * 0.5 * uRadius * SGN[s] * uTexel;
+                  vec3 c = texture(uScene, vUv + o).rgb;
+                  float L = lumaf(c);
+                  acc += c;
+                  accL += L;
+                  accL2 += L * L;
+                }
+              }
+              acc /= 9.0;
+              float m = accL / 9.0;
+              float v = accL2 / 9.0 - m * m;
+              if (v < bestVar) { bestVar = v; bestC = acc; }
+            }
+            // fine luminance: tight 3×3 gaussian (keeps eyes/brows/lips)
+            float fine = 0.0;
+            float wsum = 0.0;
+            for (int j = -1; j <= 1; j++) {
+              for (int i = -1; i <= 1; i++) {
+                float w = (i == 0 ? 2.0 : 1.0) * (j == 0 ? 2.0 : 1.0);
+                fine += w * lumaf(texture(uScene,
+                  vUv + vec2(float(i), float(j)) * uTexel * 0.9).rgb);
+                wsum += w;
+              }
+            }
+            fine /= wsum;
+            vec4 cur = vec4(bestC, fine);
+            vec4 prev = texture(uPrev, vUv);
+            fragColor = uReset == 1 ? cur : mix(prev, cur, uAlpha);
+          }
+        `;
+
+        // P4 — edge tangent flow from the structure tensor of the smoothed
+        // luminance. Double angle (cos2θ, sin2θ) — never a raw angle lerp
+        // (repo rule §8-5). rg = tangent double-angle (offset-encoded),
+        // b = coherence, a = gradient magnitude.
+        const etfFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uStruct;
+          uniform vec2 uTexel;
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          float lumAt(vec2 uv) { return lumaf(texture(uStruct, uv).rgb); }
+          void main() {
+            float exx = 0.0;
+            float exy = 0.0;
+            float eyy = 0.0;
+            for (int j = -1; j <= 1; j++) {
+              for (int i = -1; i <= 1; i++) {
+                vec2 o = vUv + vec2(float(i), float(j)) * uTexel;
+                float gx = lumAt(o + vec2(uTexel.x, 0.0)) - lumAt(o - vec2(uTexel.x, 0.0));
+                float gy = lumAt(o + vec2(0.0, uTexel.y)) - lumAt(o - vec2(0.0, uTexel.y));
+                exx += gx * gx;
+                exy += gx * gy;
+                eyy += gy * gy;
+              }
+            }
+            float tr = exx + eyy;
+            float coh = tr > 1e-7
+              ? sqrt((exx - eyy) * (exx - eyy) + 4.0 * exy * exy) / tr
+              : 0.0;
+            // gradient double angle; tangent double angle = gradient's + pi
+            float c2g = exx - eyy;
+            float s2g = 2.0 * exy;
+            float n = max(length(vec2(c2g, s2g)), 1e-7);
+            vec2 dblT = -vec2(c2g, s2g) / n;    // rotate double angle by pi
+            fragColor = vec4(dblT * coh * 0.5 + 0.5, coh,
+              clamp(sqrt(tr) * 6.0, 0.0, 1.0));
+          }
+        `;
+
+        // P5 — quantile statistics source, read back on the CPU at a low
+        // cadence (~200 ms — never every frame, repo rule §8-13). Quadrant
+        // layout: BL=face, BR=body skin, TL=clothes, TR=hair. Each texel:
+        // R = luminance (face uses the FINE channel so eye/lip darks survive
+        // the quantiles), G = class weight, B = oklab a (lip redness).
+        const statsFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uStruct;
+          uniform sampler2D uSoft;
+          ${CHUNK_OKLAB}
+          void main() {
+            vec2 quv = fract(vUv * 2.0);
+            int q = (vUv.x < 0.5 ? 0 : 1) + (vUv.y < 0.5 ? 0 : 2);
+            vec4 sw = texture(uSoft, quv);
+            vec4 st = texture(uStruct, quv);
+            float wgt = q == 0 ? sw.g : (q == 1 ? sw.b : (q == 2 ? sw.a : sw.r));
+            float lum = q == 0 ? st.a : dot(st.rgb, vec3(0.299, 0.587, 0.114));
+            vec3 lab = lin2oklab(srgb2lin(st.rgb));
+            fragColor = vec4(lum, wgt, clamp(lab.y * 2.0 + 0.5, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        // P6 — the quilling curls: one instanced quad per grid cell of a
+        // stable cell-hash lattice (stroke splatting). The vertex shader
+        // culls cells outside the hair class, orients the curl along the etf
+        // tangent (falling back to the hair-contour tangent where coherence
+        // dies), and picks a paper tone from the local quantized luminance.
+        // No time anywhere — a still person yields still curls.
+        const ribbonVS = `#version 300 es
+          precision highp float;
+          uniform sampler2D uSoft;
+          uniform sampler2D uEtf;
+          uniform sampler2D uStruct;
+          uniform sampler2D uShadM;
+          uniform float uAspect;
+          uniform float uCells;
+          uniform vec2 uSoftTexel;
+          uniform float uCurls;
+          uniform float uRibbon;
+          uniform float uPalette;
+          uniform vec3 uHairQ;
+          uniform int uPreset;
+          out vec2 vLocal;
+          out vec4 vPar;     // r0, w, sweep, a0
+          out vec3 vMisc;    // tight, fade, seed
+          out vec3 vColor;
+          out vec3 vHiCol;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          ${CHUNK_PAL}
+          void main() {
+            vec2 cornerOf = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1)) * 2.0 - 1.0;
+            int cellsX = int(uCells + 0.5);
+            int ix = gl_InstanceID % cellsX;
+            int iy = gl_InstanceID / cellsX;
+            float s = uAspect / uCells;
+            vec2 cell = vec2(float(ix), float(iy));
+            vec2 jit = hash22(cell * 7.13 + 3.7) - 0.5;
+            vec2 cp = (cell + 0.5 + jit * 0.9) * s;
+            vec2 uvC = vec2(cp.x / uAspect, cp.y);
+            float cov = textureLod(uSoft, uvC, 0.0).r;
+            // OPAQUE-OR-ABSENT gate (repair #1): paper is opaque. No alpha
+            // ramp against coverage — a curl either exists at full opacity
+            // or is culled, so the hair rim never grows translucent ghosts.
+            // The class EMA keeps cov continuous in time, so the gate acts
+            // like a hysteresis threshold rather than a flicker source.
+            float gate = step(0.36, cov);
+            // isolated-loop rejection (repair): a curl whose cell sits far
+            // from the hair MASS reads as a stray rubber band on the card.
+            // The heavy class blur (shadT) is a cheap distance-to-mass field:
+            // deep hair ≈ 0.7+, attached fringe ≈ 0.3-0.5, detached ≈ <0.25.
+            float hairMass = textureLod(uShadM, uvC, 0.0).r;
+            vec3 h = hash32(cell + 17.0);
+            if (gate < 0.5 || hairMass < 0.26 || uvC.y > 1.02 || uvC.y < -0.02) {
+              vLocal = vec2(0.0);
+              vPar = vec4(1.0, 0.1, 1.0, 0.0);
+              vMisc = vec3(0.3, 0.0, 0.0);
+              vColor = vec3(0.0);
+              vHiCol = vec3(0.0);
+              gl_Position = vec4(4.0, 4.0, 0.0, 1.0);
+              return;
+            }
+            // orientation: etf tangent, hair-contour tangent as fallback
+            vec4 e = textureLod(uEtf, uvC, 0.0);
+            vec2 dbl = e.rg * 2.0 - 1.0;
+            float coh = e.b;
+            float ang = 0.5 * atan(dbl.y, dbl.x + 1e-6);
+            float hx = textureLod(uSoft, uvC + vec2(uSoftTexel.x, 0.0), 0.0).r -
+              textureLod(uSoft, uvC - vec2(uSoftTexel.x, 0.0), 0.0).r;
+            float hy = textureLod(uSoft, uvC + vec2(0.0, uSoftTexel.y), 0.0).r -
+              textureLod(uSoft, uvC - vec2(0.0, uSoftTexel.y), 0.0).r;
+            vec2 hg = vec2(hx, hy);
+            if (coh < 0.22 && dot(hg, hg) > 1e-7) {
+              ang = atan(-hg.x, hg.y + 1e-6);
+            }
+            ang += (h.x - 0.5) * 1.5 * (1.0 - coh);
+            // shape variety (repair #2b, matched to ref_2): radius quantized
+            // to 3 cell-hash steps; a mix of open C-crescents (majority in
+            // the ref), closed O loops and 1.5-turn spirals.
+            float rq = floor(h.y * 2.999);
+            float r0 = s * (0.72 + 0.45 * rq) * mix(0.72, 1.50, uRibbon);
+            float w = min(r0 * 0.75,
+              s * mix(0.30, 0.62, uRibbon) * (0.85 + 0.5 * h.z));
+            float kind = hash12(cell + 41.2);
+            float sweep;
+            float tight;
+            float curlAmt = mix(0.75, 1.15, uCurls);
+            if (kind < 0.42) {          // open C / crescent
+              sweep = (2.6 + 1.7 * h.z) * curlAmt;
+              tight = 0.06 + 0.14 * h.x;
+            } else if (kind < 0.80) {   // closed O loop
+              sweep = (5.9 + 1.0 * h.z) * curlAmt;
+              tight = 0.20 + 0.16 * h.x;
+            } else {                    // inward spiral, ~1.5 turns
+              sweep = (8.4 + 1.3 * h.z) * min(curlAmt, 1.05);
+              tight = 0.42 + 0.16 * h.x;
+            }
+            // paper tone: quantized local hair luminance → deep single-hue set
+            float lum = dot(textureLod(uStruct, uvC, 0.0).rgb, vec3(0.299, 0.587, 0.114));
+            int ti = 0;
+            if (lum > uHairQ.x) ti = 1;
+            if (lum > uHairQ.y) ti = 2;
+            if (lum > uHairQ.z) ti = 3;
+            vec3 ramp = hairToneP(uPreset, ti);
+            float acc = step(0.955, hash12(cell + 5.9));
+            ramp = mix(ramp, hairAccentP(uPreset), acc);
+            vec3 realC = textureLod(uStruct, uvC, 0.0).rgb * 0.85;
+            vec3 labA = lin2oklab(srgb2lin(realC));
+            vec3 labB = lin2oklab(srgb2lin(ramp));
+            vec3 col = clamp(oklab2srgb(mix(labA, labB, 0.25 + 0.75 * uPalette)), 0.0, 1.0);
+            vColor = col;
+            // paper cut-edge colour: a muted cool grey on the navy sets,
+            // warm cream on the brown 生成り set. Deliberately restrained —
+            // the strong steel-blue sheen read as rubber gloss (repair)
+            vHiCol = mix(col,
+              uPreset == 1 ? vec3(0.88, 0.82, 0.70) : vec3(0.68, 0.75, 0.82),
+              0.42);
+            float R = r0 * 1.30 + w * 2.6;
+            vec2 lp = cornerOf * R;
+            vec2 posUv = vec2((cp.x + lp.x) / uAspect, cp.y + lp.y);
+            vLocal = lp;
+            vPar = vec4(r0, w, sweep, ang + 6.2831853 * hash12(cell + 2.2));
+            vMisc = vec3(tight, 1.0, hash12(cell + 8.4));
+            gl_Position = vec4(posUv * 2.0 - 1.0, 0.0, 1.0);
+          }
+        `;
+
+        const ribbonFS = `#version 300 es
+          precision highp float;
+          in vec2 vLocal;
+          in vec4 vPar;
+          in vec3 vMisc;
+          in vec3 vColor;
+          in vec3 vHiCol;
+          out vec4 fragColor;
+          uniform float uRelief;
+          ${CHUNK_SPIRAL}
+          void main() {
+            float r0 = vPar.x;
+            float w = vPar.y;
+            float sweep = vPar.z;
+            float a0 = vPar.w;
+            float tight = vMisc.x;
+            float fade = vMisc.y;
+            float across;
+            float along;
+            float d = spiralBand(vLocal, r0, w, sweep, a0, tight, across, along);
+            float aa = max(fwidth(d), 1e-5) * 1.15;
+            float aR = (1.0 - smoothstep(-aa, aa, d)) * fade;
+            // per-curl drop shadow onto whatever lies below (paper distance)
+            vec2 sh = vec2(0.62, -0.79) * w * (0.55 + 1.25 * uRelief);
+            float ac2;
+            float al2;
+            float d2 = spiralBand(vLocal - sh, r0, w, sweep, a0, tight, ac2, al2);
+            float aS = (1.0 - smoothstep(-aa, w * 0.55, d2)) *
+              (0.24 + 0.30 * uRelief) * fade;
+            vec2 radial = normalize(vLocal + vec2(1e-5, 0.0));
+            vec3 col = shadeCurl(vColor, vHiCol, across, along, radial);
+            float shA = aS * (1.0 - aR);
+            // premultiplied: curl over its own soft shadow
+            fragColor = vec4(col * aR + vec3(0.016, 0.022, 0.030) * shA, aR + shA);
+          }
+        `;
+
+        // P7 — composite: THE paper collage. Card + person drop shadow →
+        // scissor silhouette (heavily smoothed mask re-threshold — the
+        // simplified cut, NOT the raw seg edge) → class layer stack
+        // (clothes under skin under hair-base) with cut rims + offset cast
+        // shadows at every layer boundary (pseudo-sdf bands on the smoothed
+        // luminance) → face detail (fine quantiles, dark-feature floor,
+        // oklab-a lips) → quilling curls → paper grain. No uTime — a still
+        // person is a still collage.
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uStruct;
+          uniform sampler2D uBand;
+          uniform sampler2D uSoft;
+          uniform sampler2D uShad;
+          uniform sampler2D uRibbon;
+          uniform vec2 uResolution;
+          uniform float uAspect;
+          uniform float uRelief;
+          uniform float uPalette;
+          uniform float uDetail;
+          uniform float uGrain;
+          uniform int uPreset;
+          uniform int uDebug;
+          uniform float uSkinTh[7];
+          uniform int uSkinN;
+          uniform float uFaceTh[11];
+          uniform int uFaceN;
+          uniform float uClothTh[5];
+          uniform int uClothN;
+          uniform float uFaceDark;
+          uniform float uLipA;
+          uniform vec3 uHairQ;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          ${CHUNK_PAL}
+          ${CHUNK_SPIRAL}
+
+          const vec2 LDIR = vec2(-0.615, 0.789);   // light from upper-left
+
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+          void levelSkin(float L, out int lvl, out float Tdn, out float Tup) {
+            lvl = 0;
+            for (int i = 0; i < 7; i++) {
+              if (i >= uSkinN - 1) break;
+              if (L > uSkinTh[i]) lvl = i + 1;
+            }
+            Tdn = lvl > 0 ? uSkinTh[lvl - 1] : -1.0;
+            Tup = lvl < uSkinN - 1 ? uSkinTh[lvl] : 2.0;
+          }
+          void levelFace(float L, out int lvl, out float Tdn, out float Tup) {
+            lvl = 0;
+            for (int i = 0; i < 11; i++) {
+              if (i >= uFaceN - 1) break;
+              if (L > uFaceTh[i]) lvl = i + 1;
+            }
+            Tdn = lvl > 0 ? uFaceTh[lvl - 1] : -1.0;
+            Tup = lvl < uFaceN - 1 ? uFaceTh[lvl] : 2.0;
+          }
+          void levelCloth(float L, out int lvl, out float Tdn, out float Tup) {
+            lvl = 0;
+            for (int i = 0; i < 5; i++) {
+              if (i >= uClothN - 1) break;
+              if (L > uClothTh[i]) lvl = i + 1;
+            }
+            Tdn = lvl > 0 ? uClothTh[lvl - 1] : -1.0;
+            Tup = lvl < uClothN - 1 ? uClothTh[lvl] : 2.0;
+          }
+
+          // band colour: palette ramp ⟷ (oklab-snapped) camera colour
+          vec3 bandColor(vec3 camC, float rampF, float Tdn, float Tup, int kind) {
+            vec3 ramp = kind == 0 ? skinRampP(uPreset, rampF)
+                                  : clothRampP(uPreset, rampF);
+            vec3 lab = lin2oklab(srgb2lin(camC));
+            float mid = 0.5 * (max(Tdn, 0.0) + min(Tup, 1.0));
+            lab.x = mix(0.28, 0.96, mid);
+            lab.yz *= 1.15;
+            vec3 labR = lin2oklab(srgb2lin(ramp));
+            return clamp(oklab2srgb(mix(lab, labR, uPalette)), 0.0, 1.0);
+          }
+
+          // pseudo-sdf band relief: cut rim above the layer's own lower
+          // threshold; cast shadow where the light-offset sample belongs to
+          // a HIGHER layer (L shifted past this layer's upper threshold).
+          void bandRelief(float L, float Loff, float Tdn, float Tup,
+                          float rimW, out float rim, out float shd) {
+            float dLow = (L - Tdn) / max(fwidth(L), 1e-4);
+            rim = Tdn < -0.5 ? 0.0
+              : exp(-max(dLow, 0.0) / max(rimW, 0.5)) * step(0.0, dLow);
+            // shadow penumbra measured in PIXELS (~3 px), not in luminance —
+            // a luminance-wide smoothstep turns shallow gradients into
+            // airbrush streaks (repair #3c)
+            float shW = min(0.035, max(fwidth(L), 1e-4) * 3.0);
+            shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + shW, Loff);
+          }
+
+          // uDebug==4 middle band: cut/shadow stages on a synthetic 4-layer
+          // stack, relief 0→1 across five columns.
+          vec3 stackDemo(vec2 q, float rel) {
+            float L = clamp(1.08 - length(q - vec2(0.5)) * 1.55, 0.0, 1.0);
+            vec2 so = vec2(0.045, -0.055) * (0.2 + rel);
+            float Loff = clamp(1.08 - length(q - so - vec2(0.5)) * 1.55, 0.0, 1.0);
+            const float T[3] = float[3](0.30, 0.52, 0.74);
+            int lvl = 0;
+            for (int i = 0; i < 3; i++) { if (L > T[i]) lvl = i + 1; }
+            float Tdn = lvl > 0 ? T[lvl - 1] : -1.0;
+            float Tup = lvl < 3 ? T[lvl] : 2.0;
+            vec3 c = skinRampP(uPreset, (float(lvl) + 0.5) / 4.0);
+            float dLow = (L - Tdn) / max(fwidth(L), 1e-4);
+            float rim = Tdn < -0.5 ? 0.0 : exp(-max(dLow, 0.0) / 1.5);
+            float shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + 0.05, Loff);
+            c = mix(c, c * 1.30 + vec3(0.08), rim * (0.25 + 0.75 * rel));
+            c *= 1.0 - shd * (0.08 + 0.30 * rel);
+            return c;
+          }
+
+          // uDebug==4: palette swatches (top) / relief stages (middle) /
+          // single curls (bottom).
+          vec3 specimen(vec2 uv) {
+            if (uv.y > 0.70) {
+              int pp = int(min(uv.x * 3.0, 2.99));
+              float lx = fract(uv.x * 3.0);
+              float ly = (uv.y - 0.70) / 0.30;
+              if (lx < 0.02 || lx > 0.98) return vec3(0.05);
+              if (ly > 0.80) return cardColorP(pp);
+              if (ly > 0.55) return skinRampP(pp, floor(lx * 6.0) / 5.0);
+              if (ly > 0.30) {
+                int hi = int(lx * 5.0);
+                return hi >= 4 ? hairAccentP(pp) : hairToneP(pp, hi);
+              }
+              if (ly > 0.13) return clothRampP(pp, floor(lx * 4.0) / 3.0);
+              return lx < 0.5 ? lipColorP(pp) : featureColorP(pp);
+            }
+            if (uv.y > 0.36) {
+              float col5 = floor(uv.x * 5.0);
+              vec2 q = vec2(fract(uv.x * 5.0), (uv.y - 0.36) / 0.34);
+              return stackDemo(q, col5 / 4.0);
+            }
+            vec3 c = cardColorP(uPreset);
+            for (int i = 0; i < 3; i++) {
+              vec2 ctr = vec2(0.18 + 0.32 * float(i), 0.18);
+              vec2 q = (uv - ctr) * vec2(uAspect, 1.0);
+              float r0 = 0.085;
+              float w = 0.026 + 0.004 * float(i);
+              // the three curl kinds: open C / closed O / 1.5-turn spiral
+              float sweep = i == 0 ? 3.1 : (i == 1 ? 6.3 : 9.2);
+              float tight = i == 0 ? 0.10 : (i == 1 ? 0.25 : 0.50);
+              float a0 = 0.7 + 1.9 * float(i);
+              float across;
+              float along;
+              float d = spiralBand(q, r0, w, sweep, a0, tight, across, along);
+              float aa = max(fwidth(d), 1e-5) * 1.2;
+              float ac2;
+              float al2;
+              float d2 = spiralBand(q - vec2(0.011, -0.014), r0, w, sweep, a0,
+                tight, ac2, al2);
+              float aS = (1.0 - smoothstep(-aa, w * 0.55, d2)) * 0.40;
+              c = mix(c, c * 0.45, aS);
+              float aR = 1.0 - smoothstep(-aa, aa, d);
+              vec3 tone = hairToneP(uPreset, i);
+              vec2 radial = normalize(q + vec2(1e-5, 0.0));
+              vec3 rc = shadeCurl(tone,
+                mix(tone, uPreset == 1 ? vec3(0.88, 0.82, 0.70)
+                                       : vec3(0.68, 0.75, 0.82), 0.42),
+                across, along, radial);
+              c = mix(c, rc, aR);
+            }
+            return c;
+          }
+
+          void main() {
+            if (uDebug == 4) {
+              fragColor = vec4(specimen(vUv), 1.0);
+              return;
+            }
+
+            vec2 px = vUv * uResolution;
+            // 3×3 gaussian structure sample (diagonals included): kills
+            // residual kuwahara sector speckle in the CHROMA source (lips /
+            // features / band chroma). The QUANTIZATION luminance no longer
+            // comes from here — see uBand below.
+            vec2 stT = 1.6 / vec2(textureSize(uStruct, 0));
+            vec4 st = texture(uStruct, vUv) * 0.25
+              + (texture(uStruct, vUv + vec2(stT.x, 0.0))
+                + texture(uStruct, vUv - vec2(stT.x, 0.0))
+                + texture(uStruct, vUv + vec2(0.0, stT.y))
+                + texture(uStruct, vUv - vec2(0.0, stT.y))) * 0.125
+              + (texture(uStruct, vUv + stT)
+                + texture(uStruct, vUv - stT)
+                + texture(uStruct, vUv + vec2(stT.x, -stT.y))
+                + texture(uStruct, vUv + vec2(-stT.x, stT.y))) * 0.0625;
+            vec3 camC = st.rgb;
+            // quantization field = strongly ISOTROPIC low-passed scene
+            // (P3b): boundaries of the tone bands are low-frequency organic
+            // curves, so per-pixel quantization cannot stair-step or stripe
+            vec4 band = texture(uBand, vUv);
+            float smoothL = lumaf(band.rgb);
+            float fineL = st.a;         // features / lips only (unblurred)
+            float bandFine = band.a;    // face-band field (low-passed fine)
+            vec4 cw = texture(uSoft, vUv);
+            vec4 cwBig = texture(uShad, vUv);
+            float personBig = clamp(cwBig.r + cwBig.g + cwBig.b + cwBig.a, 0.0, 1.0);
+
+            if (uDebug == 1) {
+              vec3 c = vec3(0.06, 0.07, 0.09);
+              c = mix(c, vec3(0.25, 0.42, 0.85), cw.a);
+              c = mix(c, vec3(0.95, 0.62, 0.30), cw.b);
+              c = mix(c, vec3(0.97, 0.83, 0.62), cw.g);
+              c = mix(c, vec3(0.46, 0.30, 0.75), cw.r);
+              fragColor = vec4(c, 1.0);
+              return;
+            }
+
+            float flat0 = uDebug == 2 ? 0.0 : 1.0;   // debug2 = no relief
+            float relW = uRelief * flat0;
+
+            // ---- the card (invariant 3): flat colour + paper grain ----
+            vec3 card = cardColorP(uPreset);
+            float pgrain = vnoise(px * 0.045) * 0.6 + vnoise(px * 0.21) * 0.4;
+            card *= 1.0 + (pgrain - 0.5) * 0.06 * uGrain;
+            card *= 1.0 - 0.04 * uGrain * step(0.993, hash12(floor(px * 0.5)));
+
+            // one soft drop shadow of the whole person onto the card
+            vec2 shCard = vec2(0.62, -0.79) * mix(10.0, 46.0, relW) / uResolution;
+            vec4 cwSh = texture(uShad, vUv - shCard);
+            float pSh = clamp(cwSh.r + cwSh.g + cwSh.b + cwSh.a, 0.0, 1.0);
+            float cardShadow = smoothstep(0.10, 0.68, pSh) *
+              (0.26 + 0.30 * relW) * flat0;
+            vec3 col = card * (1.0 - cardShadow);
+
+            // ---- scissor silhouette (simplified cut) ----
+            float sil = smoothstep(0.44, 0.53, personBig);
+            float dSil = (personBig - 0.48) / max(fwidth(personBig), 1e-4);
+
+            // ---- person interior: layered class stack ----
+            float faceW = smoothstep(0.30, 0.62, cw.g);
+            float skinField = clamp(cw.g + cw.b, 0.0, 1.0);
+            float hairField = cw.r;
+
+            float rimW = mix(0.8, 2.0, relW);
+            float shPxAmp = mix(1.4, 8.0, relW) * max(uResolution.y, 1.0) / 900.0;
+            vec2 shBand = vec2(0.62, -0.79) * shPxAmp / uResolution;
+            vec2 sOff = vUv - shBand;
+            vec4 stS = texture(uBand, sOff);   // same low-passed field
+            vec4 cwS2 = texture(uSoft, vUv - shBand * 1.8);
+
+            // luminance fields (face mixes in a LITTLE of the low-passed
+            // fine channel — invariant 6; the features themselves are
+            // guarded separately via the dark floor + lip gate, so the face
+            // bands stay large organic facets, never pixel wiggle)
+            float faceK = clamp(uDetail * 0.35, 0.0, 1.0) * faceW;
+            float Lskin = mix(smoothL, bandFine, faceK);
+            float LskinS = mix(lumaf(stS.rgb), stS.a, faceK);
+
+            // skin: coarse body quantiles ⟷ fine face quantiles.
+            // Band boundaries get a 1-px fwidth crossfade to the next band —
+            // a clean cut line instead of 1-px dither wiggle (repair #3a).
+            float fwL = max(fwidth(smoothL), 1e-4);
+            int lvB; float TdnB; float TupB;
+            levelSkin(smoothL, lvB, TdnB, TupB);
+            // minimum paper width for EVERY class (repair): a band whose
+            // screen-space thickness is under ~4 px cannot be cut from
+            // paper — fold the sliver into the band below
+            if (TdnB > -0.5 && TupB < 1.5 && (TupB - TdnB) < fwL * 4.0) {
+              lvB = max(lvB - 1, 0);
+              TdnB = lvB > 0 ? uSkinTh[lvB - 1] : -1.0;
+            }
+            vec3 colB = bandColor(camC, (float(lvB) + 0.5) / float(uSkinN), TdnB, TupB, 0);
+            float fwB = fwL * 1.5;   // ≥1.5 px の切り線AA
+            if (TupB < 1.5) {
+              vec3 colB2 = bandColor(camC, (float(lvB) + 1.5) / float(uSkinN),
+                TupB, min(TupB + (TupB - max(TdnB, 0.0)), 1.0), 0);
+              colB = mix(colB, colB2,
+                smoothstep(TupB - fwB, TupB + fwB, smoothL));
+            }
+            float rimB; float shdB;
+            bandRelief(smoothL, lumaf(stS.rgb), TdnB, TupB, rimW, rimB, shdB);
+            int lvF; float TdnF; float TupF;
+            levelFace(Lskin, lvF, TdnF, TupF);
+            float fwF = max(fwidth(Lskin), 1e-4) * 1.5;     // ≥1.5 px の切り線AA
+            // minimum paper width (repair #3b, strengthened): a band thinner
+            // than ~6 px cannot be cut from paper — fold into the band below
+            if (TdnF > -0.5 && TupF < 1.5 && (TupF - TdnF) < fwF * 4.0) {
+              lvF = max(lvF - 1, 0);
+              TdnF = lvF > 0 ? uFaceTh[lvF - 1] : -1.0;
+            }
+            vec3 colF = bandColor(camC, (float(lvF) + 0.5) / float(uFaceN), TdnF, TupF, 0);
+            if (TupF < 1.5) {
+              vec3 colF2 = bandColor(camC, (float(lvF) + 1.5) / float(uFaceN),
+                TupF, min(TupF + (TupF - max(TdnF, 0.0)), 1.0), 0);
+              colF = mix(colF, colF2,
+                smoothstep(TupF - fwF, TupF + fwF, Lskin));
+            }
+            float rimF; float shdF;
+            bandRelief(Lskin, LskinS, TdnF, TupF, rimW, rimF, shdF);
+            vec3 skinCol = mix(colB, colF, faceW);
+            // gentler relief inside the face — many close bands would
+            // otherwise corrugate; refs keep the face calm and precise
+            float rimSkin = mix(rimB, rimF * 0.55, faceW);
+            float shdSkin = mix(shdB, shdF * 0.55, faceW);
+            skinCol = mix(skinCol, skinCol * 1.26 + vec3(0.07),
+              rimSkin * (0.35 + 0.65 * relW) * flat0);
+            skinCol *= 1.0 - shdSkin * (0.13 + 0.20 * relW) * flat0;
+
+            // lips (oklab a redness over the face median) + dark-feature
+            // floor (eyes / brows kept as the darkest paper bits)
+            vec3 lab = lin2oklab(srgb2lin(camC));
+            float detK = smoothstep(0.10, 0.55, uDetail);
+            float lip = smoothstep(uLipA, uLipA + 0.022, lab.y) * faceW * detK;
+            vec3 lipC = lipColorP(uPreset) *
+              (0.82 + 0.36 * smoothstep(uFaceDark + 0.06, uFaceDark + 0.22, fineL));
+            skinCol = mix(skinCol, lipC, lip * 0.92);
+            float darkFeat = smoothstep(uFaceDark + 0.025, uFaceDark - 0.025, fineL)
+              * faceW * detK;
+            float dFeat = (fineL - uFaceDark) / max(fwidth(fineL), 1e-4);
+            float featRim = exp(-abs(dFeat) / 1.3) * darkFeat;
+            skinCol = mix(skinCol, featureColorP(uPreset), darkFeat);
+            skinCol = mix(skinCol, featureColorP(uPreset) * 2.0 + vec3(0.10),
+              featRim * 0.30 * flat0);
+
+            // clothes bands (same fwidth crossfade at the cut)
+            int lvC; float TdnC; float TupC;
+            levelCloth(smoothL, lvC, TdnC, TupC);
+            if (TdnC > -0.5 && TupC < 1.5 && (TupC - TdnC) < fwL * 4.0) {
+              lvC = max(lvC - 1, 0);
+              TdnC = lvC > 0 ? uClothTh[lvC - 1] : -1.0;
+            }
+            vec3 clothCol = bandColor(camC, (float(lvC) + 0.5) / float(uClothN), TdnC, TupC, 1);
+            if (TupC < 1.5) {
+              vec3 clothCol2 = bandColor(camC, (float(lvC) + 1.5) / float(uClothN),
+                TupC, min(TupC + (TupC - max(TdnC, 0.0)), 1.0), 1);
+              clothCol = mix(clothCol, clothCol2,
+                smoothstep(TupC - fwB, TupC + fwB, smoothL));
+            }
+            float rimC; float shdC;
+            bandRelief(smoothL, lumaf(stS.rgb), TdnC, TupC, rimW, rimC, shdC);
+            clothCol = mix(clothCol, clothCol * 1.24 + vec3(0.06),
+              rimC * (0.35 + 0.65 * relW) * flat0);
+            clothCol *= 1.0 - shdC * (0.12 + 0.20 * relW) * flat0;
+
+            // hair base paper (under the curls; two deep tones)
+            float hLev = smoothstep(uHairQ.y - 0.04, uHairQ.y + 0.04, smoothL);
+            vec3 hairBase = mix(hairToneP(uPreset, 0), hairToneP(uPreset, 1), hLev);
+            hairBase = mix(vec3(lumaf(hairBase)), hairBase, 0.4 + 0.6 * uPalette);
+
+            // stack: clothes ← skin ← hair-base, with cut rim + cast shadow
+            // at each class boundary (paper over paper)
+            vec3 body = clothCol;
+            float skinTop = smoothstep(0.38, 0.56, skinField);
+            float dSkinE = (skinField - 0.47) / max(fwidth(skinField), 1e-4);
+            float skinAbove = smoothstep(0.45, 0.62,
+              clamp(cwS2.g + cwS2.b, 0.0, 1.0)) * (1.0 - skinTop);
+            body *= 1.0 - skinAbove * (0.14 + 0.20 * relW) * flat0;
+            vec3 skinRimmed = mix(skinCol, skinCol * 1.22 + vec3(0.06),
+              exp(-max(dSkinE, 0.0) / (rimW * 1.5)) * (0.30 + 0.55 * relW) * flat0);
+            body = mix(body, skinRimmed, skinTop);
+            float hairTop = smoothstep(0.40, 0.58, hairField);
+            float dHairE = (hairField - 0.49) / max(fwidth(hairField), 1e-4);
+            float hairAbove = smoothstep(0.45, 0.62, cwS2.r) * (1.0 - hairTop);
+            body *= 1.0 - hairAbove * (0.15 + 0.22 * relW) * flat0;
+            vec3 hairRimmed = mix(hairBase, hairBase * 1.5 + vec3(0.05),
+              exp(-max(dHairE, 0.0) / (rimW * 1.5)) * (0.30 + 0.55 * relW) * flat0);
+            body = mix(body, hairRimmed, hairTop);
+
+            // place the cut person onto the card + silhouette paper edge
+            col = mix(col, body, sil);
+            float rimSil = exp(-max(dSil, 0.0) / (rimW * 1.1)) * sil;
+            col = mix(col, paperEdgeP(uPreset),
+              rimSil * (0.10 + 0.22 * relW) * flat0);
+
+            // ---- quilling curls ----
+            if (uDebug == 3) col = mix(cardColorP(uPreset), vec3(0.42), 0.5);
+            if (uDebug == 0 || uDebug == 3) {
+              vec4 rib = texture(uRibbon, vUv);
+              col = col * (1.0 - rib.a) + rib.rgb;
+            }
+
+            // ---- paper grain over everything (it is all paper) ----
+            col *= 1.0 + (pgrain - 0.5) * (0.02 + 0.06 * uGrain);
+            col *= 1.0 + (vnoise(px * 0.013) - 0.5) * 0.045 * uGrain;
+
+            // restrained edge darkening + white guard
+            vec2 vq = (vUv - 0.5) * vec2(uAspect, 1.0);
+            col *= mix(0.90, 1.0, smoothstep(1.40, 0.45, length(vq)));
+            col = clamp(col, 0.0, 0.985);
+
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program + target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(fsSource, vsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program,
+            compileShader(gl.VERTEX_SHADER, vsSource || fullscreenVS));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          klass: createProgram(classFS),
+          blur: createProgram(blurFS),
+          struct: createProgram(structFS),
+          etf: createProgram(etfFS),
+          stats: createProgram(statsFS),
+          ribbon: createProgram(ribbonFS, ribbonVS),
+          composite: createProgram(compositeFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uCx", "uCy",
+            "uFakeScale", "uMirror", "uFake", "uHasVideo",
+          ]),
+          klass: getLocations(programs.klass, [
+            "uSeg", "uPrev", "uSegScale", "uAspect", "uCx", "uCy",
+            "uFakeScale", "uAlpha", "uReset", "uSource", "uMirror",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          struct: getLocations(programs.struct, [
+            "uScene", "uPrev", "uTexel", "uAlpha", "uRadius", "uReset",
+          ]),
+          etf: getLocations(programs.etf, ["uStruct", "uTexel"]),
+          stats: getLocations(programs.stats, ["uStruct", "uSoft"]),
+          ribbon: getLocations(programs.ribbon, [
+            "uSoft", "uEtf", "uStruct", "uShadM", "uAspect", "uCells",
+            "uSoftTexel", "uCurls", "uRibbon", "uPalette", "uHairQ",
+            "uPreset", "uRelief",
+          ]),
+          composite: getLocations(programs.composite, [
+            "uStruct", "uBand", "uSoft", "uShad", "uRibbon", "uResolution", "uAspect",
+            "uRelief", "uPalette", "uDetail", "uGrain", "uPreset", "uDebug",
+            "uSkinTh[0]", "uSkinN", "uFaceTh[0]", "uFaceN", "uClothTh[0]",
+            "uClothN", "uFaceDark", "uLipA", "uHairQ",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          return tex;
+        }
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        // Video texture (DOM source → UNPACK_FLIP_Y). The segmentation
+        // texture is a plain RGBA upload from MediaPipe (image-space, no
+        // flip — the shader-side 1.0 - y handles orientation).
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const segTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, segTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+          new Uint8Array(16));
+        let segSize = [2, 2];
+
+        let targets = null;
+        let paintW = 2, paintH = 2;
+        let classW = 2, classH = 2;
+        let shadW = 2, shadH = 2;
+        let structW = 2, structH = 2;
+        let etfW = 2, etfH = 2;
+        const STATS_RES = 128;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          targets = {
+            scene: createTarget(paintW, paintH, false),
+            classA: createTarget(classW, classH, true),
+            classB: createTarget(classW, classH, true),
+            softTmp: createTarget(classW, classH, true),
+            softT: createTarget(classW, classH, true),
+            shadTmp: createTarget(shadW, shadH, true),
+            shadT: createTarget(shadW, shadH, true),
+            structA: createTarget(structW, structH, true),
+            structB: createTarget(structW, structH, true),
+            bandTmp: createTarget(etfW, etfH, true),
+            bandT: createTarget(etfW, etfH, true),
+            etfT: createTarget(etfW, etfH, true),
+            stats: createTarget(STATS_RES, STATS_RES, false),
+            ribbon: createTarget(paintW, paintH, false),
+          };
+          needsReset = true;
+        }
+
+        function clearSimTargets() {
+          clearTarget(targets.scene, 0.2, 0.22, 0.22, 1);
+          clearTarget(targets.classA, 0, 0, 0, 0);
+          clearTarget(targets.classB, 0, 0, 0, 0);
+          clearTarget(targets.softTmp, 0, 0, 0, 0);
+          clearTarget(targets.softT, 0, 0, 0, 0);
+          clearTarget(targets.shadTmp, 0, 0, 0, 0);
+          clearTarget(targets.shadT, 0, 0, 0, 0);
+          clearTarget(targets.structA, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.structB, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.bandTmp, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.bandT, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.etfT, 0.5, 0.5, 0, 0);
+          clearTarget(targets.stats, 0, 0, 0.5, 1);
+          clearTarget(targets.ribbon, 0, 0, 0, 0);
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            const cap = (limit) => Math.min(1, limit / maxSide);
+            const dim = (scale) => [
+              Math.max(8, Math.round(width * scale)),
+              Math.max(8, Math.round(height * scale)),
+            ];
+            [paintW, paintH] = dim(cap(1024));
+            [classW, classH] = dim(cap(448));
+            [shadW, shadH] = dim(cap(224));
+            [structW, structH] = dim(cap(768));
+            [etfW, etfH] = dim(cap(384));
+            rebuildTargets();
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        function blurPass(src, tmp, dst, sigma) {
+          renderPass(tmp, programs.blur, () => {
+            bindTexture(0, src.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 1 / tmp.width, 0);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 0, 1 / dst.height);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+        }
+
+        // True GPU sync — a 1×1 readPixels. gl.finish() is effectively
+        // non-blocking under swiftshader; without this the prewarm work
+        // queues up and stalls the compositor for tens of seconds (CRAFT §C4).
+        const syncPx = new Uint8Array(4);
+        function glSync() {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.stats.fbo);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+
+        /* ------------------------------------------------------------------
+           Quantile thresholds (CPU side of invariant 1). A 128×128 stats
+           target is read back every ~200 ms (never per frame), weighted
+           histograms per class → quantiles → dead-zone hysteresis + EMA →
+           uniform arrays. Thresholds keep a minimum separation so bands
+           never swap or collapse (invariant 5).
+        ------------------------------------------------------------------ */
+
+        const BINS = 64;
+        const statsBuf = new Uint8Array(STATS_RES * STATS_RES * 4);
+        const histFace = new Float32Array(BINS);
+        const histBody = new Float32Array(BINS);
+        const histCloth = new Float32Array(BINS);
+        const histHair = new Float32Array(BINS);
+        const histSkin = new Float32Array(BINS);
+        const MIN_W = 14;          // min class weight before quantiles count
+        const DEAD = 0.006;        // hysteresis dead zone
+        const MIN_GAP = 0.026;     // min threshold separation (anti-sliver)
+
+        const TH = {
+          skin: new Float32Array(7),
+          face: new Float32Array(11),
+          cloth: new Float32Array(5),
+          skinN: 6,
+          faceN: 10,
+          clothN: 4,
+          faceDark: 0.16,
+          lipA: 0.10,
+          hairQ: new Float32Array([0.14, 0.22, 0.32]),
+          seeded: false,
+        };
+        const cov = { hair: 0, face: 0, body: 0, cloth: 0 };
+
+        function counts() {
+          return {
+            skinN: Math.min(8, 4 + Math.round(state.layers * 4)),
+            // fewer, larger face facets (refs: cheek / nose / forehead planes)
+            faceN: Math.min(8, 4 + Math.round(state.detail * 4)),
+            clothN: Math.min(6, 3 + Math.round(state.layers * 3)),
+          };
+        }
+        function seedEven(arr, n, lo, hi) {
+          for (let i = 0; i < n - 1; i++) {
+            arr[i] = lo + ((hi - lo) * (i + 1)) / n;
+          }
+        }
+        seedEven(TH.skin, TH.skinN, 0.18, 0.8);
+        seedEven(TH.face, TH.faceN, 0.14, 0.85);
+        seedEven(TH.cloth, TH.clothN, 0.15, 0.7);
+
+        function quantileOf(hist, wsum, q) {
+          if (wsum < MIN_W) return null;
+          const target = wsum * q;
+          let acc = 0;
+          for (let i = 0; i < BINS; i++) {
+            const next = acc + hist[i];
+            if (next >= target) {
+              const f = hist[i] > 0 ? (target - acc) / hist[i] : 0.5;
+              return (i + f) / BINS;
+            }
+            acc = next;
+          }
+          return 1;
+        }
+        function smoothScalar(cur, target, k) {
+          if (target === null) return cur;
+          if (!TH.seeded) return target;
+          if (Math.abs(target - cur) < DEAD) return cur;
+          return cur + (target - cur) * k;
+        }
+        function updateArray(arr, n, hist, wsum, k, snap) {
+          for (let i = 0; i < n - 1; i++) {
+            const t = quantileOf(hist, wsum, (i + 1) / n);
+            if (t === null) continue;
+            arr[i] = snap || !TH.seeded ? t : smoothScalar(arr[i], t, k);
+          }
+          for (let i = 1; i < n - 1; i++) {
+            if (arr[i] < arr[i - 1] + MIN_GAP) arr[i] = arr[i - 1] + MIN_GAP;
+          }
+        }
+
+        // dtStat = seconds since the previous stats update (real or simulated)
+        function updateThresholds(dtStat) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.stats.fbo);
+          gl.readPixels(0, 0, STATS_RES, STATS_RES, gl.RGBA, gl.UNSIGNED_BYTE, statsBuf);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+          histFace.fill(0); histBody.fill(0); histCloth.fill(0); histHair.fill(0);
+          let wFace = 0, wBody = 0, wCloth = 0, wHair = 0;
+          let aSum = 0, aW = 0;
+          const half = STATS_RES / 2;
+          for (let y = 0; y < STATS_RES; y++) {
+            for (let x = 0; x < STATS_RES; x++) {
+              const o = (y * STATS_RES + x) * 4;
+              const w = statsBuf[o + 1] / 255;
+              if (w < 0.02) continue;
+              const bin = Math.min(BINS - 1, (statsBuf[o] / 255 * BINS) | 0);
+              const q = (x >= half ? 1 : 0) + (y >= half ? 2 : 0);
+              if (q === 0) {
+                histFace[bin] += w; wFace += w;
+                aSum += ((statsBuf[o + 2] / 255) - 0.5) / 2 * w; aW += w;
+              } else if (q === 1) { histBody[bin] += w; wBody += w; }
+              else if (q === 2) { histCloth[bin] += w; wCloth += w; }
+              else { histHair[bin] += w; wHair += w; }
+            }
+          }
+          const qArea = half * half;
+          cov.face = wFace / qArea; cov.body = wBody / qArea;
+          cov.cloth = wCloth / qArea; cov.hair = wHair / qArea;
+          for (let i = 0; i < BINS; i++) histSkin[i] = histFace[i] + histBody[i];
+          const wSkin = wFace + wBody;
+
+          const c = counts();
+          const tau = 0.5 + 2.0 * state.calm;
+          const k = 1 - Math.exp(-Math.max(dtStat, 1e-3) / tau);
+          const snapSkin = c.skinN !== TH.skinN;
+          const snapFace = c.faceN !== TH.faceN;
+          const snapCloth = c.clothN !== TH.clothN;
+          TH.skinN = c.skinN; TH.faceN = c.faceN; TH.clothN = c.clothN;
+          updateArray(TH.skin, TH.skinN, histSkin, wSkin, k, snapSkin);
+          updateArray(TH.face, TH.faceN, histFace, wFace, k, snapFace);
+          updateArray(TH.cloth, TH.clothN, histCloth, wCloth, k, snapCloth);
+
+          // dark-feature floor (eyes/brows survive as the darkest paper) +
+          // lip redness gate (face mean oklab a + a detail-scaled margin)
+          const fd = quantileOf(histFace, wFace, 0.07);
+          if (fd !== null) {
+            TH.faceDark = smoothScalar(TH.faceDark,
+              Math.min(Math.max(fd, 0.03), 0.55), k);
+          }
+          if (aW > MIN_W) {
+            const margin = 0.055 - 0.027 * state.detail;
+            TH.lipA = smoothScalar(TH.lipA, aSum / aW + margin, k);
+          }
+          const h1 = quantileOf(histHair, wHair, 0.25);
+          const h2 = quantileOf(histHair, wHair, 0.55);
+          const h3 = quantileOf(histHair, wHair, 0.85);
+          if (h1 !== null) {
+            TH.hairQ[0] = smoothScalar(TH.hairQ[0], h1, k);
+            TH.hairQ[1] = smoothScalar(TH.hairQ[1], h2, k);
+            TH.hairQ[2] = smoothScalar(TH.hairQ[2], h3, k);
+          }
+          if (wSkin >= MIN_W) TH.seeded = true;
+        }
+
+        /* ------------------------------------------------------------------
+           Detection state + MediaPipe multiclass segmentation. All masks are
+           consumed in SCREEN UV so fakesource and MediaPipe drive the exact
+           same shader path. Only ImageSegmenter is loaded (CRAFT §C3).
+        ------------------------------------------------------------------ */
+
+        const det = {
+          cx: 0.5, cy: 0,
+          tcx: 0.5, tcy: 0,
+          present: 0, tpresent: 0,
+          segScale: [1, 1],
+          segReady: false,
+        };
+
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        // Multiclass selfie model — file name verified against the live
+        // storage bucket (a mistyped model path 404s and silently kills all
+        // detection, CRAFT §C2). Categories: 0 background / 1 hair /
+        // 2 body-skin / 3 face-skin / 4 clothes / 5 others.
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite";
+
+        let mpSegmenter = null;
+        let mpState = "idle"; // idle | loading | ready | error
+        let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
+        let segRGBA = new Uint8Array(4);
+        const SEG_MAX_SIDE = 288;   // small inference copy (CRAFT §C3)
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;
+        let segBadRun = 0;
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
+
+        async function loadMediaPipe() {
+          if (FAKE || mpState === "loading" || mpState === "ready") return;
+          mpState = "loading";
+          mpProgress = 0.05;
+          try {
+            const mod = await import(/* @vite-ignore */ MP_PKG);
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
+            try {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
+            } catch (_e) {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
+            }
+            mpProgress = 1;
+            mpState = "ready";
+          } catch (error) {
+            console.error("MediaPipe load failed", error);
+            mpState = "error";
+          }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("kirie: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
+        }
+
+        // Offline diagnostic (?fakeseg=1): a synthetic multiclass mask of
+        // KNOWN orientation — hair band across the image TOP, face below it,
+        // clothes at the image BOTTOM (top-left origin, FLIP_Y=false, exactly
+        // like a real MediaPipe upload). With the shader Y flip correct, hair
+        // must render at the TOP of the screen and clothes at the BOTTOM.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h * 4);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const o = (y * w + x) * 4;
+              const fy = y / h;
+              const inBand = x > w * 0.24 && x < w * 0.76;
+              if (!inBand) continue;
+              if (fy < 0.28) arr[o] = 255;              // hair (image top)
+              else if (fy < 0.52) arr[o + 1] = 255;     // face skin
+              else if (fy < 0.60) arr[o + 2] = 255;     // body skin
+              else arr[o + 3] = 255;                    // clothes (image bottom)
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+        }
+
+        // Packs the six confidence masks into one RGBA texture
+        // (R hair / G face / B body / A clothes+others) and returns the
+        // person coverage (1 - background mean).
+        function uploadSegMasks(masks) {
+          const w = masks[0].width, h = masks[0].height;
+          const n = w * h;
+          const bg = masks[0].getAsFloat32Array();
+          const hair = masks[1].getAsFloat32Array();
+          const body = masks[2].getAsFloat32Array();
+          const face = masks[3].getAsFloat32Array();
+          const cloth = masks[4].getAsFloat32Array();
+          const other = masks.length > 5 ? masks[5].getAsFloat32Array() : null;
+          if (segRGBA.length !== n * 4) segRGBA = new Uint8Array(n * 4);
+          let sum = 0;
+          for (let i = 0; i < n; i++) {
+            const o = i * 4;
+            segRGBA[o] = Math.max(0, Math.min(255, (hair[i] * 255) | 0));
+            segRGBA[o + 1] = Math.max(0, Math.min(255, (face[i] * 255) | 0));
+            segRGBA[o + 2] = Math.max(0, Math.min(255, (body[i] * 255) | 0));
+            const cl = cloth[i] + (other ? other[i] * 0.7 : 0);
+            segRGBA[o + 3] = Math.max(0, Math.min(255, (cl * 255) | 0));
+            sum += 1 - bg[i];
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+          if (segSize[0] !== w || segSize[1] !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, segRGBA);
+            segSize = [w, h];
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, segRGBA);
+          }
+          det.segReady = true;
+          return sum / n;
+        }
+
+        // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
+        function runDetection(now) {
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
+          try {
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
+            const cms = seg && seg.confidenceMasks;
+            if (cms && cms.length >= 5) {
+              const cover = uploadSegMasks(cms);
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
+            if (seg && seg.close) seg.close();
+          } catch (_e) {
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
+          }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
+        }
+
+        let detTimer = 0;
+        function detectionTick() {
+          if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
+            runDetection(performance.now());
+          }
+          // Adaptive cadence: inference never owns the main thread. Slow
+          // devices detect less often; the class EMA bridges the gaps.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
+        }
+
+        /* ------------------------------------------------------------------
+           Render core + loop + prewarm
+        ------------------------------------------------------------------ */
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let structPing = false, classPing = false;
+        let readyStamped = false;
+        let lastStatWall = 0;
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        function updateDetection(dt) {
+          const canvasAspect = canvas.width / Math.max(canvas.height, 1);
+          const videoAspect = (video.videoWidth && video.videoHeight)
+            ? video.videoWidth / video.videoHeight : 4 / 3;
+          det.segScale = videoAspect > canvasAspect
+            ? [canvasAspect / videoAspect, 1]
+            : [1, videoAspect / canvasAspect];
+          if (FAKE) {
+            // slow sway + bob: the figure keeps moving (--motion contract);
+            // frozen (animTime pinned) it is a deterministic still.
+            det.tcx = 0.5 + 0.055 * Math.sin(animTime * 0.45);
+            det.tcy = 0.025 * Math.sin(animTime * 0.7 + 1.0);
+            det.tpresent = 1;
+          } else if (mpState !== "ready") {
+            det.tpresent = 0;
+          }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
+          const k = dt > 0 ? 1 - Math.exp(-dt * 6) : 0;
+          det.cx += (det.tcx - det.cx) * k;
+          det.cy += (det.tcy - det.cy) * k;
+          det.present += (det.tpresent - det.present) * k;
+        }
+
+        // One full pipeline step. dt drives the fake-figure tracking;
+        // emaDt drives every EMA (fixed 1/60 during prewarm so the warmed
+        // state is deterministic and framerate-independent).
+        function renderCore(dt, emaDt, drawFinal, haveVideo) {
+          updateDetection(dt);
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
+
+          const structCur = structPing ? targets.structA : targets.structB;
+          const structPrev = structPing ? targets.structB : targets.structA;
+          const classCur = classPing ? targets.classA : targets.classB;
+          const classPrev = classPing ? targets.classB : targets.classA;
+
+          const aClass = 1 - Math.exp(-emaDt * (16 - 11 * state.calm));
+          const aStruct = 1 - Math.exp(-emaDt * (20 - 13 * state.calm));
+
+          // P0 — scene
+          renderPass(targets.scene, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize,
+              Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uFakeScale, FAKESCALE);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+          });
+
+          // P3 — kuwahara + EMA (ping-pong)
+          renderPass(structCur, programs.struct, () => {
+            const u = locations.struct;
+            bindTexture(0, targets.scene.tex);
+            bindTexture(1, structPrev.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform2f(u.uTexel, 1 / structW, 1 / structH);
+            gl.uniform1f(u.uAlpha, aStruct);
+            gl.uniform1f(u.uRadius, 4.2);
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+          });
+
+          // P1 — class EMA (ping-pong)
+          renderPass(classCur, programs.klass, () => {
+            const u = locations.klass;
+            bindTexture(0, segTexture);
+            bindTexture(1, classPrev.tex);
+            gl.uniform1i(u.uSeg, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uFakeScale, FAKESCALE);
+            gl.uniform1f(u.uAlpha, aClass);
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+            gl.uniform1i(u.uSource, source);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // P2 — soft class boundaries + heavy blur (scissor + card shadow)
+          blurPass(classCur, targets.softTmp, targets.softT, 1.7);
+          blurPass(targets.softT, targets.shadTmp, targets.shadT, 5.5);
+
+          // P4 — etf
+          renderPass(targets.etfT, programs.etf, () => {
+            const u = locations.etf;
+            bindTexture(0, structCur.tex);
+            gl.uniform1i(u.uStruct, 0);
+            gl.uniform2f(u.uTexel, 1 / etfW, 1 / etfH);
+          });
+
+          // P5 — stats source (read back on a slow CPU cadence)
+          renderPass(targets.stats, programs.stats, () => {
+            const u = locations.stats;
+            bindTexture(0, structCur.tex);
+            bindTexture(1, targets.softT.tex);
+            gl.uniform1i(u.uStruct, 0);
+            gl.uniform1i(u.uSoft, 1);
+          });
+
+          if (drawFinal) {
+            // P3b — strong ISOTROPIC low-pass of the kuwahara scene → the
+            // QUANTIZATION field (repair: boundary quality). Quantizing this
+            // low-frequency field instead of the near-pixel kuwahara output
+            // makes every tone-band boundary a smooth large curve (no 1-2 px
+            // stair dither, no wood-grain striping), leaving only the big
+            // shading structure to cut into paper facets.
+            blurPass(structCur, targets.bandTmp, targets.bandT, 3.6);
+
+            // P6 — quilling curls (instanced spiral sprites, premultiplied)
+            const cellsX = Math.round(34 + 30 * state.curls);
+            const cellSize = aspect / cellsX;
+            let rows = Math.ceil(1 / cellSize) + 1;
+            const MAX_INST = 8192;
+            if (cellsX * rows > MAX_INST) rows = Math.floor(MAX_INST / cellsX);
+            const inst = cellsX * rows;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targets.ribbon.fbo);
+            gl.viewport(0, 0, targets.ribbon.width, targets.ribbon.height);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.useProgram(programs.ribbon);
+            const ur = locations.ribbon;
+            bindTexture(0, targets.softT.tex);
+            bindTexture(1, targets.etfT.tex);
+            bindTexture(2, structCur.tex);
+            bindTexture(3, targets.shadT.tex);
+            gl.uniform1i(ur.uSoft, 0);
+            gl.uniform1i(ur.uEtf, 1);
+            gl.uniform1i(ur.uStruct, 2);
+            gl.uniform1i(ur.uShadM, 3);
+            gl.uniform1f(ur.uAspect, aspect);
+            gl.uniform1f(ur.uCells, cellsX);
+            gl.uniform2f(ur.uSoftTexel, 1 / classW, 1 / classH);
+            gl.uniform1f(ur.uCurls, state.curls);
+            gl.uniform1f(ur.uRibbon, state.ribbon);
+            gl.uniform1f(ur.uPalette, state.palette);
+            gl.uniform3f(ur.uHairQ, TH.hairQ[0], TH.hairQ[1], TH.hairQ[2]);
+            gl.uniform1i(ur.uPreset, state.preset);
+            gl.uniform1f(ur.uRelief, state.relief);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, inst);
+            gl.disable(gl.BLEND);
+
+            // P7 — composite → canvas
+            renderPass(null, programs.composite, () => {
+              const u = locations.composite;
+              bindTexture(0, structCur.tex);
+              bindTexture(1, targets.softT.tex);
+              bindTexture(2, targets.shadT.tex);
+              bindTexture(3, targets.ribbon.tex);
+              bindTexture(4, targets.bandT.tex);
+              gl.uniform1i(u.uStruct, 0);
+              gl.uniform1i(u.uSoft, 1);
+              gl.uniform1i(u.uShad, 2);
+              gl.uniform1i(u.uRibbon, 3);
+              gl.uniform1i(u.uBand, 4);
+              gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+              gl.uniform1f(u.uAspect, aspect);
+              gl.uniform1f(u.uRelief, state.relief);
+              gl.uniform1f(u.uPalette, state.palette);
+              gl.uniform1f(u.uDetail, state.detail);
+              gl.uniform1f(u.uGrain, state.grain);
+              gl.uniform1i(u.uPreset, state.preset);
+              gl.uniform1i(u.uDebug, state.debugView);
+              gl.uniform1fv(u["uSkinTh[0]"], TH.skin);
+              gl.uniform1i(u.uSkinN, TH.skinN);
+              gl.uniform1fv(u["uFaceTh[0]"], TH.face);
+              gl.uniform1i(u.uFaceN, TH.faceN);
+              gl.uniform1fv(u["uClothTh[0]"], TH.cloth);
+              gl.uniform1i(u.uClothN, TH.clothN);
+              gl.uniform1f(u.uFaceDark, TH.faceDark);
+              gl.uniform1f(u.uLipA, TH.lipA);
+              gl.uniform3f(u.uHairQ, TH.hairQ[0], TH.hairQ[1], TH.hairQ[2]);
+            });
+          }
+
+          structPing = !structPing;
+          classPing = !classPing;
+        }
+
+        // ?prewarm=<sec>: deterministic fast-forward BEFORE the first
+        // presented frame. Two phases (both fixed-step, so the result is a
+        // pure function of the prewarm value): (A) up to 3 simulated seconds
+        // of full pipeline steps at dt=1/20 — the GPU EMAs (class/struct)
+        // converge in ~1-2 s; (B) the remaining simulated time in 1.5 s
+        // chunks of one pipeline step + one CPU quantile update each — the
+        // threshold EMA (τ up to ~2.5 s) converges without paying for full
+        // GPU steps (swiftshader budget, CRAFT §C4). Async-chunked so the
+        // page load event is never blocked; true glSync per chunk. Under
+        // ?freeze=1 the figure pose stays pinned while every EMA still
+        // converges onto the static scene.
+        async function runPrewarm() {
+          const PDT = 1 / 20;
+          const stepsA = Math.round(Math.min(PREWARM, 3) / PDT);
+          for (let i = 0; i < stepsA; i++) {
+            if (!FREEZE && !state.pauseAnim) animTime += PDT;
+            renderCore(PDT, PDT, false, false);
+            if (i % 4 === 3) updateThresholds(4 * PDT);
+            if (i % 10 === 9) {
+              glSync();
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+          }
+          let remain = PREWARM - Math.min(PREWARM, 3);
+          while (remain > 1e-3) {
+            const chunk = Math.min(1.5, remain);
+            if (!FREEZE && !state.pauseAnim) animTime += chunk;
+            renderCore(chunk, PDT, false, false);
+            updateThresholds(chunk);
+            remain -= chunk;
+            glSync();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          updateThresholds(4 * PDT);
+          glSync();
+        }
+
+        function detectionLabel() {
+          if (FAKE) return "合成";
+          if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
+          if (mpState === "error") return "検知エラー";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
+          return "待機";
+        }
+        function coverageLabel() {
+          const pc = (v) => `${Math.round(Math.min(1, v) * 100)}`;
+          return `髪${pc(cov.hair)} 顔${pc(cov.face)} 体${pc(cov.body)} 服${pc(cov.cloth)}%`;
+        }
+
+        function updateChip() {
+          statusChip.textContent = FAKE
+            ? "入力 · 合成 (fakesource=1)"
+            : `検知 · ${detectionLabel()}`;
+          statusChip.classList.toggle(
+            "hidden", FAKE ? performance.now() - bootWall > 4000 : false);
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          const dt = FREEZE ? 0 : rawDt;
+          if (!state.pauseAnim) animTime += dt;
+
+          const haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || haveVideo || mpState === "ready";
+
+          renderCore(dt, dt, true, haveVideo);
+
+          // low-cadence quantile refresh (never per frame)
+          if (now - lastStatWall > 200) {
+            updateThresholds(Math.min(1, (now - lastStatWall) / 1000));
+            lastStatWall = now;
+          }
+
+          if (!readyStamped && hasInput) {
+            glSync();   // first real frame actually finished (CRAFT §C4)
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
+              canvas.height} / 検知 ${detectionLabel()} / ${coverageLabel()}`;
+            updateChip();
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. With ?fakesource=1 the synthetic bust drives the
+           pipeline and MediaPipe is never touched, but getUserMedia still
+           runs so the three error paths stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay("requesting", "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.");
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay("error", "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8888) or HTTPS, then reload.");
+            retryCamera.disabled = false;
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.");
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 }, height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            retryCamera.disabled = false;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+            if (!FAKE) loadMediaPipe();
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay("error", "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true });
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay("error", "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true });
+            } else {
+              setOverlay("error", "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true });
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => { startCamera(); });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+        window.addEventListener("beforeunload", stopCamera);
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
+          // startCamera() runs in every mode. Under ?fakesource=1 the
+          // synthetic bust drives the whole pipeline regardless of the camera
+          // (the video texture is never sampled, MediaPipe stays untouched),
+          // so the camera is only exercised to keep the error overlays
+          // observable.
+          startCamera();
+          detectionTick();
+          if (PREWARM > 0) {
+            runPrewarm().then(() => requestAnimationFrame(frame));
+          } else {
+            requestAnimationFrame(frame);
+          }
+        } catch (error) {
+          setOverlay("error", "WEBGL SETUP ERROR",
+            error && error.message ? error.message : "Could not initialize the renderer.");
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
