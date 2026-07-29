@@ -695,18 +695,25 @@
             }
             return best;
           }
-          // Paper-strip shading: soft cylinder across the band + a lit paper
-          // edge on the side facing the light + a darker curl core.
+          // Paper-strip shading (ref_2): a STRONG cross-band cylinder ramp —
+          // one band edge rides up toward steel blue, the other falls to
+          // near black — plus a thin catch-light on the outer paper edge,
+          // brightest where the loop faces the light.
           vec3 shadeCurl(vec3 tone, vec3 hiCol, float across, float along,
                          vec2 radial) {
             vec2 ldir = normalize(vec2(-0.55, 0.80));
+            float ld = clamp(dot(radial, ldir), -1.0, 1.0);
             float cyl = sqrt(max(0.0, 1.0 - across * across));
-            float ld = 0.60 + 0.40 * clamp(dot(radial, ldir), -1.0, 1.0);
-            vec3 c = tone * (0.55 + 0.60 * cyl * ld);
-            float litSide = clamp(dot(radial, ldir), 0.0, 1.0);
-            float rim = smoothstep(0.45, 0.92, across) * litSide;
-            c = mix(c, hiCol, rim * 0.85);
-            c *= 1.0 - 0.16 * along;
+            // cross-band ramp: flips with which side of the loop faces light
+            float ramp = 0.55 + 0.45 * across * ld;
+            float gain = 0.22 + (0.72 + 0.78 * max(ld, 0.0)) * cyl * ramp * 1.35;
+            vec3 c = tone * gain;
+            // lift the lit half of the loop toward the paper highlight colour
+            c = mix(c, hiCol, 0.28 * max(ld, 0.0) * cyl * smoothstep(0.0, 0.8, ramp));
+            // thin catch-light along the outer paper edge
+            float edgeLit = smoothstep(0.58, 0.93, across) * (0.25 + 0.75 * max(ld, 0.0));
+            c = mix(c, hiCol, edgeLit);
+            c *= 1.0 - 0.15 * along;
             return c;
           }
         `;
@@ -1074,9 +1081,14 @@
             vec2 cp = (cell + 0.5 + jit * 0.9) * s;
             vec2 uvC = vec2(cp.x / uAspect, cp.y);
             float cov = textureLod(uSoft, uvC, 0.0).r;
-            float fade = smoothstep(0.30, 0.58, cov);
+            // OPAQUE-OR-ABSENT gate (repair #1): paper is opaque. No alpha
+            // ramp against coverage — a curl either exists at full opacity
+            // or is culled, so the hair rim never grows translucent ghosts.
+            // The class EMA keeps cov continuous in time, so the gate acts
+            // like a hysteresis threshold rather than a flicker source.
+            float gate = step(0.36, cov);
             vec3 h = hash32(cell + 17.0);
-            if (fade < 0.03 || uvC.y > 1.02 || uvC.y < -0.02) {
+            if (gate < 0.5 || uvC.y > 1.02 || uvC.y < -0.02) {
               vLocal = vec2(0.0);
               vPar = vec4(1.0, 0.1, 1.0, 0.0);
               vMisc = vec3(0.3, 0.0, 0.0);
@@ -1099,10 +1111,27 @@
               ang = atan(-hg.x, hg.y + 1e-6);
             }
             ang += (h.x - 0.5) * 1.5 * (1.0 - coh);
-            float r0 = s * (0.85 + 0.75 * h.y) * mix(0.72, 1.50, uRibbon);
-            float w = r0 * mix(0.20, 0.42, uRibbon) * (0.75 + 0.5 * h.z);
-            float sweep = mix(3.2, 7.2, uCurls) * (0.75 + 0.5 * hash12(cell + 41.2));
-            float tight = 0.28 + 0.36 * h.x;
+            // shape variety (repair #2b, matched to ref_2): radius quantized
+            // to 3 cell-hash steps; a mix of open C-crescents (majority in
+            // the ref), closed O loops and 1.5-turn spirals.
+            float rq = floor(h.y * 2.999);
+            float r0 = s * (0.72 + 0.45 * rq) * mix(0.72, 1.50, uRibbon);
+            float w = min(r0 * 0.75,
+              s * mix(0.30, 0.62, uRibbon) * (0.85 + 0.5 * h.z));
+            float kind = hash12(cell + 41.2);
+            float sweep;
+            float tight;
+            float curlAmt = mix(0.75, 1.15, uCurls);
+            if (kind < 0.42) {          // open C / crescent
+              sweep = (2.6 + 1.7 * h.z) * curlAmt;
+              tight = 0.06 + 0.14 * h.x;
+            } else if (kind < 0.80) {   // closed O loop
+              sweep = (5.9 + 1.0 * h.z) * curlAmt;
+              tight = 0.20 + 0.16 * h.x;
+            } else {                    // inward spiral, ~1.5 turns
+              sweep = (8.4 + 1.3 * h.z) * min(curlAmt, 1.05);
+              tight = 0.42 + 0.16 * h.x;
+            }
             // paper tone: quantized local hair luminance → deep single-hue set
             float lum = dot(textureLod(uStruct, uvC, 0.0).rgb, vec3(0.299, 0.587, 0.114));
             int ti = 0;
@@ -1117,13 +1146,17 @@
             vec3 labB = lin2oklab(srgb2lin(ramp));
             vec3 col = clamp(oklab2srgb(mix(labA, labB, 0.25 + 0.75 * uPalette)), 0.0, 1.0);
             vColor = col;
-            vHiCol = mix(col, vec3(0.93, 0.90, 0.85), 0.55);
+            // paper catch-light: cool steel sheen on the navy sets (ref_2),
+            // warm cream on the brown 生成り set
+            vHiCol = mix(col,
+              uPreset == 1 ? vec3(0.90, 0.84, 0.72) : vec3(0.74, 0.82, 0.90),
+              0.68);
             float R = r0 * 1.30 + w * 2.6;
             vec2 lp = cornerOf * R;
             vec2 posUv = vec2((cp.x + lp.x) / uAspect, cp.y + lp.y);
             vLocal = lp;
             vPar = vec4(r0, w, sweep, ang + 6.2831853 * hash12(cell + 2.2));
-            vMisc = vec3(tight, fade, hash12(cell + 8.4));
+            vMisc = vec3(tight, 1.0, hash12(cell + 8.4));
             gl_Position = vec4(posUv * 2.0 - 1.0, 0.0, 1.0);
           }
         `;
@@ -1255,7 +1288,11 @@
             float dLow = (L - Tdn) / max(fwidth(L), 1e-4);
             rim = Tdn < -0.5 ? 0.0
               : exp(-max(dLow, 0.0) / max(rimW, 0.5)) * step(0.0, dLow);
-            shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + 0.028, Loff);
+            // shadow penumbra measured in PIXELS (~3 px), not in luminance —
+            // a luminance-wide smoothstep turns shallow gradients into
+            // airbrush streaks (repair #3c)
+            float shW = min(0.035, max(fwidth(L), 1e-4) * 3.0);
+            shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + shW, Loff);
           }
 
           // uDebug==4 middle band: cut/shadow stages on a synthetic 4-layer
@@ -1306,22 +1343,26 @@
               vec2 q = (uv - ctr) * vec2(uAspect, 1.0);
               float r0 = 0.085;
               float w = 0.026 + 0.004 * float(i);
-              float sweep = 3.4 + 2.1 * float(i);
+              // the three curl kinds: open C / closed O / 1.5-turn spiral
+              float sweep = i == 0 ? 3.1 : (i == 1 ? 6.3 : 9.2);
+              float tight = i == 0 ? 0.10 : (i == 1 ? 0.25 : 0.50);
               float a0 = 0.7 + 1.9 * float(i);
               float across;
               float along;
-              float d = spiralBand(q, r0, w, sweep, a0, 0.32, across, along);
+              float d = spiralBand(q, r0, w, sweep, a0, tight, across, along);
               float aa = max(fwidth(d), 1e-5) * 1.2;
               float ac2;
               float al2;
               float d2 = spiralBand(q - vec2(0.011, -0.014), r0, w, sweep, a0,
-                0.32, ac2, al2);
+                tight, ac2, al2);
               float aS = (1.0 - smoothstep(-aa, w * 0.55, d2)) * 0.40;
               c = mix(c, c * 0.45, aS);
               float aR = 1.0 - smoothstep(-aa, aa, d);
               vec3 tone = hairToneP(uPreset, i);
               vec2 radial = normalize(q + vec2(1e-5, 0.0));
-              vec3 rc = shadeCurl(tone, mix(tone, vec3(0.93, 0.90, 0.85), 0.55),
+              vec3 rc = shadeCurl(tone,
+                mix(tone, uPreset == 1 ? vec3(0.90, 0.84, 0.72)
+                                       : vec3(0.74, 0.82, 0.90), 0.68),
                 across, along, radial);
               c = mix(c, rc, aR);
             }
@@ -1335,14 +1376,20 @@
             }
 
             vec2 px = vUv * uResolution;
-            // tent-filtered structure sample: kills residual kuwahara sector
-            // speckle so the quantized faces stay FLAT (invariant 1)
-            vec2 stT = 1.5 / vec2(textureSize(uStruct, 0));
-            vec4 st = texture(uStruct, vUv) * 0.4
-              + texture(uStruct, vUv + vec2(stT.x, 0.0)) * 0.15
-              + texture(uStruct, vUv - vec2(stT.x, 0.0)) * 0.15
-              + texture(uStruct, vUv + vec2(0.0, stT.y)) * 0.15
-              + texture(uStruct, vUv - vec2(0.0, stT.y)) * 0.15;
+            // 3×3 gaussian structure sample (diagonals included): kills
+            // residual kuwahara sector speckle AND the ragged 1-px contour
+            // wiggle of the quantization boundaries (repair #3a) so the
+            // quantized faces stay FLAT with smooth cut lines (invariant 1)
+            vec2 stT = 1.6 / vec2(textureSize(uStruct, 0));
+            vec4 st = texture(uStruct, vUv) * 0.25
+              + (texture(uStruct, vUv + vec2(stT.x, 0.0))
+                + texture(uStruct, vUv - vec2(stT.x, 0.0))
+                + texture(uStruct, vUv + vec2(0.0, stT.y))
+                + texture(uStruct, vUv - vec2(0.0, stT.y))) * 0.125
+              + (texture(uStruct, vUv + stT)
+                + texture(uStruct, vUv - stT)
+                + texture(uStruct, vUv + vec2(stT.x, -stT.y))
+                + texture(uStruct, vUv + vec2(-stT.x, stT.y))) * 0.0625;
             vec3 camC = st.rgb;
             float smoothL = lumaf(camC);
             float fineL = st.a;
@@ -1390,11 +1437,15 @@
             float shPxAmp = mix(1.4, 8.0, relW) * max(uResolution.y, 1.0) / 900.0;
             vec2 shBand = vec2(0.62, -0.79) * shPxAmp / uResolution;
             vec2 sOff = vUv - shBand;
-            vec4 stS = texture(uStruct, sOff) * 0.4
-              + texture(uStruct, sOff + vec2(stT.x, 0.0)) * 0.15
-              + texture(uStruct, sOff - vec2(stT.x, 0.0)) * 0.15
-              + texture(uStruct, sOff + vec2(0.0, stT.y)) * 0.15
-              + texture(uStruct, sOff - vec2(0.0, stT.y)) * 0.15;
+            vec4 stS = texture(uStruct, sOff) * 0.25
+              + (texture(uStruct, sOff + vec2(stT.x, 0.0))
+                + texture(uStruct, sOff - vec2(stT.x, 0.0))
+                + texture(uStruct, sOff + vec2(0.0, stT.y))
+                + texture(uStruct, sOff - vec2(0.0, stT.y))) * 0.125
+              + (texture(uStruct, sOff + stT)
+                + texture(uStruct, sOff - stT)
+                + texture(uStruct, sOff + vec2(stT.x, -stT.y))
+                + texture(uStruct, sOff + vec2(-stT.x, stT.y))) * 0.0625;
             vec4 cwS2 = texture(uSoft, vUv - shBand * 1.8);
 
             // luminance fields (face mixes in a LITTLE of the fine channel —
@@ -1404,15 +1455,37 @@
             float Lskin = mix(smoothL, fineL, faceK);
             float LskinS = mix(lumaf(stS.rgb), stS.a, faceK);
 
-            // skin: coarse body quantiles ⟷ fine face quantiles
+            // skin: coarse body quantiles ⟷ fine face quantiles.
+            // Band boundaries get a 1-px fwidth crossfade to the next band —
+            // a clean cut line instead of 1-px dither wiggle (repair #3a).
             int lvB; float TdnB; float TupB;
             levelSkin(smoothL, lvB, TdnB, TupB);
             vec3 colB = bandColor(camC, (float(lvB) + 0.5) / float(uSkinN), TdnB, TupB, 0);
+            float fwB = max(fwidth(smoothL), 1e-4) * 1.5;   // ≥1.5 px の切り線AA
+            if (TupB < 1.5) {
+              vec3 colB2 = bandColor(camC, (float(lvB) + 1.5) / float(uSkinN),
+                TupB, min(TupB + (TupB - max(TdnB, 0.0)), 1.0), 0);
+              colB = mix(colB, colB2,
+                smoothstep(TupB - fwB, TupB + fwB, smoothL));
+            }
             float rimB; float shdB;
             bandRelief(smoothL, lumaf(stS.rgb), TdnB, TupB, rimW, rimB, shdB);
             int lvF; float TdnF; float TupF;
             levelFace(Lskin, lvF, TdnF, TupF);
+            float fwF = max(fwidth(Lskin), 1e-4) * 1.5;     // ≥1.5 px の切り線AA
+            // minimum paper width (repair #3b): a band thinner than ~2.5 px
+            // cannot be cut from paper — fold the sliver into the band below
+            if (TdnF > -0.5 && TupF < 1.5 && (TupF - TdnF) < fwF * 2.5) {
+              lvF = max(lvF - 1, 0);
+              TdnF = lvF > 0 ? uFaceTh[lvF - 1] : -1.0;
+            }
             vec3 colF = bandColor(camC, (float(lvF) + 0.5) / float(uFaceN), TdnF, TupF, 0);
+            if (TupF < 1.5) {
+              vec3 colF2 = bandColor(camC, (float(lvF) + 1.5) / float(uFaceN),
+                TupF, min(TupF + (TupF - max(TdnF, 0.0)), 1.0), 0);
+              colF = mix(colF, colF2,
+                smoothstep(TupF - fwF, TupF + fwF, Lskin));
+            }
             float rimF; float shdF;
             bandRelief(Lskin, LskinS, TdnF, TupF, rimW, rimF, shdF);
             vec3 skinCol = mix(colB, colF, faceW);
@@ -1440,10 +1513,16 @@
             skinCol = mix(skinCol, featureColorP(uPreset) * 2.0 + vec3(0.10),
               featRim * 0.30 * flat0);
 
-            // clothes bands
+            // clothes bands (same fwidth crossfade at the cut)
             int lvC; float TdnC; float TupC;
             levelCloth(smoothL, lvC, TdnC, TupC);
             vec3 clothCol = bandColor(camC, (float(lvC) + 0.5) / float(uClothN), TdnC, TupC, 1);
+            if (TupC < 1.5) {
+              vec3 clothCol2 = bandColor(camC, (float(lvC) + 1.5) / float(uClothN),
+                TupC, min(TupC + (TupC - max(TdnC, 0.0)), 1.0), 1);
+              clothCol = mix(clothCol, clothCol2,
+                smoothstep(TupC - fwB, TupC + fwB, smoothL));
+            }
             float rimC; float shdC;
             bandRelief(smoothL, lumaf(stS.rgb), TdnC, TupC, rimW, rimC, shdC);
             clothCol = mix(clothCol, clothCol * 1.24 + vec3(0.06),
