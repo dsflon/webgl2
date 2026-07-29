@@ -372,7 +372,7 @@
     "hideCss": "#hud,#hint{display:none!important}"
   },
   "opus5_koe": {
-    "query": "fakesource=1&prewarm=14",
+    "query": "fakesource=1&prewarm=13",
     "warmMs": 5000,
     "click": [],
     "hide": [
@@ -380,7 +380,7 @@
     ],
     "readyFlag": true,
     "audio": false,
-    "note": "合成の歌は24秒の天候弧(無音5s→静かな持続10s→ふくらみ4s→無音)。prewarm=14 は歌の中盤 = 身体が灯り始めて雨がまだ残る、両方が一枚に入る瞬間。",
+    "note": "合成の歌は24秒の天候弧(無音5s→静かな持続10s→ふくらみ4s→無音)。prewarm=13 は光が満ちて後光が立ち、雨がまだ残る瞬間 — 雨と光の両方が一枚に入る。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
