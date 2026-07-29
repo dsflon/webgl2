@@ -27,10 +27,13 @@
        粒が当たった瞬間だけ淡く光り、濡れは重力で流れ落ちて胴へ広がる。
     4. 濡れは実写の上に — 雨に打たれた服と髪は暗く沈み、色が抜ける(肩から)。
        水滴の反射で光らせない。
-    5. 声の光は胸から昇る — 光は空から降らず、歌っている体の奥で湧き、
-       上へ昇って肩と頭に満ちる。**実写の明るさが光を運ぶ**(顔や皺の明るい所が
-       灯り、影は影のまま)ので、体の実際の形に沿って灯る。ブルームで外へ
-       僅かに漏れる=光の庭。一様には光らせない(§A1)。
+    5. 声の光は胸から昇り、後光になる — 光は空から降らず、歌っている体の奥で
+       湧き、上へ昇って肩と頭に満ちる。**実写の明るさが光を運ぶ**(顔や皺の
+       明るい所が灯り、影は影のまま)ので、体の実際の形に沿って灯る。
+       輪郭は縁が燃えるように光り、身体の**重心から光芒が放射する**
+       (光の場を中心へ向かってマーチして外へ塗る。中心はマスクの重心から
+       求め、cover-fit と鏡像を逆変換して画面座標に直す)。=光の庭。
+       一様には光らせない(§A1)。
     6. 確かな誇り — 濡れには下限があり、乾ききらない。届いたものは残る。
        ただし上限で飽和するので、いつまでも溜まり続けはしない。
 
@@ -76,6 +79,7 @@
     雨          歌っていないときに降る雨の量
     晴れ        光が満ちたときに、どれだけ晴れるか
     声の光      声が体に灯す光の強さ
+    後光        体から放たれる光芒の強さ
     真綿        風に漂う綿毛の量
     乾きにくさ  濡れた跡がどれだけ長く残るか
     風          風の強さ(雨の傾きと綿毛の流れ)
@@ -330,8 +334,9 @@
 
         const DEFAULTS = {
           rain: 0.60,
-          clear: 0.75,
-          glowAmt: 0.60,
+          clear: 0.92,
+          glowAmt: 0.62,
+          rays: 0.62,
           floss: 0.55,
           soak: 0.50,
           wind: 0.45,
@@ -352,6 +357,7 @@
           ["rain", "雨", "歌っていないときに降る雨の量", 0, 1, 0.01],
           ["clear", "晴れ", "光が満ちたときに、どれだけ晴れるか", 0, 1, 0.01],
           ["glowAmt", "声の光", "声が体に灯す光の強さ", 0, 1, 0.01],
+          ["rays", "後光", "体から放たれる光芒の強さ", 0, 1, 0.01],
           ["floss", "真綿", "風に漂う綿毛の量", 0, 1, 0.01],
           ["soak", "乾きにくさ", "濡れた跡がどれだけ長く残るか", 0, 1, 0.01],
           ["wind", "風", "風の強さ(雨の傾きと綿毛の流れ)", 0, 1, 0.01],
@@ -367,8 +373,8 @@
           <p>
             歌っていないあいだは、雨が降っています。夜の雨が肩を濡らし、
             濡れた跡は乾ききりません。歌うと、声は体の奥で光になります —
-            <strong>歌い続けるほど光は満ちてゆき、やがて雨が上がって晴れて
-            いきます</strong>。黙れば、また静かな雨が戻ります。真綿のような
+            <strong>歌い続けるほど光は満ちてゆき、輪郭が燃えて後光が
+            差し、やがて雨が上がって晴れていきます</strong>。黙れば、また静かな雨が戻ります。真綿のような
             白い綿毛が風に流れ、雲が暗がりをゆっくり過ぎていきます。
             天気と同じで、ひと声では変わりません。
             映像も音声も、すべて端末内で処理されます。
@@ -1002,7 +1008,7 @@
             glow += uDt * 1.6 * max(below - glow, 0.0) * bodyBelow *
               smoothstep(0.04, 0.30, soft);
             glow -= uDt * glow * 0.30;
-            glow = clamp(glow, 0.0, 1.0);
+            glow = clamp(glow, 0.0, 1.5);
 
             vec2 run = vec2(0.0, -1.0) * wet;
             fragColor = vec4(wet, clamp(floor0, 0.0, 1.0), glow, 1.0);
@@ -1337,7 +1343,7 @@
             vec3 lampCol = vec3(1.00, 0.93, 0.80);
             float g = glow * smoothstep(0.10, 0.70, soft) * carry;
             // rgb above alpha: this is what feeds the bloom
-            fragColor = vec4(lampCol * g * 0.85, clamp(g * 0.24, 0.0, 1.0));
+            fragColor = vec4(lampCol * g * 1.20, clamp(g * 0.26, 0.0, 1.0));
           }
         `;
 
@@ -1352,7 +1358,7 @@
             // only the genuinely emissive parts (stamens, the hottest petal
             // flanks — the ones written above 1.0) are allowed to glow. A low
             // threshold makes every petal halo and the field reads as sparkles.
-            fragColor = vec4(c * smoothstep(0.72, 1.45, l), 1.0);
+            fragColor = vec4(c * smoothstep(0.55, 1.30, l), 1.0);
           }
         `;
 
@@ -1378,7 +1384,10 @@
           uniform float uTime;
           uniform float uExposure;
           uniform float uFilmGrain;
+          uniform sampler2D uWide;
+          uniform vec2 uCenter;
           uniform float uGlowAmt;
+          uniform float uRays;
           uniform float uShine;
           uniform float uPresent;
           uniform vec4 uAudA;   // rms, centroid, steadiness, onset
@@ -1436,18 +1445,66 @@
             float glow = wt.b * uGlowAmt;
             vec3 lampCol = vec3(1.00, 0.94, 0.82);
             float lamp = glow * (0.40 + 0.90 * pow(clamp(rl, 0.0, 1.0), 0.75));
-            col += lampCol * lamp * 0.34 * bodyIn;
+            col += lampCol * lamp * 0.26 * bodyIn;
 
             // ---- the floss layer (premultiplied over)
             col = col * (1.0 - clamp(L.a, 0.0, 1.0)) + L.rgb;
 
             // ---- bloom: the lit body and the rain flares reach it, so the
             // halo around the figure IS the voice — 光の庭
-            vec3 b = texture(uB1, vUv).rgb * 0.42 + texture(uB2, vUv).rgb * 0.62;
-            col += b * 0.85;
-            // the room itself catches a breath of the body's light
+            vec3 b = texture(uB1, vUv).rgb * 0.50 + texture(uB2, vUv).rgb * 0.85;
+            col += b * 0.95;
+
             float shine = clamp(uShine, 0.0, 1.0);
-            col += vec3(0.055, 0.050, 0.040) * shine * (1.0 - smoothstep(0.18, 0.80, soft));
+
+            // ---- 後光. Light shafts streaming out of the body.
+            // No centroid is needed: the gradient of the WIDE mask halo points
+            // at the body from every direction around it, so marching toward it
+            // and smearing the bloom back outward gives rays that leave the
+            // real silhouette — from the shoulders, the head, the arms.
+            float outside = 1.0 - smoothstep(0.10, 0.55, soft);
+            // confined to the halo around the body. Unbounded, the shafts
+            // reached the corners and washed the whole night out.
+            float near = smoothstep(0.010, 0.22, texture(uWide, vUv).r);
+            float rayAmt = uRays * smoothstep(0.04, 0.55, shine) * outside * near *
+              smoothstep(0.15, 0.55, uPresent);
+            if (rayAmt > 0.002) {
+              // Radiating from the body's CENTROID. Striping by the local mask
+              // gradient instead made the shafts follow the contour and read as
+              // watery ripples — a halo has to be indexed by one global angle
+              // or it is not a halo.
+              vec2 d = (vUv - uCenter) * ar;
+              vec2 toBody = -normalize(d + vec2(1e-6));
+              float ang = atan(d.y, d.x);
+              // sharpened: a soft fbm reads as a blur, a peaked one as shafts
+              float sn = fbm(vec2(ang * 6.0, uTime * 0.04));
+              float stri = 0.14 + 2.20 * pow(clamp(sn, 0.0, 1.0), 2.2);
+              // Marched over the LIGHT FIELD itself, not over the bloom
+              // texture: sourcing the shafts from the bloom made them vanish
+              // whenever the bloom or 声の光 was tuned down, so they were never
+              // their own thing. This reads the glow the body actually holds.
+              float shaftE = 0.0;
+              float wsum = 0.0;
+              for (int i = 1; i <= 16; i++) {
+                float t = float(i) / 16.0;
+                vec2 sp = clamp(vUv + toBody * t * 0.24, 0.0, 1.0);
+                float w = 1.0 - t * 0.85;
+                shaftE += texture(uWet, sp).b *
+                  smoothstep(0.25, 0.75, texture(uSoft, sp).r) * w;
+                wsum += w;
+              }
+              shaftE /= max(wsum, 1e-4);
+              col += vec3(1.05, 0.96, 0.80) * shaftE * rayAmt * stri * 2.2;
+            }
+
+            // ---- the rim of the body blazes: the edge is where a lit body
+            // most obviously stops being lit FROM outside and starts being lit
+            // from within
+            float rimBand = smoothstep(0.20, 0.55, soft) * (1.0 - smoothstep(0.55, 0.92, soft));
+            col += vec3(1.00, 0.92, 0.76) * rimBand * wt.b * uGlowAmt * 0.95;
+
+            // the room itself lifts as the weather clears
+            col += vec3(0.075, 0.068, 0.055) * shine * (1.0 - smoothstep(0.18, 0.80, soft));
 
             // ---- 確かな誇り。「今 私の胸のうちに息衝くのは 確かな誇り」
             // The floor of the wetness — the part that will not dry — carries a
@@ -1588,9 +1645,9 @@
           ]),
           bright: getLocations(programs.bright, ["uSrc"]),
           composite: getLocations(programs.composite, [
-            "uScene", "uMask", "uSoft", "uWet", "uLayer", "uB1", "uB2",
+            "uScene", "uMask", "uSoft", "uWide", "uWet", "uLayer", "uB1", "uB2",
             "uResolution", "uAspect", "uTime", "uExposure",
-            "uGlowAmt", "uShine",
+            "uCenter", "uGlowAmt", "uRays", "uShine",
             "uFilmGrain", "uPresent", "uAudA", "uAudB", "uDebug",
           ]),
         };
@@ -1698,6 +1755,8 @@
             maskB: createTarget(fieldW, fieldH, true),
             softT: createTarget(fieldW, fieldH, true),
             softTmp: createTarget(fieldW, fieldH, true),
+            wideT: createTarget(fieldW, fieldH, true),
+            wideTmp: createTarget(fieldW, fieldH, true),
             wetA: createTarget(fieldW, fieldH, true),
             wetB: createTarget(fieldW, fieldH, true),
             layer: createTarget(paintW, paintH, true),
@@ -1719,6 +1778,8 @@
           clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
           clearTarget(targets.softT, 0, 0, 0.5, 0.5);
           clearTarget(targets.softTmp, 0, 0, 0.5, 0.5);
+          clearTarget(targets.wideT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.wideTmp, 0, 0, 0.5, 0.5);
           clearTarget(targets.wetA, 0, 0, 0, 1);
           clearTarget(targets.wetB, 0, 0, 0, 1);
           clearTarget(targets.layer, 0, 0, 0, 0);
@@ -1817,6 +1878,7 @@
         ------------------------------------------------------------------ */
 
         const det = {
+          mx: 0.5, my: 0.5, tmx: 0.5, tmy: 0.5,   // 身体の重心(後光の中心)
           cx: 0.5, cy: 0, present: 0,
           tcx: 0.5, tcy: 0, tpresent: 0,
           swing: 0,
@@ -1925,10 +1987,24 @@
           const f = mask.getAsFloat32Array();
           if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
           let sum = 0;
-          for (let i = 0; i < w * h; i++) {
-            const v = Math.max(0, Math.min(255, (f[i] * 255) | 0));
-            segU8[i] = v;
-            sum += v;
+          // The centroid of the body, in the same pass that uploads the mask.
+          // The light shafts need a real centre to radiate from; det.cx/cy only
+          // ever tracked the synthetic figure, so on a real camera the rays had
+          // nothing to point at.
+          let mx = 0, my = 0;
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const v = Math.max(0, Math.min(255, (f[y * w + x] * 255) | 0));
+              segU8[y * w + x] = v;
+              sum += v;
+              mx += v * x;
+              my += v * y;
+            }
+          }
+          if (sum > 255 * 32) {
+            // image space is top-left origin; the art clock is y-up
+            det.tmx = (mx / sum) / w;
+            det.tmy = 1 - (my / sum) / h;
           }
           gl.bindTexture(gl.TEXTURE_2D, segTexture);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -2029,15 +2105,17 @@
         function updateShine(dt) {
           const voiced = smoothstep01(0.03, 0.16, meters.rms);
           const charge = voiced * meters.sus * (0.40 + 0.60 * meters.steady);
-          meters.shine += dt * (charge / 12.0);
-          meters.shine -= dt * (meters.shine / 35.0);
+          // 6s to fill at full voice, 30s to fade. At 12s the arc was so slow
+          // that a real singer never saw the sky clear at all.
+          meters.shine += dt * (charge / 6.0);
+          meters.shine -= dt * (meters.shine / 30.0);
           meters.shine = Math.max(0, Math.min(1, meters.shine));
         }
         // 実効の雨量: 光が増すほど雨は上がっていく(晴れる)。
         // clear スライダーは光と天候の結合の強さ。
         function rainNow() {
           return state.rain *
-            (1 - state.clear * smoothstep01(0.08, 0.75, meters.shine));
+            (1 - state.clear * smoothstep01(0.05, 0.55, meters.shine));
         }
         function smoothstep01(a, b, x) {
           const t = Math.max(0, Math.min(1, (x - a) / Math.max(b - a, 1e-5)));
@@ -2364,6 +2442,9 @@
           }
           if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
           const k = FREEZE ? 0 : 1 - Math.exp(-dt * 6);
+          if (FAKE) { det.tmx = 0.5 + det.tcx - 0.5; det.tmy = 0.52 + det.tcy; }
+          det.mx += (det.tmx - det.mx) * k;
+          det.my += (det.tmy - det.my) * k;
           det.cx += (det.tcx - det.cx) * k;
           det.cy += (det.tcy - det.cy) * k;
           det.present += (det.tpresent - det.present) * k;
@@ -2453,6 +2534,11 @@
           // from this: the raw confidence mask has block edges and its gradient
           // is noise, so "which way does this surface face" is meaningless on it.
           blurPass(maskOut, targets.softTmp, targets.softT, 3.2, 1);
+          // A WIDE halo of the mask. Its gradient points toward the body from
+          // anywhere around it, which is what lets the light shafts radiate out
+          // of the actual silhouette — shoulders, head, arms — with no need for
+          // a centroid (det.cx/cy only tracks the synthetic figure).
+          blurPass(targets.softT, targets.wideTmp, targets.wideT, 3.2, 9);
 
           // P3 — the wetness field
           renderPass(wetOut, programs.wet, () => {
@@ -2598,6 +2684,7 @@
             bindTexture(4, targets.layer.tex);
             bindTexture(5, targets.b1.tex);
             bindTexture(6, targets.b2.tex);
+            bindTexture(7, targets.wideT.tex);
             gl.uniform1i(u.uScene, 0);
             gl.uniform1i(u.uMask, 1);
             gl.uniform1i(u.uSoft, 2);
@@ -2605,11 +2692,23 @@
             gl.uniform1i(u.uLayer, 4);
             gl.uniform1i(u.uB1, 5);
             gl.uniform1i(u.uB2, 6);
+            gl.uniform1i(u.uWide, 7);
             gl.uniform2f(u.uResolution, canvas.width, canvas.height);
             gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uExposure, state.exposure);
             gl.uniform1f(u.uGlowAmt, state.glowAmt);
+            // det.mx/my are in the mask's sampling space. The canvas applies
+            // cover-fit (segScale) and the mirror on top of that, so the raw
+            // centroid would sit off the body on any non-matching aspect or
+            // with the mirror on. Invert both here.
+            let ccx = (det.mx - 0.5) / Math.max(det.segScale[0], 1e-4) + 0.5;
+            const ccy = (det.my - 0.5) / Math.max(det.segScale[1], 1e-4) + 0.5;
+            if (state.mirror && !FAKE) ccx = 1 - ccx;
+            gl.uniform2f(u.uCenter,
+              Math.max(-0.5, Math.min(1.5, ccx)),
+              Math.max(-0.5, Math.min(1.5, ccy)));
+            gl.uniform1f(u.uRays, state.rays);
             gl.uniform1f(u.uShine, meters.shine);
             gl.uniform1f(u.uFilmGrain, state.filmGrain);
             gl.uniform1f(u.uPresent, det.present);
