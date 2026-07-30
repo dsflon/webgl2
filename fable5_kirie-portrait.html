@@ -5,8 +5,8 @@
   としてリアルタイムに再構成する。肌は陰影で切り分けたフラットな紙の積層(各層に切り口の
   ハイライトと下層への短い落ち影)、髪は既定で「束(レイヤー)」— 毛流(etf)に沿って
   異方平滑した輝度を肌と同じ積層機構で 4 段の大きな毛束に切り、束間に肌より深い落ち影を
-  彫る(「髪質」=束の輪郭の波打ち。「髪スタイル」で従来の紙リボン(クイリング)や自動も
-  選択)、服は重なる紙の帯。人物は無地の台紙に貼られた切り紙として、台紙に一つの
+  彫る(「髪質」=束の輪郭の波打ち。「髪スタイル」=自動なら毛流から波打ちを推定)、
+  服は重なる紙の帯。人物は無地の台紙に貼られた切り紙として、台紙に一つの
   柔らかい影を落とす。
   検知: MediaPipe ImageSegmenter 多クラス(背景/髪/体肌/顔肌/服)。
   規約定型の派生元: fable5_mosaic.html / fable5_gas-head.html(カメラ・UI・エラー3経路・
@@ -24,16 +24,15 @@
        オフセットを深くして彫刻的な深さを出す(参照の「彫った紙のレリーフ」)。画面幅
        基準の最小帯幅フロアで細い束を下の束へ統合(糸・毛糸・鋸歯の禁止。輪郭は滑らかな
        ハサミ曲線のみ)。「髪質」(hairCurl)は束の輪郭の波打ち(0=まっすぐな束 /
-       1=大きくうねる束。低周波ノイズで量子化場を揺らす)。「髪スタイル」=リボンでは
-       従来の紙リボン(quilling)集合を stroke splatting で描き、hairCurl はリボンの
-       曲率モーフ(帯↔S字↔渦)に戻る。シードは cell-hash の安定空間(時間を混ぜない)。
+       1=大きくうねる束。低周波ノイズで量子化場を揺らす)。シードは cell-hash の
+       安定空間(時間を混ぜない)。
        「自動」は髪領域の etf 方向一貫性(重み付き合成ベクトル長)から束の波打ちを推定
        して束レイヤーを描く(CPU 統計と同じ低頻度 readback + ema。手動選択が常に優先)。
     3. 台紙(知覚/場) — 背景クラスは完全フラットな台紙色+紙グレイン。人物輪郭は強ぼかし+
        再しきい値で平滑化・単純化した「ハサミで切った」曲線(seg 生エッジは使わない)。
        人物全体が台紙へ一つの柔らかいオフセット影を落とす。edge darkening は控えめ。
     5. 時間安定(時間) — クラスマスク・平滑輝度は ping-pong ema、quantile しきい値は
-       CPU 側 hysteresis(不感帯)+ema。リボンのシードは cell-hash のみ。静止入力で静止。
+       CPU 側 hysteresis(不感帯)+ema。乱数は cell-hash のみ。静止入力で静止。
     6. 顔の判読性(知覚) — 顔肌領域は局所的に細かい量子化(専用 quantile 段)+細平滑輝度。
        暗部下限(顔内の暗い小面=目・眉を最暗紙片として保持)+oklab 赤み(a)で唇を紙片化。
     4. 限定パレット(色) — 量子化面の色を oklab でクラス別パレットへスナップ
@@ -52,10 +51,8 @@
     [P5 stats ] 4象限(顔/体肌/服/髪)の(輝度,重み,oklab a)        statsT RGBA8 128×128
                 → CPU readback ~200ms 毎 → 加重ヒストグラム → quantile →
                 hysteresis+ema → uniform 配列(しきい値)
-    [P6 curls ] インスタンス渦巻きリボン(cell-hash 格子。髪スタイル=リボン時のみ)
-                → premultiplied RGBA                             ribbonT RGBA8 paint 解像度
     [P7 comp  ] 台紙+人物落ち影+切り紙シルエット+トーン積層(切り口/落ち影)+
-                顔精密(暗部下限・唇)+髪ベース紙+リボン合成+紙グレイン → canvas(DPR≤2)
+                顔精密(暗部下限・唇)+髪の毛束レイヤー+紙グレイン → canvas(DPR≤2)
 
   実行方法:
     python3 -m http.server 8888 → http://localhost:8888/fable5_kirie-portrait.html を開き
@@ -72,15 +69,14 @@
   スライダーの説明(写真らしさ ↔ 紙の様式。計9本):
     紙の段数   肌・服のトーン量子化の段数(4↔8)
     紙の厚み   切り口ハイライトと落ち影の強さ・オフセット
-    髪の密度   リボンの本数(セル格子の細かさ。髪スタイル=リボン時)
-    髪質       束の輪郭の波打ち(0=まっすぐ/1=大きくうねる。リボン時は曲率モーフ)
-    リボンの幅 髪リボンの帯幅と長さ(髪スタイル=リボン時)
+    髪質       毛束の輪郭の波打ち(0=まっすぐ/1=大きくうねる)
     紙の色統一 oklab パレットスナップの強さ(0=実写色寄り)
     落ち着き   しきい値/マスク ema の時定数(静止の安定 ↔ 追従)
     顔の精密さ 顔肌の局所段数と目・眉・唇の保護
     紙の質感   繊維グレインと紙の色ムラ
-  「髪スタイル」select: 束(新既定。毛束レイヤー) / リボン(従来のクイリング) /
+  「髪スタイル」select: 束(既定。毛束レイヤー) /
     自動(etf 方向一貫性から束の波打ちを推定。束レイヤー描画)
+    ※ 旧「リボン」(細い紙リボンのクイリング)は、紙でなく毛糸/虫のように見えるため廃止
 
   依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
   モデル: selfie_multiclass_256x256.tflite(URL 実在を HTTP 200 で確認済)。
@@ -320,9 +316,7 @@
         const DEFAULTS = {
           layers: 0.5,
           relief: 0.55,
-          curls: 0.6,
           hairCurl: 0.6,
-          ribbon: 0.5,
           palette: 0.65,
           calm: 0.55,
           detail: 0.6,
@@ -333,7 +327,7 @@
           ...DEFAULTS,
           debugView: 0,
           preset: 0,
-          hairStyle: 0,   // 0 束(レイヤー) / 1 リボン / 2 自動(束)
+          hairStyle: 0,   // 0 束(レイヤー) / 1 自動(束の波打ちを推定)
           mirror: true,
           facingMode: "user",
           pauseAnim: reducedMotion || FREEZE,
@@ -342,9 +336,7 @@
         const uiRows = [
           ["layers", "紙の段数", "肌・服のトーン量子化の段数(4↔8)", 0, 1, 0.01],
           ["relief", "紙の厚み", "切り口ハイライトと落ち影の強さ・オフセット", 0, 1, 0.01],
-          ["curls", "髪の密度", "リボンの本数(髪スタイル=リボン時)", 0, 1, 0.01],
-          ["hairCurl", "髪質", "束の輪郭の波打ち(0=まっすぐ/1=うねる。リボン時は曲率)", 0, 1, 0.01],
-          ["ribbon", "リボンの幅", "髪リボンの帯幅と長さ(髪スタイル=リボン時)", 0, 1, 0.01],
+          ["hairCurl", "髪質", "毛束の輪郭の波打ち(0=まっすぐ/1=大きくうねる)", 0, 1, 0.01],
           ["palette", "紙の色統一", "oklab パレットスナップの強さ(0=実写色寄り)", 0, 1, 0.01],
           ["calm", "落ち着き", "しきい値/マスク ema の時定数(安定↔追従)", 0, 1, 0.01],
           ["detail", "顔の精密さ", "顔肌の局所段数と目・眉・唇の保護", 0, 1, 0.01],
@@ -355,12 +347,12 @@
         // (order §6). They do not touch the nine sliders.
         const PRESETS = ["ティール台紙", "生成り台紙", "夜の台紙"];
 
-        // Hair style: locks (default — the hair is carved into a few big
-        // paper locks by the same tone-stack machinery as the skin; hairCurl
-        // waves the lock contours), ribbons (the original quilling strands;
-        // hairCurl morphs band↔S↔curl), or auto (the etf-alignment estimate
-        // drives the lock waviness; locks rendering).
-        const HAIR_STYLES = ["束(レイヤー)", "リボン", "自動"];
+        // Hair style: locks (the hair is carved into a few big paper locks by
+        // the same tone-stack machinery as the skin; hairCurl waves the lock
+        // contours), or auto (the etf-alignment estimate drives the lock
+        // waviness). The old quilling-ribbon mode was removed — thin strands
+        // read as yarn/insects on the paper, not as carved paper (user call).
+        const HAIR_STYLES = ["束(レイヤー)", "自動"];
 
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
@@ -369,8 +361,7 @@
           <p>
             カメラの人物が、無地の台紙に貼られた多層ペーパーカットになります。
             肌は紙の積層(切り口と落ち影)、髪は大きな毛束のレイヤー(「髪質」で
-            束の波打ち、「髪スタイル」で紙リボンのクイリングも)、背景は
-            フラットな台紙に置き換わります。
+            束の輪郭の波打ちを調整)、背景はフラットな台紙に置き換わります。
           </p>
           <div class="select-row">
             <span>プリセット</span>
@@ -425,7 +416,7 @@
           </div>
           <div class="status">
             <div id="readout">FPS -- / 解像度 -- / 検知 --</div>
-            <span class="badge">WebGL2 · kuwahara+quantile · quilling · oklab · MediaPipe multiclass</span>
+            <span class="badge">WebGL2 · kuwahara+quantile · oklab · MediaPipe multiclass</span>
           </div>
           </div>
         `;
@@ -700,68 +691,6 @@
           }
         `;
 
-        // Shared: the quilling curl — an inward-tightening spiral band SDF +
-        // its paper shading (cylinder gradient across the strip, catch-light
-        // on the lit paper edge). Used by the instanced ribbon pass and by
-        // the uDebug==4 specimen.
-        const CHUNK_SPIRAL = `
-          // Signed distance to a spiral band. across = normalized [-1,1]
-          // position across the strip; along = arc progress (0 = outer end).
-          float spiralBand(vec2 q, float r0, float w, float sweep, float a0,
-                           float tight, out float across, out float along) {
-            float rho = length(q);
-            float th = atan(q.y, q.x) - a0;
-            th -= 6.2831853 * floor(th / 6.2831853);   // [0, 2pi)
-            float best = 1e9;
-            across = 0.0;
-            along = 0.0;
-            for (int k = -1; k <= 1; k++) {
-              float phi = th + 6.2831853 * float(k);
-              float cp = clamp(phi, 0.0, sweep);
-              float rad = r0 * (1.0 - tight * cp / max(sweep, 1e-3));
-              float d;
-              if (phi >= 0.0 && phi <= sweep) {
-                d = abs(rho - rad) - w * 0.5;
-              } else {
-                vec2 ep = rad * vec2(cos(a0 + cp), sin(a0 + cp));
-                d = length(q - ep) - w * 0.5;
-              }
-              if (d < best) {
-                best = d;
-                across = clamp((rho - rad) / max(w * 0.5, 1e-5), -1.0, 1.0);
-                along = cp / max(sweep, 1e-3);
-              }
-            }
-            return best;
-          }
-          // Paper-strip shading (ref_2, repair): the strip face is FLAT
-          // matte paper — a gentle linear tilt across the band (which side
-          // of the strip leans into the light) and a soft key-light factor —
-          // plus ONE thin pale line on the outer edge: the cut paper
-          // thickness. No cylinder profile, no gloss ramp — the round
-          // "rubber tube / phone cord" reading dies with the sqrt profile.
-          vec3 shadeCurl(vec3 tone, vec3 hiCol, float across, float along,
-                         vec2 radial) {
-            vec2 ldir = normalize(vec2(-0.55, 0.80));
-            float ld = clamp(dot(radial, ldir), -1.0, 1.0);
-            // flat matte face of the strip (subtle, paper-like)
-            float gain = 0.80 + 0.16 * across * ld + 0.24 * max(ld, 0.0);
-            vec3 c = tone * gain;
-            // faint matte lift on the lit side (paper sheen, not gloss)
-            c = mix(c, hiCol, 0.07 * max(ld, 0.0));
-            // thin cut-edge line = the paper's thickness, outer rim only
-            float edge = smoothstep(0.86, 0.965, across);
-            c = mix(c, hiCol, edge * (0.30 + 0.55 * max(ld, 0.0)));
-            c *= 1.0 - 0.12 * along;
-            return c;
-          }
-        `;
-
-        // Shared: the ?fakesource=1 synthetic portrait bust and its analytic
-        // multiclass coverage (R=hair, G=face skin, B=body skin, A=clothes) —
-        // the same channel layout the MediaPipe upload uses, so both sources
-        // drive one shader path. uFakeScale scales the figure about a fixed
-        // pivot (CRAFT §C2).
         const CHUNK_FAKE = `
           float sdSeg2(vec2 p, vec2 a, vec2 b) {
             vec2 pa = p - a;
@@ -1173,310 +1102,6 @@
           }
         `;
 
-        // P6 — the quilling curls: one instanced quad per grid cell of a
-        // stable cell-hash lattice (stroke splatting). The vertex shader
-        // culls cells outside the hair class, orients the curl along the etf
-        // tangent (falling back to the hair-contour tangent where coherence
-        // dies), and picks a paper tone from the local quantized luminance.
-        // No time anywhere — a still person yields still curls.
-        const ribbonVS = `#version 300 es
-          precision highp float;
-          uniform sampler2D uSoft;
-          uniform sampler2D uEtf;
-          uniform sampler2D uStruct;
-          uniform sampler2D uShadM;
-          uniform float uAspect;
-          uniform float uCells;
-          uniform vec2 uSoftTexel;
-          uniform float uHairCurl;
-          uniform float uRibbon;
-          uniform float uPalette;
-          uniform vec3 uHairQ;
-          uniform int uPreset;
-          out vec2 vLocal;
-          out vec4 vPar;     // arcF/spiral: r0, w, sweep, a0
-          out vec4 vPar2;    // arcB: r0, sweep, a0 / w = regime (1 spiral, 0 band)
-          out vec4 vC;       // arcF centre offset (xy), arcB centre offset (zw)
-          out vec3 vMisc;    // tight, fade, seed
-          out vec3 vColor;
-          out vec3 vHiCol;
-          ${CHUNK_NOISE}
-          ${CHUNK_OKLAB}
-          ${CHUNK_PAL}
-          void main() {
-            vec2 cornerOf = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1)) * 2.0 - 1.0;
-            int cellsX = int(uCells + 0.5);
-            int ix = gl_InstanceID % cellsX;
-            int iy = gl_InstanceID / cellsX;
-            float s = uAspect / uCells;
-            vec2 cell = vec2(float(ix), float(iy));
-            vec2 jit = hash22(cell * 7.13 + 3.7) - 0.5;
-            vec2 cp = (cell + 0.5 + jit * 0.9) * s;
-            vec2 uvC = vec2(cp.x / uAspect, cp.y);
-            float cov = textureLod(uSoft, uvC, 0.0).r;
-            // OPAQUE-OR-ABSENT gate (repair #1): paper is opaque. No alpha
-            // ramp against coverage — a curl either exists at full opacity
-            // or is culled, so the hair rim never grows translucent ghosts.
-            // The class EMA keeps cov continuous in time, so the gate acts
-            // like a hysteresis threshold rather than a flicker source.
-            float gate = step(0.36, cov);
-            // isolated-loop rejection (repair): a curl whose cell sits far
-            // from the hair MASS reads as a stray rubber band on the card.
-            // The heavy class blur (shadT) is a cheap distance-to-mass field:
-            // deep hair ≈ 0.7+, attached fringe ≈ 0.3-0.5, detached ≈ <0.25.
-            float hairMass = textureLod(uShadM, uvC, 0.0).r;
-            vec3 h = hash32(cell + 17.0);
-            // 髪質 hairCurl: strand density thins as the strands straighten
-            // (long bands cover more area each).
-            float hcEff = clamp(uHairCurl, 0.0, 1.0);
-            float keepP = mix(0.30, 1.0, smoothstep(0.10, 0.85, hcEff));
-            if (gate < 0.5 || hairMass < 0.26 || uvC.y > 1.02 || uvC.y < -0.02 ||
-                hash12(cell + 3.3) > keepP) {
-              vLocal = vec2(0.0);
-              vPar = vec4(1.0, 0.1, 1.0, 0.0);
-              vPar2 = vec4(1.0, 0.0, 0.0, 1.0);
-              vC = vec4(0.0);
-              vMisc = vec3(0.3, 0.0, 0.0);
-              vColor = vec3(0.0);
-              vHiCol = vec3(0.0);
-              gl_Position = vec4(4.0, 4.0, 0.0, 1.0);
-              return;
-            }
-            // orientation: etf tangent, hair-contour tangent as fallback
-            vec4 e = textureLod(uEtf, uvC, 0.0);
-            vec2 dbl = e.rg * 2.0 - 1.0;
-            float coh = e.b;
-            float ang = 0.5 * atan(dbl.y, dbl.x + 1e-6);
-            float hx = textureLod(uSoft, uvC + vec2(uSoftTexel.x, 0.0), 0.0).r -
-              textureLod(uSoft, uvC - vec2(uSoftTexel.x, 0.0), 0.0).r;
-            float hy = textureLod(uSoft, uvC + vec2(0.0, uSoftTexel.y), 0.0).r -
-              textureLod(uSoft, uvC - vec2(0.0, uSoftTexel.y), 0.0).r;
-            vec2 hg = vec2(hx, hy);
-            if (coh < 0.22 && dot(hg, hg) > 1e-7) {
-              ang = atan(-hg.x, hg.y + 1e-6);
-            }
-            // orientation jitter: welcome noise on curls, but straight hair
-            // must flow — scale it down as the strands straighten
-            ang += (h.x - 0.5) * 1.5 * (1.0 - coh) * mix(0.15, 1.0, hcEff);
-            // --- strand shape morph (髪質 hairCurl) ---
-            // Two regimes: the original quilling spiral (cell = spiral
-            // centre) and a flowing band through the cell (two circular
-            // arcs joined at the cell with the etf tangent — straight strip
-            // at near-zero bend, an S at full wave; ref_1's flowing bands).
-            // The switch point is hashed per cell so a slider sweep flips
-            // strands one by one instead of popping globally.
-            float hcX = 0.58 + 0.24 * hash12(cell + 27.7);
-            // straight bands are fewer but WIDER (ref_1's broad folded bands)
-            float w = s * mix(0.30, 0.62, uRibbon) * (0.85 + 0.5 * h.z) *
-              mix(1.55, 1.0, smoothstep(0.0, 0.7, hcEff));
-            float regime = step(hcX, hcEff);
-            float r0;
-            float sweep;
-            float tight;
-            float a0;
-            vec4 par2 = vec4(1.0, 0.0, 0.0, 1.0);
-            vec4 cOff = vec4(0.0);
-            vec2 lp;
-            if (regime > 0.5) {
-              // quilling (repair #2b, matched to ref_2): radius quantized to
-              // 3 cell-hash steps; a mix of open C-crescents (majority in
-              // the ref), closed O loops and 1.5-turn spirals.
-              float rq = floor(h.y * 2.999);
-              r0 = s * (0.72 + 0.45 * rq) * mix(0.72, 1.50, uRibbon);
-              w = min(w, r0 * 0.75);
-              float kind = hash12(cell + 41.2);
-              float t = clamp((hcEff - hcX) / max(1.0 - hcX, 1e-3), 0.0, 1.0);
-              float curlAmt = mix(0.78, 1.15, t);
-              if (kind < 0.42) {          // open C / crescent
-                sweep = (2.6 + 1.7 * h.z) * curlAmt;
-                tight = 0.06 + 0.14 * h.x;
-              } else if (kind < 0.80) {   // closed O loop
-                sweep = (5.9 + 1.0 * h.z) * curlAmt;
-                tight = 0.20 + 0.16 * h.x;
-              } else {                    // inward spiral, ~1.5 turns
-                sweep = (8.4 + 1.3 * h.z) * min(curlAmt, 1.05);
-                tight = 0.42 + 0.16 * h.x;
-              }
-              a0 = ang + 6.2831853 * hash12(cell + 2.2);
-              lp = cornerOf * (r0 * 1.30 + w * 2.6);
-            } else {
-              // flowing band: arc F travels +ang from the cell, arc B
-              // travels -ang; same curvature side = S, opposite = gentle C.
-              float waveAmt = smoothstep(0.02, 0.62, hcEff);
-              // straight hair is COMBED: bands wrap along the hair MASS
-              // (ref_1's bands around the head). The heavy class blur
-              // (shadT) is a smooth global field, so its gradient tangent
-              // gives one coherent flow instead of the local etf's chatter.
-              // Orientations mix as double-angle vectors (repo rule §8-5).
-              float wComb = (1.0 - smoothstep(0.05, 0.75, hcEff)) * 0.93;
-              if (wComb > 0.0) {
-                vec2 shTex = uSoftTexel * 2.0;   // shadT ≈ softT half res
-                vec2 mg = vec2(
-                  textureLod(uShadM, uvC + vec2(shTex.x, 0.0), 0.0).r -
-                    textureLod(uShadM, uvC - vec2(shTex.x, 0.0), 0.0).r,
-                  textureLod(uShadM, uvC + vec2(0.0, shTex.y), 0.0).r -
-                    textureLod(uShadM, uvC - vec2(0.0, shTex.y), 0.0).r);
-                if (dot(mg, mg) > 1e-9) {
-                  float angC = atan(-mg.x, mg.y + 1e-6);
-                  vec2 dm = mix(vec2(cos(2.0 * ang), sin(2.0 * ang)),
-                    vec2(cos(2.0 * angC), sin(2.0 * angC)), wComb);
-                  if (dot(dm, dm) > 1e-6) ang = 0.5 * atan(dm.y, dm.x);
-                }
-              }
-              float lenF = s * mix(3.4, 1.35, waveAmt) *
-                mix(0.85, 1.45, uRibbon) * (0.8 + 0.5 * h.z);
-              float lenB = lenF * (0.75 + 0.5 * hash12(cell + 91.3));
-              // containment: paper strands stay on the hair mass — shrink a
-              // half whose (approximate) endpoint leaves the hair coverage,
-              // so long straight bands never spike across the face or card
-              vec2 tdir = vec2(cos(ang), sin(ang));
-              for (int i = 0; i < 3; i++) {
-                // test the tip AND the mid of each half — the hair is a
-                // ring, so a tip-only test lets chords bridge the face
-                vec2 eF = vec2((cp.x + tdir.x * lenF) / uAspect,
-                  cp.y + tdir.y * lenF);
-                vec2 mF = vec2((cp.x + tdir.x * lenF * 0.55) / uAspect,
-                  cp.y + tdir.y * lenF * 0.55);
-                if (min(textureLod(uSoft, eF, 0.0).r,
-                        textureLod(uSoft, mF, 0.0).r) < 0.25) lenF *= 0.65;
-                vec2 eB = vec2((cp.x - tdir.x * lenB) / uAspect,
-                  cp.y - tdir.y * lenB);
-                vec2 mB = vec2((cp.x - tdir.x * lenB * 0.55) / uAspect,
-                  cp.y - tdir.y * lenB * 0.55);
-                if (min(textureLod(uSoft, eB, 0.0).r,
-                        textureLod(uSoft, mB, 0.0).r) < 0.25) lenB *= 0.65;
-              }
-              lenF = max(lenF, s * 0.85);
-              lenB = max(lenB, s * 0.7);
-              float bendF = mix(0.16, 2.1, pow(waveAmt, 1.15)) * (0.75 + 0.5 * h.x);
-              float bendB = mix(0.16, 2.1, pow(waveAmt, 1.15)) *
-                (0.75 + 0.5 * hash12(cell + 63.1));
-              float rF = min(lenF / max(bendF, 1e-3), s * 60.0);
-              float rB = min(lenB / max(bendB, 1e-3), s * 60.0);
-              w = min(w, rF * 0.6);
-              float sgF = hash12(cell + 11.7) < 0.5 ? -1.0 : 1.0;
-              float sFrac = mix(0.30, 0.85, waveAmt);
-              float sgB = hash12(cell + 77.7) < sFrac ? sgF : -sgF;
-              vec2 nF = vec2(-sin(ang), cos(ang));
-              if (sgF > 0.0) { cOff.xy = rF * nF; a0 = ang - 1.5707963; }
-              else { cOff.xy = -rF * nF; a0 = ang + 1.5707963 - bendF; }
-              float a0B;
-              if (sgB > 0.0) { cOff.zw = -rB * nF; a0B = ang + 1.5707963; }
-              else { cOff.zw = rB * nF; a0B = ang - 1.5707963 - bendB; }
-              r0 = rF;
-              sweep = bendF;
-              tight = 0.0;
-              par2 = vec4(rB, bendB, a0B, 0.0);
-              // oriented quad: tight box along the band (long straight
-              // strips would waste huge square quads)
-              float alongH = max(lenF, lenB) + w * 2.6;
-              float sagF = rF * (1.0 - cos(min(bendF, 3.14159)));
-              float sagB = rB * (1.0 - cos(min(bendB, 3.14159)));
-              float acrossH = max(sagF, sagB) + w * 3.4;
-              lp = cornerOf.x * alongH * tdir +
-                cornerOf.y * acrossH * vec2(-tdir.y, tdir.x);
-            }
-            // paper tone: quantized local hair luminance → deep single-hue set
-            float lum = dot(textureLod(uStruct, uvC, 0.0).rgb, vec3(0.299, 0.587, 0.114));
-            int ti = 0;
-            if (lum > uHairQ.x) ti = 1;
-            if (lum > uHairQ.y) ti = 2;
-            if (lum > uHairQ.z) ti = 3;
-            vec3 ramp = hairToneP(uPreset, ti);
-            float acc = step(0.955, hash12(cell + 5.9));
-            ramp = mix(ramp, hairAccentP(uPreset), acc);
-            vec3 realC = textureLod(uStruct, uvC, 0.0).rgb * 0.85;
-            vec3 labA = lin2oklab(srgb2lin(realC));
-            vec3 labB = lin2oklab(srgb2lin(ramp));
-            vec3 col = clamp(oklab2srgb(mix(labA, labB, 0.25 + 0.75 * uPalette)), 0.0, 1.0);
-            vColor = col;
-            // paper cut-edge colour: a muted cool grey on the navy sets,
-            // warm cream on the brown 生成り set. Deliberately restrained —
-            // the strong steel-blue sheen read as rubber gloss (repair)
-            vHiCol = mix(col,
-              uPreset == 1 ? vec3(0.88, 0.82, 0.70) : vec3(0.68, 0.75, 0.82),
-              0.42);
-            vec2 posUv = vec2((cp.x + lp.x) / uAspect, cp.y + lp.y);
-            vLocal = lp;
-            vPar = vec4(r0, w, sweep, a0);
-            vPar2 = par2;
-            vC = cOff;
-            vMisc = vec3(tight, 1.0, hash12(cell + 8.4));
-            gl_Position = vec4(posUv * 2.0 - 1.0, 0.0, 1.0);
-          }
-        `;
-
-        const ribbonFS = `#version 300 es
-          precision highp float;
-          in vec2 vLocal;
-          in vec4 vPar;
-          in vec4 vPar2;
-          in vec4 vC;
-          in vec3 vMisc;
-          in vec3 vColor;
-          in vec3 vHiCol;
-          out vec4 fragColor;
-          uniform float uRelief;
-          ${CHUNK_SPIRAL}
-          // One strand distance — either the quilling spiral (vPar2.w == 1,
-          // centred on the cell) or the flowing band (two arcs joined at the
-          // cell; vC carries each arc's centre offset).
-          float hairDist(vec2 q, out float across, out float along,
-                         out vec2 radial) {
-            if (vPar2.w > 0.5) {
-              float d = spiralBand(q, vPar.x, vPar.y, vPar.z, vPar.w, vMisc.x,
-                across, along);
-              radial = normalize(q + vec2(1e-5, 0.0));
-              return d;
-            }
-            float ac1; float al1; float ac2; float al2;
-            float d1 = spiralBand(q - vC.xy, vPar.x, vPar.y, vPar.z, vPar.w,
-              0.0, ac1, al1);
-            float d2 = spiralBand(q - vC.zw, vPar2.x, vPar.y, vPar2.y, vPar2.z,
-              0.0, ac2, al2);
-            if (d1 <= d2) {
-              across = ac1;
-              along = 0.5 * al1;
-              radial = normalize(q - vC.xy + vec2(1e-5, 0.0));
-              return d1;
-            }
-            across = ac2;
-            along = 0.5 + 0.5 * al2;
-            radial = normalize(q - vC.zw + vec2(1e-5, 0.0));
-            return d2;
-          }
-          void main() {
-            float w = vPar.y;
-            float fade = vMisc.y;
-            float across;
-            float along;
-            vec2 radial;
-            float d = hairDist(vLocal, across, along, radial);
-            float aa = max(fwidth(d), 1e-5) * 1.15;
-            float aR = (1.0 - smoothstep(-aa, aa, d)) * fade;
-            // per-strand drop shadow onto whatever lies below (paper distance)
-            vec2 sh = vec2(0.62, -0.79) * w * (0.55 + 1.25 * uRelief);
-            float ac2;
-            float al2;
-            vec2 rd2;
-            float d2 = hairDist(vLocal - sh, ac2, al2, rd2);
-            float aS = (1.0 - smoothstep(-aa, w * 0.55, d2)) *
-              (0.24 + 0.30 * uRelief) * fade;
-            vec3 col = shadeCurl(vColor, vHiCol, across, along, radial);
-            float shA = aS * (1.0 - aR);
-            // premultiplied: strand over its own soft shadow
-            fragColor = vec4(col * aR + vec3(0.016, 0.022, 0.030) * shA, aR + shA);
-          }
-        `;
-
-        // P7 — composite: THE paper collage. Card + person drop shadow →
-        // scissor silhouette (heavily smoothed mask re-threshold — the
-        // simplified cut, NOT the raw seg edge) → class layer stack
-        // (clothes under skin under hair-base) with cut rims + offset cast
-        // shadows at every layer boundary (pseudo-sdf bands on the smoothed
-        // luminance) → face detail (fine quantiles, dark-feature floor,
-        // oklab-a lips) → quilling curls → paper grain. No uTime — a still
-        // person is a still collage.
         const compositeFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -1485,7 +1110,6 @@
           uniform sampler2D uBand;
           uniform sampler2D uSoft;
           uniform sampler2D uShad;
-          uniform sampler2D uRibbon;
           uniform sampler2D uFlow;
           uniform vec2 uResolution;
           uniform float uAspect;
@@ -1495,7 +1119,6 @@
           uniform float uGrain;
           uniform int uPreset;
           uniform int uDebug;
-          uniform int uHairStyle;    // 0 = 束 locks (auto included), 1 = リボン
           uniform float uHairWave;   // lock-contour waviness (束/自動)
           uniform float uSkinTh[7];
           uniform int uSkinN;
@@ -1509,7 +1132,6 @@
           ${CHUNK_NOISE}
           ${CHUNK_OKLAB}
           ${CHUNK_PAL}
-          ${CHUNK_SPIRAL}
 
           const vec2 LDIR = vec2(-0.615, 0.789);   // light from upper-left
 
@@ -1628,36 +1250,7 @@
               vec2 q = vec2(fract(uv.x * 5.0), (uv.y - 0.36) / 0.34);
               return stackDemo(q, col5 / 4.0);
             }
-            vec3 c = cardColorP(uPreset);
-            for (int i = 0; i < 3; i++) {
-              vec2 ctr = vec2(0.18 + 0.32 * float(i), 0.18);
-              vec2 q = (uv - ctr) * vec2(uAspect, 1.0);
-              float r0 = 0.085;
-              float w = 0.026 + 0.004 * float(i);
-              // the three curl kinds: open C / closed O / 1.5-turn spiral
-              float sweep = i == 0 ? 3.1 : (i == 1 ? 6.3 : 9.2);
-              float tight = i == 0 ? 0.10 : (i == 1 ? 0.25 : 0.50);
-              float a0 = 0.7 + 1.9 * float(i);
-              float across;
-              float along;
-              float d = spiralBand(q, r0, w, sweep, a0, tight, across, along);
-              float aa = max(fwidth(d), 1e-5) * 1.2;
-              float ac2;
-              float al2;
-              float d2 = spiralBand(q - vec2(0.011, -0.014), r0, w, sweep, a0,
-                tight, ac2, al2);
-              float aS = (1.0 - smoothstep(-aa, w * 0.55, d2)) * 0.40;
-              c = mix(c, c * 0.45, aS);
-              float aR = 1.0 - smoothstep(-aa, aa, d);
-              vec3 tone = hairToneP(uPreset, i);
-              vec2 radial = normalize(q + vec2(1e-5, 0.0));
-              vec3 rc = shadeCurl(tone,
-                mix(tone, uPreset == 1 ? vec3(0.88, 0.82, 0.70)
-                                       : vec3(0.68, 0.75, 0.82), 0.42),
-                across, along, radial);
-              c = mix(c, rc, aR);
-            }
-            return c;
+            return cardColorP(uPreset);
           }
 
           void main() {
@@ -1840,11 +1433,11 @@
             // quantiles, cut with the same rim highlight + offset cast
             // shadow machinery as the skin stack, but with a DEEPER offset
             // and a stronger inter-lock shadow (the sculpted relief of the
-            // refs). リボン mode: two deep tones under the quilling curls.
+            // refs).
             vec3 hairBase;
             float rimH = 0.0;
             float shdH = 0.0;
-            if (uHairStyle == 0) {
+            {
               float Lh = texture(uFlow, vUv).r + hairWob(vUv);
               vec2 sOffH = vUv - shBand * 1.7;   // deeper than the skin cut
               float LhS = texture(uFlow, sOffH).r + hairWob(sOffH);
@@ -1879,9 +1472,6 @@
                   smoothstep(TupH - fwH * 1.5, TupH + fwH * 1.5, Lh));
               }
               bandRelief(Lh, LhS, TdnH, TupH, rimW * 1.15, rimH, shdH);
-            } else {
-              float hLev = smoothstep(uHairQ.y - 0.04, uHairQ.y + 0.04, smoothL);
-              hairBase = mix(hairToneP(uPreset, 0), hairToneP(uPreset, 1), hLev);
             }
             hairBase = mix(vec3(lumaf(hairBase)), hairBase, 0.4 + 0.6 * uPalette);
             hairBase = mix(hairBase, hairBase * 1.45 + vec3(0.03),
@@ -1914,14 +1504,10 @@
             col = mix(col, paperEdgeP(uPreset),
               rimSil * (0.10 + 0.22 * relW) * flat0);
 
-            // ---- hair-only debug (locks) + quilling curls (ribbon) ----
+            // ---- hair-only debug (locks) ----
             if (uDebug == 3) {
               col = mix(cardColorP(uPreset), vec3(0.42), 0.5);
-              if (uHairStyle == 0) col = mix(col, hairRimmed, hairTop);
-            }
-            if (uDebug == 0 || uDebug == 3) {
-              vec4 rib = texture(uRibbon, vUv);
-              col = col * (1.0 - rib.a) + rib.rgb;
+              col = mix(col, hairRimmed, hairTop);
             }
 
             // ---- paper grain over everything (it is all paper) ----
@@ -1977,7 +1563,6 @@
           etf: createProgram(etfFS),
           flow: createProgram(flowFS),
           stats: createProgram(statsFS),
-          ribbon: createProgram(ribbonFS, ribbonVS),
           composite: createProgram(compositeFS),
         };
 
@@ -2001,16 +1586,11 @@
           stats: getLocations(programs.stats, [
             "uStruct", "uSoft", "uEtf", "uFlow",
           ]),
-          ribbon: getLocations(programs.ribbon, [
-            "uSoft", "uEtf", "uStruct", "uShadM", "uAspect", "uCells",
-            "uSoftTexel", "uHairCurl", "uRibbon", "uPalette",
-            "uHairQ", "uPreset", "uRelief",
-          ]),
           composite: getLocations(programs.composite, [
-            "uStruct", "uBand", "uSoft", "uShad", "uRibbon", "uFlow",
+            "uStruct", "uBand", "uSoft", "uShad", "uFlow",
             "uResolution", "uAspect",
             "uRelief", "uPalette", "uDetail", "uGrain", "uPreset", "uDebug",
-            "uHairStyle", "uHairWave", "uSkinTh[0]", "uSkinN", "uFaceTh[0]",
+            "uHairWave", "uSkinTh[0]", "uSkinN", "uFaceTh[0]",
             "uFaceN", "uClothTh[0]", "uClothN", "uFaceDark", "uLipA", "uHairQ",
           ]),
         };
@@ -2095,7 +1675,6 @@
             flowT: createTarget(etfW, etfH, true),
             flowS: createTarget(etfW, etfH, true),
             stats: createTarget(STATS_RES, STATS_RES, false),
-            ribbon: createTarget(paintW, paintH, false),
           };
           needsReset = true;
         }
@@ -2116,7 +1695,6 @@
           clearTarget(targets.flowT, 0.2, 0, 0, 1);
           clearTarget(targets.flowS, 0.2, 0, 0, 1);
           clearTarget(targets.stats, 0, 0, 0.5, 1);
-          clearTarget(targets.ribbon, 0, 0, 0, 0);
         }
 
         function resize() {
@@ -2727,43 +2305,6 @@
             // shading structure to cut into paper facets.
             blurPass(structCur, targets.bandTmp, targets.bandT, 3.6);
 
-            // P6 — quilling curls (instanced spiral sprites, premultiplied).
-            // 髪スタイル=リボン only; 束/自動 leave the target cleared.
-            gl.bindFramebuffer(gl.FRAMEBUFFER, targets.ribbon.fbo);
-            gl.viewport(0, 0, targets.ribbon.width, targets.ribbon.height);
-            gl.clearColor(0, 0, 0, 0);
-            gl.clear(gl.COLOR_BUFFER_BIT);
-            if (state.hairStyle === 1) {
-              const cellsX = Math.round(34 + 30 * state.curls);
-              const cellSize = aspect / cellsX;
-              let rows = Math.ceil(1 / cellSize) + 1;
-              const MAX_INST = 8192;
-              if (cellsX * rows > MAX_INST) rows = Math.floor(MAX_INST / cellsX);
-              const inst = cellsX * rows;
-              gl.useProgram(programs.ribbon);
-              const ur = locations.ribbon;
-              bindTexture(0, targets.softT.tex);
-              bindTexture(1, targets.etfT.tex);
-              bindTexture(2, structCur.tex);
-              bindTexture(3, targets.shadT.tex);
-              gl.uniform1i(ur.uSoft, 0);
-              gl.uniform1i(ur.uEtf, 1);
-              gl.uniform1i(ur.uStruct, 2);
-              gl.uniform1i(ur.uShadM, 3);
-              gl.uniform1f(ur.uAspect, aspect);
-              gl.uniform1f(ur.uCells, cellsX);
-              gl.uniform2f(ur.uSoftTexel, 1 / classW, 1 / classH);
-              gl.uniform1f(ur.uHairCurl, state.hairCurl);
-              gl.uniform1f(ur.uRibbon, state.ribbon);
-              gl.uniform1f(ur.uPalette, state.palette);
-              gl.uniform3f(ur.uHairQ, TH.hairQ[0], TH.hairQ[1], TH.hairQ[2]);
-              gl.uniform1i(ur.uPreset, state.preset);
-              gl.uniform1f(ur.uRelief, state.relief);
-              gl.enable(gl.BLEND);
-              gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-              gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, inst);
-              gl.disable(gl.BLEND);
-            }
 
             // P7 — composite → canvas
             renderPass(null, programs.composite, () => {
@@ -2771,13 +2312,11 @@
               bindTexture(0, structCur.tex);
               bindTexture(1, targets.softT.tex);
               bindTexture(2, targets.shadT.tex);
-              bindTexture(3, targets.ribbon.tex);
               bindTexture(4, targets.bandT.tex);
               bindTexture(5, targets.flowS.tex);
               gl.uniform1i(u.uStruct, 0);
               gl.uniform1i(u.uSoft, 1);
               gl.uniform1i(u.uShad, 2);
-              gl.uniform1i(u.uRibbon, 3);
               gl.uniform1i(u.uBand, 4);
               gl.uniform1i(u.uFlow, 5);
               gl.uniform2f(u.uResolution, canvas.width, canvas.height);
@@ -2788,12 +2327,11 @@
               gl.uniform1f(u.uGrain, state.grain);
               gl.uniform1i(u.uPreset, state.preset);
               gl.uniform1i(u.uDebug, state.debugView);
-              // 0 = 束 locks (自動 included; the coherence estimate drives
-              // the lock waviness), 1 = リボン. Manual hairCurl wins outside
-              // 自動 (spec: 誤判定対策).
-              gl.uniform1i(u.uHairStyle, state.hairStyle === 1 ? 1 : 0);
+              // 0 = 束 locks (manual hairCurl), 1 = 自動 (the coherence
+              // estimate drives the lock waviness). Manual wins outside 自動
+              // (spec: 誤判定対策).
               gl.uniform1f(u.uHairWave,
-                state.hairStyle === 2 ? TH.autoCurl : state.hairCurl);
+                state.hairStyle === 1 ? TH.autoCurl : state.hairCurl);
               gl.uniform1fv(u["uSkinTh[0]"], TH.skin);
               gl.uniform1i(u.uSkinN, TH.skinN);
               gl.uniform1fv(u["uFaceTh[0]"], TH.face);
