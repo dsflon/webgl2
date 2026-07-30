@@ -3,9 +3,9 @@
   fable5_kirie-portrait.html — WebGL2 webcam →「切り紙の積層ポートレート」
   カメラに映る人物を、多層ペーパーカット(レイヤード・ペーパーコラージュ)のポートレート
   としてリアルタイムに再構成する。肌は陰影で切り分けたフラットな紙の積層(各層に切り口の
-  ハイライトと下層への短い落ち影)、髪は既定で「束(レイヤー)」— 毛流(etf)に沿って
-  異方平滑した輝度を肌と同じ積層機構で 4 段の大きな毛束に切り、束間に肌より深い落ち影を
-  彫る(「髪質」=束の輪郭の波打ち。「髪スタイル」=自動なら毛流から波打ちを推定)、
+  ハイライトと下層への短い落ち影)、髪は毛流(etf)に沿って異方平滑した輝度を肌と同じ
+  積層機構で 4 段の大きな毛束に切り、束間に肌より深い落ち影を彫る
+  (波打ちはスライダー「髪質」で調整)、
   服は重なる紙の帯。人物は無地の台紙に貼られた切り紙として、台紙に一つの
   柔らかい影を落とす。
   検知: MediaPipe ImageSegmenter 多クラス(背景/髪/体肌/顔肌/服)。
@@ -25,9 +25,7 @@
        基準の最小帯幅フロアで細い束を下の束へ統合(糸・毛糸・鋸歯の禁止。輪郭は滑らかな
        ハサミ曲線のみ)。「髪質」(hairCurl)は束の輪郭の波打ち(0=まっすぐな束 /
        1=大きくうねる束。低周波ノイズで量子化場を揺らす)。シードは cell-hash の
-       安定空間(時間を混ぜない)。
-       「自動」は髪領域の etf 方向一貫性(重み付き合成ベクトル長)から束の波打ちを推定
-       して束レイヤーを描く(CPU 統計と同じ低頻度 readback + ema。手動選択が常に優先)。
+       安定空間(時間を混ぜない)。髪の描き方は一通りで、モード選択はない。
     3. 台紙(知覚/場) — 背景クラスは完全フラットな台紙色+紙グレイン。人物輪郭は強ぼかし+
        再しきい値で平滑化・単純化した「ハサミで切った」曲線(seg 生エッジは使わない)。
        人物全体が台紙へ一つの柔らかいオフセット影を落とす。edge darkening は控えめ。
@@ -66,7 +64,7 @@
                     正しければ「髪が画面上部・服が下部」に出る)
     デバッグ表示: 0=最終 1=クラスマスク 2=量子化トーン面(切り口・影なし) 3=髪のみ 4=標本
 
-  スライダーの説明(写真らしさ ↔ 紙の様式。計9本):
+  スライダーの説明(写真らしさ ↔ 紙の様式。計7本):
     紙の段数   肌・服のトーン量子化の段数(4↔8)
     紙の厚み   切り口ハイライトと落ち影の強さ・オフセット
     髪質       毛束の輪郭の波打ち(0=まっすぐ/1=大きくうねる)
@@ -74,9 +72,10 @@
     落ち着き   しきい値/マスク ema の時定数(静止の安定 ↔ 追従)
     顔の精密さ 顔肌の局所段数と目・眉・唇の保護
     紙の質感   繊維グレインと紙の色ムラ
-  「髪スタイル」select: 束(既定。毛束レイヤー) /
-    自動(etf 方向一貫性から束の波打ちを推定。束レイヤー描画)
-    ※ 旧「リボン」(細い紙リボンのクイリング)は、紙でなく毛糸/虫のように見えるため廃止
+  select は「プリセット」(台紙3種)と「デバッグ表示」のみ。
+  ※ 旧「髪スタイル」select は廃止。「リボン」(細い紙リボンのクイリング)は紙でなく
+    毛糸/虫のように見えたため、「自動」(etf 方向一貫性からの波打ち推定)は
+    「髪質」スライダーと役目が重複していたため、いずれも削除した。
 
   依存: @mediapipe/tasks-vision の CDN(実カメラ時のみ実行時 import。fakesource は依存ゼロ)。
   モデル: selfie_multiclass_256x256.tflite(URL 実在を HTTP 200 で確認済)。
@@ -327,7 +326,6 @@
           ...DEFAULTS,
           debugView: 0,
           preset: 0,
-          hairStyle: 0,   // 0 束(レイヤー) / 1 自動(束の波打ちを推定)
           mirror: true,
           facingMode: "user",
           pauseAnim: reducedMotion || FREEZE,
@@ -344,15 +342,8 @@
         ];
 
         // Presets switch the card colour + per-class paper palette as a set
-        // (order §6). They do not touch the nine sliders.
+        // (order §6). They do not touch the sliders.
         const PRESETS = ["ティール台紙", "生成り台紙", "夜の台紙"];
-
-        // Hair style: locks (the hair is carved into a few big paper locks by
-        // the same tone-stack machinery as the skin; hairCurl waves the lock
-        // contours), or auto (the etf-alignment estimate drives the lock
-        // waviness). The old quilling-ribbon mode was removed — thin strands
-        // read as yarn/insects on the paper, not as carved paper (user call).
-        const HAIR_STYLES = ["束(レイヤー)", "自動"];
 
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
@@ -367,14 +358,6 @@
             <span>プリセット</span>
             <select id="presetSel" aria-label="プリセット">
               ${PRESETS.map(
-                (label, i) => `<option value="${i}">${label}</option>`,
-              ).join("")}
-            </select>
-          </div>
-          <div class="select-row">
-            <span>髪スタイル</span>
-            <select id="hairStyle" aria-label="髪スタイル">
-              ${HAIR_STYLES.map(
                 (label, i) => `<option value="${i}">${label}</option>`,
               ).join("")}
             </select>
@@ -444,9 +427,6 @@
         document.getElementById("presetSel").addEventListener("change", (event) => {
           state.preset = Number(event.currentTarget.value);
         });
-        document.getElementById("hairStyle").addEventListener("change", (event) => {
-          state.hairStyle = Number(event.currentTarget.value);
-        });
         document.getElementById("mirror").addEventListener("change", (event) => {
           state.mirror = event.currentTarget.checked;
         });
@@ -457,8 +437,6 @@
           Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
           state.preset = 0;
           document.getElementById("presetSel").value = "0";
-          state.hairStyle = 0;
-          document.getElementById("hairStyle").value = "0";
         });
 
         const closePanel = document.getElementById("closePanel");
@@ -987,8 +965,8 @@
           }
         `;
 
-        // P4b — hair-flow LIC: the quantization field for the 髪スタイル=束
-        // lock stack. Luminance of the kuwahara scene is smeared ALONG the
+        // P4b — hair-flow LIC: the quantization field for the paper-lock
+        // stack. Luminance of the kuwahara scene is smeared ALONG the
         // etf tangent (line integral convolution: re-fetch the direction at
         // every step) with a small across-flow blur, weighted toward hair
         // pixels so face brightness never bleeds a halo lock into the
@@ -1070,19 +1048,14 @@
         // R = luminance (face uses the FINE channel so eye/lip darks survive
         // the quantiles), G = class weight, B = oklab a (lip redness).
         // Hair quadrant: R = the LIC flow-smoothed luminance (the very field
-        // the 束 lock stack quantizes — the LIC compresses the luminance
-        // range, so quantiles of the raw field would leave one tone
-        // dominating), BA = etf double-angle tangent (coherence-scaled) —
-        // the CPU sums these into a resultant vector whose length measures
-        // how ALIGNED the hair flow is (straight hair ≈ long resultant,
-        // curls cancel out) for the 髪スタイル=自動 waviness estimate.
+        // the lock stack quantizes — the LIC compresses the luminance range,
+        // so quantiles of the raw field would leave one tone dominating).
         const statsFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
           out vec4 fragColor;
           uniform sampler2D uStruct;
           uniform sampler2D uSoft;
-          uniform sampler2D uEtf;
           uniform sampler2D uFlow;
           ${CHUNK_OKLAB}
           void main() {
@@ -1094,8 +1067,9 @@
             float lum = q == 0 ? st.a : dot(st.rgb, vec3(0.299, 0.587, 0.114));
             vec3 lab = lin2oklab(srgb2lin(st.rgb));
             if (q == 3) {
-              vec4 e = texture(uEtf, quv);
-              fragColor = vec4(texture(uFlow, quv).r, wgt, e.r, e.g);
+              // hair quadrant: the LIC-smoothed luminance drives the hair
+              // quantiles (B/A carry nothing here)
+              fragColor = vec4(texture(uFlow, quv).r, wgt, 0.0, 1.0);
               return;
             }
             fragColor = vec4(lum, wgt, clamp(lab.y * 2.0 + 0.5, 0.0, 1.0), 1.0);
@@ -1119,7 +1093,7 @@
           uniform float uGrain;
           uniform int uPreset;
           uniform int uDebug;
-          uniform float uHairWave;   // lock-contour waviness (束/自動)
+          uniform float uHairWave;   // lock-contour waviness (髪質)
           uniform float uSkinTh[7];
           uniform int uSkinN;
           uniform float uFaceTh[11];
@@ -1584,7 +1558,7 @@
             "uStruct", "uEtf", "uSoft", "uShadM", "uTexel",
           ]),
           stats: getLocations(programs.stats, [
-            "uStruct", "uSoft", "uEtf", "uFlow",
+            "uStruct", "uSoft", "uFlow",
           ]),
           composite: getLocations(programs.composite, [
             "uStruct", "uBand", "uSoft", "uShad", "uFlow",
@@ -1786,9 +1760,6 @@
           faceDark: 0.16,
           lipA: 0.10,
           hairQ: new Float32Array([0.14, 0.22, 0.32]),
-          // 髪スタイル=自動: etf 方向一貫性(合成ベクトル長)→ hairCurl 推定
-          hairAlign: 0,
-          autoCurl: 0.6,
           seeded: false,
         };
         const cov = { hair: 0, face: 0, body: 0, cloth: 0 };
@@ -1850,7 +1821,6 @@
           histFace.fill(0); histBody.fill(0); histCloth.fill(0); histHair.fill(0);
           let wFace = 0, wBody = 0, wCloth = 0, wHair = 0;
           let aSum = 0, aW = 0;
-          let vxSum = 0, vySum = 0;   // hair etf double-angle resultant
           const half = STATS_RES / 2;
           for (let y = 0; y < STATS_RES; y++) {
             for (let x = 0; x < STATS_RES; x++) {
@@ -1864,11 +1834,7 @@
                 aSum += ((statsBuf[o + 2] / 255) - 0.5) / 2 * w; aW += w;
               } else if (q === 1) { histBody[bin] += w; wBody += w; }
               else if (q === 2) { histCloth[bin] += w; wCloth += w; }
-              else {
-                histHair[bin] += w; wHair += w;
-                vxSum += ((statsBuf[o + 2] / 255) * 2 - 1) * w;
-                vySum += ((statsBuf[o + 3] / 255) * 2 - 1) * w;
-              }
+              else { histHair[bin] += w; wHair += w; }
             }
           }
           const qArea = half * half;
@@ -1899,17 +1865,6 @@
             const margin = 0.055 - 0.027 * state.detail;
             TH.lipA = smoothScalar(TH.lipA, aSum / aW + margin, k);
           }
-          // 髪スタイル=自動: hair etf tangents summed as double-angle
-          // vectors — |resultant|/Σw is ~coherence when the flow all points
-          // one way (straight hair) and collapses toward 0 when directions
-          // cancel (curls). Same hysteresis+EMA as every other threshold;
-          // the select's manual modes simply ignore the estimate.
-          if (wHair > MIN_W) {
-            TH.hairAlign = Math.hypot(vxSum, vySum) / wHair;
-            const target = Math.min(1, Math.max(0, (0.42 - TH.hairAlign) / 0.32));
-            TH.autoCurl = smoothScalar(TH.autoCurl, target, k);
-          }
-          window.__hairAuto = { align: TH.hairAlign, curl: TH.autoCurl };
           // diagnostic (headless probing): hair histogram summary + quantiles
           {
             let lo = -1, hi = -1, tot = 0;
@@ -2288,12 +2243,10 @@
             const u = locations.stats;
             bindTexture(0, structCur.tex);
             bindTexture(1, targets.softT.tex);
-            bindTexture(2, targets.etfT.tex);
-            bindTexture(3, targets.flowS.tex);
+            bindTexture(2, targets.flowS.tex);
             gl.uniform1i(u.uStruct, 0);
             gl.uniform1i(u.uSoft, 1);
-            gl.uniform1i(u.uEtf, 2);
-            gl.uniform1i(u.uFlow, 3);
+            gl.uniform1i(u.uFlow, 2);
           });
 
           if (drawFinal) {
@@ -2327,11 +2280,9 @@
               gl.uniform1f(u.uGrain, state.grain);
               gl.uniform1i(u.uPreset, state.preset);
               gl.uniform1i(u.uDebug, state.debugView);
-              // 0 = 束 locks (manual hairCurl), 1 = 自動 (the coherence
-              // estimate drives the lock waviness). Manual wins outside 自動
-              // (spec: 誤判定対策).
-              gl.uniform1f(u.uHairWave,
-                state.hairStyle === 1 ? TH.autoCurl : state.hairCurl);
+              // lock-contour waviness — always the 髪質 slider (the old
+              // 自動 estimate was dropped with its select box)
+              gl.uniform1f(u.uHairWave, state.hairCurl);
               gl.uniform1fv(u["uSkinTh[0]"], TH.skin);
               gl.uniform1i(u.uSkinN, TH.skinN);
               gl.uniform1fv(u["uFaceTh[0]"], TH.face);
