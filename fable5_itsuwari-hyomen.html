@@ -30,9 +30,10 @@
        暗めに沈める。ライブ検知なので裏世界の被写体は動き続ける。
     6. 自己修復と風化 — マスクは穴の端から ema 的長時定数で回復。堆積ブロックは
        寿命で退色して白黒世界に同化し消滅(ボディ数・堆積高さは有界)。風化は
-       修復と連動: 元セルが修復済みのブロックは 2.6 倍速で加齢し、消えた分だけ
-       山が quiet ウェイク(無反発)で静かに沈降 — 表面が直るほど床の証拠も
-       消えていく。加齢は凍結(ソルバ除外)中も止まらない。
+       修復と連動: 元セルが修復済みになったブロックは残り寿命を 2〜4 秒
+       (cell-hash ジッタ)に切り詰められ、消えた分だけ山が quiet ウェイク
+       (無反発)で静かに沈降 — 表面が直るほど床の証拠も消えていき、
+       全セル修復の数秒後には床が必ず空になる。加齢は凍結中も止まらない。
 
   パイプライン図(P2 のみイベント時、他は毎フレーム):
     video / fakeScene ─► [P0 scene] cover-fit+mirror      sceneT  RGBA8 長辺≤1024
@@ -49,9 +50,15 @@
                グラフを床/壁からBFSして grounded を再判定し、非接地の静止塊
                (空中ジャム=floating island)は quiet ウェイクで再落下させる。
                風化で支えが消えた近傍も同経路で静かに沈降(無反発+高減衰)。
-               風化の加齢は凍結中も進み、元セル修復済みで 2.6 倍速(修復連動)。
+               風化の加齢は凍結中も進み、元セル修復済みで残り寿命 2〜4 秒に
+               クランプ(修復連動の有界フェード)。剥離セルが 0 になったら
+               残存ボディ全部に同じフェードを掛ける(取りこぼしの保険)。
                ボディ上限は二段構え: 上限-300 からは最古の堆積を約1秒の
-               フェードで間引き(doom)、瞬時消去は真の過負荷時のみ
+               フェードで間引き(doom)、瞬時消去は真の過負荷時のみ。
+               重力は「ベクトル」で、モバイルの左右傾き(deviceorientation の
+               gamma)を ema+レート制限(≤60°/s)で最大 ±40° 傾ける。傾くと
+               山は下り側へ流れて壁際に寄る(接地判定=重力方向との内積、
+               壁は接地連結の種、方向が 3° 変わると堆積を quiet ウェイク)
     [P3 comp ] bwT 基層+マスクで無傷領域だけ sceneT。穴の縁に厚みの影と欠けの縁
     [P4 block] instanced quads(snapT 世代参照+風化の退色+回転連動の
                ベベル照明・面グラデ・サイズ/明度ジッタ+ソフトドロップシャドウ)→ canvas
@@ -66,6 +73,9 @@
     weather 破片の風化(0.50)— 堆積ブロックの退色・消滅までの寿命
     depth   裏世界の暗さ(0.30)— 白黒世界の沈み(既定は明るめの線画。上げると夜へ)
     edge    輪郭の感度(0.50)— sobel 輪郭のしきい値と線の太さ
+    tilt    傾きの効き(0.60)— モバイルで端末を左右に傾けたとき重力を傾ける
+            最大角(1.0 で 40°)。0 で傾き入力を無効化。PC は傾きイベントが
+            来ないので常に無効(見た目は従来どおり)
     プリセット: 壁画の剥落(標準)/ 検知の世界 / 崩れ続ける夜
 
   実行方法:
@@ -73,10 +83,18 @@
     → http://localhost:8888/fable5_itsuwari-hyomen.html を開きカメラを許可し、
     画面をクリック/ドラッグすると表面が剥がれる。
     (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    モバイル: 端末を左右に傾けると重力が傾き、堆積した破片が下り側へ流れて
+    壁際に寄る(iOS 13+ は最初のタップで傾きセンサの許可を一度だけ要求。
+    拒否・非対応・PC では傾きは無効で、それ以外は従来どおり動作する)。
     ?fakesource=1 … カメラ不使用。GLSL 合成シーン(揺れる人物+振り子ランプ+雲)で駆動
     ?freeze=1     … 時間駆動を停止(合成シーン・物理・伝播・修復。決定的静止フレーム)
     ?prewarm=<秒> … 初回描画前に固定 dt で決定的早送り。スクリプトの剥離イベント
                     3 発を含み、穴・落下・堆積・追い崩れ・部分修復が揃った状態を作る
+    ?settle=<秒>  … 検証用。prewarm の後に「イベント無し」の決定的早送りを追加し、
+                    剥離セル数とボディ数の時系列を window.__settleLog に記録する
+                    (修復完了 → 床が空になる、の機械証拠)
+    ?tilttest=1   … 検証用。fakesource でも傾き入力を有効化(window.__setTilt(deg)
+                    で合成 gamma を注入できる)。通常運用では使わない
     uDebug: 0=最終 / 1=剥離マスク / 2=裏世界のみ / 3=ブロックのみ / 4=標本
 
   依存: なし(外部ライブラリ・MLモデル不使用)。WebGL2 / GLSL ES 3.00 単体。
@@ -459,6 +477,20 @@
           const v = parseFloat(QUERY.get("prewarm"));
           return Number.isFinite(v) && v > 0 ? Math.min(60, v) : 0;
         })();
+        // ?settle=<sec> — verification hook: after the prewarm event script,
+        // fast-forward this many further seconds with NO new peel events
+        // (fixed dt, deterministic) and log the wound/body time series to
+        // window.__settleLog. Used to prove "surface fully repaired ⇒ the
+        // floor empties a few seconds later" (repair #6).
+        const SETTLE = (() => {
+          const v = parseFloat(QUERY.get("settle"));
+          return Number.isFinite(v) && v > 0 ? Math.min(240, v) : 0;
+        })();
+        // ?tilttest=1 — verification hook: re-enable the device-tilt input
+        // under ?fakesource=1 so a headless DeviceOrientationEvent can drive
+        // the gravity tilt. Off by default: tilt is an external input like
+        // the pointer and must never perturb deterministic verification.
+        const TILT_TEST = QUERY.get("tilttest") === "1";
 
         const DEFAULTS = {
           block: 0.5,
@@ -469,6 +501,7 @@
           weather: 0.5,
           depth: 0.3,
           edge: 0.5,
+          tilt: 0.6,
         };
 
         // Presets are full slider recipes (uDebug 4 の標本=色見本で確認可能)
@@ -485,6 +518,7 @@
               weather: 0.62,
               depth: 0.42,
               edge: 0.78,
+              tilt: 0.6,
             },
           },
           yoru: {
@@ -498,6 +532,7 @@
               weather: 0.15,
               depth: 0.95,
               edge: 0.55,
+              tilt: 0.75,
             },
           },
         };
@@ -528,6 +563,7 @@
           ["weather", "破片の風化", "堆積ブロックの退色と寿命", 0, 1, 0.01],
           ["depth", "裏世界の暗さ", "白黒世界の沈み(黒レベル)", 0, 1, 0.01],
           ["edge", "輪郭の感度", "sobel 輪郭のしきい値と太さ", 0, 1, 0.01],
+          ["tilt", "傾きの効き", "モバイル: 端末を傾けると山が流れる", 0, 1, 0.01],
         ];
 
         panel.innerHTML = `
@@ -1389,6 +1425,7 @@
         const pendingGen = [];
         const instanceData = new Float32Array(MAX_BODIES * FLOATS_PER_INSTANCE);
         let peeledCells = 0;
+        let peeledCellsLive = 0; // cells with surf < 1, recounted in healStep
 
         // Instance buffer + VAO
         const blocksVao = gl.createVertexArray();
@@ -1577,10 +1614,16 @@
 
         function healStep(dt) {
           const rate = 0.005 + 0.5 * Math.pow(state.heal, 1.2);
+          // live wound count (cells not fully repaired). Free — the loop
+          // already visits every cell — and it is the trigger for the
+          // "surface fully repaired → the floor must empty" insurance
+          // in physicsStep (repair #6).
+          let damaged = 0;
           for (let cy = 0; cy < gridH; cy++) {
             for (let cx = 0; cx < gridW; cx++) {
               const i = cy * gridW + cx;
               if (surf[i] >= 1) continue;
+              damaged++;
               if (healGate[i] > 0) {
                 healGate[i] -= dt;
                 continue;
@@ -1598,6 +1641,7 @@
               maskDirty = true;
             }
           }
+          peeledCellsLive = damaged;
         }
 
         /* ------------------------------------------------------------------
@@ -1612,6 +1656,12 @@
         const VEL_ITERS = 4; // sequential-impulse velocity iterations
         const POS_ITERS = 3; // linear position-correction iterations
         const FRICTION = 0.5; // Coulomb μ (Matter.js Stack 帯: 0.4–0.6)
+        // Working μ. Untilted it IS FRICTION; device tilt loosens it (see
+        // updateGravityTilt): μ=0.5 means an angle of repose of 26.6°, so a
+        // settled mound would not avalanche at all below that. Loosening
+        // with the tilt magnitude is the "a tilted, handled device shakes
+        // the rubble" model and keeps the desktop path bit-identical.
+        let frictionNow = FRICTION;
         const MAX_ACTIVE = 900; // non-sleeping solver bodies (force-sleep over)
         const SLEEP_STEPS = 22; // low-motion steps before sleeping (~0.37 s)
         const FREEZE_AFTER = 2.0; // s asleep + loaded from above → frozen
@@ -1763,6 +1813,9 @@
             // lingering until the next tap force-expires it.
             ci: cy * gridW + cx,
             healedAway: false,
+            // bounded post-repair fade (repair #6): 2–4 s, cell-hash jitter
+            // so the pile dissolves block by block, never as one cliff.
+            fadeLife: 2.0 + 2.0 * cellHash(cx, cy, 53),
             doom: false,
             born: simTime,
           };
@@ -2227,7 +2280,7 @@
             vby = b ? b.vy + b.angv * pt.rbx : 0;
             const vt = (vbx - vax) * tx + (vby - vay) * ty;
             let lt = -pt.mT * vt;
-            const maxF = FRICTION * pt.jn;
+            const maxF = frictionNow * pt.jn;
             const jt0 = pt.jt;
             pt.jt = Math.max(-maxF, Math.min(maxF, jt0 + lt));
             lt = pt.jt - jt0;
@@ -2377,7 +2430,9 @@
               wakeBody(b, true); // quiet subsidence, never a bounce
               continue;
             }
-            if (b.state === 1 && b.sleepT > FREEZE_AFTER) {
+            // deep-pile freeze uses a "loaded from directly above" test, so
+            // it only applies while gravity is (near) vertical
+            if (b.state === 1 && b.sleepT > FREEZE_AFTER && Math.abs(gravAng) < 0.05) {
               // freeze only if something rests on top (keeps the exposed top
               // layer solver-active so new falls still land on it)
               let load = false;
@@ -2411,6 +2466,7 @@
           const H = canvas.height;
           const sc = H / 750;
           physStepCount++;
+          updateGravityTilt(dt); // device tilt → gravity direction (mobile)
 
           // ---- weathering + lifetime (resting bodies only: falling chips
           // stay fresh, matching the frozen-snapshot look). The lifetime is
@@ -2418,27 +2474,39 @@
           // turning 風化 up visibly ages the existing pile too. Runs for
           // sleeping AND frozen bodies alike — deep-pile freeze is solver
           // exclusion, never a pause of time.
-          // Heal coupling (repair #5): once a block's origin cell has healed
-          // over (latched in healedAway), the orphaned chip ages 2.6x
-          // faster — the pile dissolves in step with the repair, block by
-          // block, and each removal wakes its column QUIETLY (removeBody),
-          // so the mound subsides gradually instead of surviving until the
-          // next tap mass-expires it.
+          // Heal coupling (repair #5, made bounded in repair #6): once a
+          // block's origin cell has healed over (healedAway latches), the
+          // orphaned chip no longer merely ages FASTER — its whole remaining
+          // life is CLAMPED to a short fixed window (fadeLife ≈ 2–4 s,
+          // cell-hash jitter). A multiplier was not an expiry date: at the
+          // default weather the 43 s life only became ~17 s, so chips born
+          // just before the last tap outlived the repair by half a minute
+          // (measured: wounds 0 at t=53.0, floor empty at t=69.5). With the
+          // clamp, "the cell closed ⇒ its chip is gone a few seconds later"
+          // is guaranteed. Insurance: when the surface is fully repaired
+          // (no wounded cell at all) EVERY remaining body gets the same
+          // bounded fade, including falling ones, so stray chips whose
+          // origin cell went out of range can never survive.
           const lifeBase = 70 - 62 * Math.pow(state.weather, 1.2);
+          const allHealed = peeledCellsLive === 0;
           for (let i = bodies.length - 1; i >= 0; i--) {
             const b = bodies[i];
-            if (b.state > 0) {
-              b.sleepT += dt;
-              if (!b.healedAway && surf[b.ci] > 0.85) b.healedAway = true;
-              let life = Math.max(
-                2,
-                lifeBase * b.wJit * (b.wFast ? 1 / 3 : 1),
-              );
-              if (b.healedAway) life /= 2.6;
-              if (b.doom) life = Math.min(life, 3);
-              b.weather += dt / life;
-              if (b.weather >= 1) removeBody(i);
+            const resting = b.state > 0;
+            // falling chips stay fresh (the frozen-snapshot look) — unless
+            // the surface is already whole again, in which case even a
+            // straggler in the air must fade out.
+            if (!resting && !allHealed) continue;
+            if (resting) b.sleepT += dt;
+            if (!b.healedAway) {
+              const ci = b.ci;
+              const gone = ci < 0 || ci >= surf.length || surf[ci] > 0.85;
+              if (allHealed || gone) b.healedAway = true;
             }
+            let life = Math.max(2, lifeBase * b.wJit * (b.wFast ? 1 / 3 : 1));
+            if (b.healedAway) life = Math.min(life, b.fadeLife);
+            if (b.doom) life = Math.min(life, 3);
+            b.weather += dt / life;
+            if (b.weather >= 1) removeBody(i);
           }
 
           // ---- integrate active bodies (semi-implicit Euler)
@@ -2455,7 +2523,10 @@
             b.supported = false;
             b.groundedNow = false;
             active++;
-            b.vy += 2.6 * H * dt;
+            // gravity as a VECTOR: vertical on desktop, rolled by device
+            // tilt on mobile (gDir is a unit vector, magnitude unchanged)
+            b.vy += 2.6 * H * gDirY * dt;
+            b.vx += 2.6 * H * gDirX * dt;
             const dragL = b.quiet ? 2.4 : 0.5;
             const dragA = b.quiet ? 1.6 : 0.15;
             b.vx *= Math.exp(-dragL * dt);
@@ -2505,12 +2576,15 @@
               const c = contacts[k];
               const a = c.a;
               const b = c.b;
+              // "supported" = the contact normal opposes GRAVITY (not just
+              // +y): under device tilt the downhill wall carries load too.
+              const sup = c.nx * gDirX + c.ny * gDirY;
               if (!b) {
-                if (c.ny > 0.6) a.supported = true;
+                if (sup > 0.6) a.supported = true;
                 a.groundedNow = true; // touching the floor or a wall
               } else {
-                if (c.ny > 0.6) a.supported = true;
-                else if (c.ny < -0.6) b.supported = true;
+                if (sup > 0.6) a.supported = true;
+                else if (sup < -0.6) b.supported = true;
                 if (a.state === 0 && b.state > 0 && b.grounded) {
                   a.groundedNow = true;
                 }
@@ -2609,8 +2683,14 @@
           let doomed = 0;
           let wSum = 0;
           let wN = 0;
+          let cxSum = 0;
+          let cyMin = 1;
+          let spdMax = 0;
           for (let i = 0; i < bodies.length; i++) {
             const b = bodies[i];
+            cxSum += b.x / Math.max(1, canvas.width);
+            cyMin = Math.min(cyMin, b.y / Math.max(1, H));
+            spdMax = Math.max(spdMax, Math.hypot(b.vx, b.vy) / Math.max(1, H));
             if (b.state === 1) slp++;
             else if (b.state === 2) frz++;
             if (b.supported) sup++;
@@ -2637,6 +2717,8 @@
           }
           return {
             n: bodies.length,
+            wounded: peeledCellsLive, // cells not yet fully repaired
+            t: +simTime.toFixed(2),
             active: physActiveNow,
             contacts: physContactsNow,
             supported: sup,
@@ -2646,6 +2728,11 @@
             healedAway: healed, // heal-coupled fast fade (repair #5)
             doomed, // soft-cap fade valve (repair #5)
             wMean: wN ? +(wSum / wN).toFixed(3) : 0,
+            // pile shape/energy metrics (tilt verification, repair #6)
+            cxMean: bodies.length ? +(cxSum / bodies.length).toFixed(3) : 0,
+            topY: bodies.length ? +cyMin.toFixed(3) : 1,
+            vMax: +spdMax.toFixed(3),
+            gravDeg: +((gravAng * 180) / Math.PI).toFixed(2),
             thresh: +(15 * sc * (15 * sc)).toFixed(2),
             ms: +physMsAvg.toFixed(3),
             step: physStepCount,
@@ -2747,6 +2834,114 @@
         canvas.addEventListener("pointerup", endDrag);
         canvas.addEventListener("pointercancel", endDrag);
         window.addEventListener("blur", endDrag);
+
+        /* ------------------------------------------------------------------
+           Device tilt (mobile, secondary input) — gamma (left/right roll)
+           tilts the SOLVER'S GRAVITY VECTOR, so the pile slides downhill and
+           gathers against the lower wall. Desktop / permission denied /
+           unsupported: no events arrive and everything behaves as before.
+           Recipe (permission flow) follows fable5_senkohanabi.html.
+        ------------------------------------------------------------------ */
+
+        // tilt is an external input like the pointer: verification runs
+        // (freeze / prewarm / settle / fakesource) ignore it entirely so the
+        // deterministic frames stay deterministic.
+        const TILT_INPUT_OK =
+          TILT_TEST || (!FREEZE && PREWARM === 0 && SETTLE === 0 && !FAKE);
+        let tiltActive = false;
+        let tiltGammaDeg = 0; // raw-ish, clamped ±40°
+        let gravAng = 0; // eased gravity tilt actually used by the solver (rad)
+        let gravAngWake = 0; // angle at which the pile was last woken
+        let gDirX = 0; // gravity unit vector (screen space, y down)
+        let gDirY = 1;
+
+        function onDeviceOrientation(ev) {
+          if (!TILT_INPUT_OK) return;
+          if (ev.gamma == null) return;
+          tiltActive = true;
+          tiltGammaDeg = Math.max(-40, Math.min(40, ev.gamma));
+        }
+
+        let tiltRequested = false;
+        function maybeRequestTilt() {
+          if (tiltRequested || !TILT_INPUT_OK) return;
+          tiltRequested = true;
+          const DOE = window.DeviceOrientationEvent;
+          if (!DOE) return;
+          if (typeof DOE.requestPermission === "function") {
+            // iOS 13+: must be called from a user gesture (pointerdown)
+            DOE.requestPermission()
+              .then((res) => {
+                if (res === "granted") {
+                  window.addEventListener(
+                    "deviceorientation",
+                    onDeviceOrientation,
+                    true,
+                  );
+                }
+              })
+              .catch(() => {
+                /* denied / unavailable → pointer-only, no visible change */
+              });
+          }
+        }
+        canvas.addEventListener("pointerdown", maybeRequestTilt);
+        if (
+          TILT_INPUT_OK &&
+          window.DeviceOrientationEvent &&
+          typeof window.DeviceOrientationEvent.requestPermission !== "function"
+        ) {
+          window.addEventListener(
+            "deviceorientation",
+            onDeviceOrientation,
+            true,
+          );
+        }
+
+        // Gravity easing: ema toward the target angle + a hard rate limit
+        // (≤ 60°/s). A flick of the wrist must never teleport the field and
+        // blow the pile apart. When the direction has moved more than 3°
+        // since the last wake, the resting pile is woken QUIETLY (zero
+        // velocity, no restitution) so it flows downhill instead of
+        // clattering.
+        const TILT_MAX_ANG = 0.7; // 40° at slider 1.0
+        function updateGravityTilt(dt) {
+          const target =
+            TILT_INPUT_OK && tiltActive
+              ? Math.max(-1, Math.min(1, tiltGammaDeg / 35)) *
+                TILT_MAX_ANG *
+                state.tilt
+              : 0;
+          const k = 1 - Math.exp(-3.5 * dt);
+          let a = gravAng + (target - gravAng) * k;
+          const lim = 1.05 * dt; // rad/s cap
+          if (a > gravAng + lim) a = gravAng + lim;
+          else if (a < gravAng - lim) a = gravAng - lim;
+          gravAng = a;
+          gDirX = Math.sin(gravAng);
+          gDirY = Math.cos(gravAng);
+          frictionNow =
+            FRICTION *
+            (1 - 0.45 * Math.min(1, Math.abs(gravAng) / TILT_MAX_ANG));
+          if (Math.abs(gravAng - gravAngWake) > 0.052) {
+            gravAngWake = gravAng;
+            for (let i = 0; i < bodies.length; i++) {
+              if (bodies[i].state > 0) wakeBody(bodies[i], true);
+            }
+          }
+        }
+
+        // Test path for the tilt route (headless has no real sensor):
+        // window.__setTilt(deg) feeds the same handler a synthetic gamma.
+        window.__setTilt = (deg) => {
+          onDeviceOrientation({ gamma: deg });
+          return { gamma: tiltGammaDeg, gravDeg: +((gravAng * 180) / Math.PI).toFixed(2) };
+        };
+        window.__gravProbe = () => ({
+          gravDeg: +((gravAng * 180) / Math.PI).toFixed(2),
+          tiltActive,
+          enabled: TILT_INPUT_OK,
+        });
 
         /* ------------------------------------------------------------------
            Render passes
@@ -2931,7 +3126,10 @@
           readout.textContent =
             `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${canvas.height}` +
             ` / 剥離 ${peeledCells} セル / ボディ ${bodies.length} (堆積 ${sleeping})` +
-            ` / 物理 ${physMsAvg.toFixed(2)}ms (可動 ${physActiveNow}・接触 ${physContactsNow})`;
+            ` / 物理 ${physMsAvg.toFixed(2)}ms (可動 ${physActiveNow}・接触 ${physContactsNow})` +
+            (tiltActive
+              ? ` / 傾き ${((gravAng * 180) / Math.PI).toFixed(0)}°`
+              : "");
         }
 
         function frame(now) {
@@ -2948,14 +3146,18 @@
           renderScene();
           processPointerQueue();
 
-          accum += dt;
-          let steps = 0;
-          while (accum >= SDT && steps < 4) {
-            simStep(SDT);
-            accum -= SDT;
-            steps++;
+          if (ffBusy) {
+            accum = 0; // a scripted fast-forward owns the clock
+          } else {
+            accum += dt;
+            let steps = 0;
+            while (accum >= SDT && steps < 4) {
+              simStep(SDT);
+              accum -= SDT;
+              steps++;
+            }
+            if (accum > 4 * SDT) accum = 0;
           }
-          if (accum > 4 * SDT) accum = 0;
 
           flushSnapshot();
           renderBw();
@@ -3014,6 +3216,53 @@
             }
           }
           glSync();
+        }
+
+        // ?settle=<sec>: event-free deterministic fast-forward AFTER prewarm.
+        // Samples (simTime, wounded cells, bodies, resting bodies) twice a
+        // second into window.__settleLog — the machine evidence that healing
+        // and the pile die out together instead of the pile outliving the
+        // repair (repair #6).
+        window.__settleLog = [];
+        let ffBusy = false;
+        async function fastForward(sec, log) {
+          ffBusy = true; // the rAF loop must not advance time in parallel
+          const steps = Math.round(sec / SDT);
+          for (let i = 0; i < steps; i++) {
+            simStep(SDT);
+            if (pendingGen.length) {
+              if (!FAKE) haveVideo = uploadVideoFrame();
+              renderScene();
+              flushSnapshot();
+            }
+            if (log && i % 30 === 29) {
+              let resting = 0;
+              for (let k = 0; k < bodies.length; k++) {
+                if (bodies[k].state > 0) resting++;
+              }
+              log.push({
+                t: +simTime.toFixed(2),
+                wounded: peeledCellsLive,
+                bodies: bodies.length,
+                resting,
+              });
+            }
+            if (i % 120 === 119) {
+              glSync();
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+          }
+          glSync();
+          ffBusy = false;
+        }
+        // Verification aid: advance the simulation by N seconds of fixed-dt
+        // steps on demand (software rendering is far slower than real time,
+        // so live observation of slow phenomena — tilt flow, weathering — is
+        // impossible otherwise). No effect on the artwork itself.
+        window.__fastForward = (sec) =>
+          fastForward(Math.min(60, Math.max(0, Number(sec) || 0)), null);
+        async function runSettle() {
+          await fastForward(SETTLE, window.__settleLog);
         }
 
         /* ------------------------------------------------------------------
@@ -3137,6 +3386,7 @@
             }
             await runPrewarm();
           }
+          if (SETTLE > 0) await runSettle();
           requestAnimationFrame(frame);
         }
 
