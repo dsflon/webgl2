@@ -1,5 +1,20 @@
 [
   {
+    "slug": "fable5_itsuwari-hyomen",
+    "file": "fable5_itsuwari-hyomen.html",
+    "title": "偽りの表面",
+    "date": "2026-07-31",
+    "desc": "カメラにはいつも通りの自分が映る。しかしそれは偽りで、クリックやタップした所から表面がブロックとして剥がれ、回転しながら崩れ落ちて画面下に積もる。穴からは本当の世界 — 輪郭と粗い明暗だけの白黒の世界 — が覗く。剥がれた破片は剥離した瞬間の色を凍結したまま風化し、放置すると表面は静かに自己修復して、偽りがまた戻ってくる。Fable 5 で制作。",
+    "model": "Fable 5",
+    "tags": [
+      "WebGL2",
+      "Rigid Body",
+      "Interactive"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_itsuwari-hyomen.jpg"
+  },
+  {
     "slug": "fable5_kirie-portrait",
     "file": "fable5_kirie-portrait.html",
     "title": "切り紙の積層ポートレート",

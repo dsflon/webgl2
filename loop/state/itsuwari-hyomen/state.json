@@ -1,7 +1,7 @@
 {
   "slug": "itsuwari-hyomen",
   "theme": "偽りの表面 — Webカメラ映像は実はブロックの集合体で、クリック/タップで剥離して物理演算で崩れ落ち、背後の白黒輪郭の世界が露出する",
-  "status": "runtime_ok",
+  "status": "aesthetic_ok",
   "attempts": {
     "brief": 1,
     "order": 1,
@@ -19,5 +19,5 @@
     "wall_minutes": 77
   },
   "pr_url": null,
-  "updated_at": "2026-07-31T08:38:08.502Z"
+  "updated_at": "2026-07-31T08:49:50.045Z"
 }
