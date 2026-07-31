@@ -20,8 +20,10 @@
     3. 各ブロックは剥離した瞬間の映像を凍結して携える — 剥離イベント時のみ sceneT を
        GPU 内コピー(copyTexSubImage2D)でスナップショット凍結。世代 3 枚を参照
        カウント付きで共有し、ブロックは生成時の世代を元位置 UV で参照する。
-    2. 剥離ブロックは回転を伴う剛体として落下し床に山なりに堆積 — CPU 物理
-       (重力+空気抵抗+列ハイトマップ着地+安息角緩和+スリープ)、インスタンス描画。
+    2. 剥離ブロックは回転を伴う剛体として落下し床に山なりに堆積 — CPU の接触ベース
+       剛体物理(均一グリッド broadphase+OBB SAT+逐次インパルス+ウォームスタート
+       +摩擦+スリープ/深部凍結)、インスタンス描画。斜面で傾いて止まる・角で
+       立ったブロックが倒れる、が接触点トルクから自然に出る。
     5. 崩壊は部分的 — クリックは手のひら大。支持喪失伝播(ストレス場の幾何減衰)で
        周縁セルが時間差で追い崩れ、必ず有限半径で止まる。乱数は cell-hash。
     4. 裏世界は彩度ゼロ — ライブ輝度の sobel 輪郭+3〜4 段の無彩ポスタライズを
@@ -34,9 +36,12 @@
     sceneT ───────────► [P1 bw   ] sobel+無彩ポスタライズ  bwT     RGBA8 長辺≤512
     sceneT ─(剥離時)──► [P2 snap ] copyTexSubImage2D      snapT×3 RGBA8 sceneT同寸
     [CPU mask] グリッド(基準 82列、セル上限 12000)剥離/伝播/修復 → R8 一方向転送
-    [CPU phys] 剥離セル→剛体ボディ(≤2400)。列ハイトマップ堆積(安息角緩和+
-               斜面スライド)+スリープ+寿命。支えが痩せた分はスリープのまま
-               静かに沈降(大きな崩落のみ無反発の沈降モードで再落下)
+    [CPU phys] 剥離セル→剛体ボディ(≤2400)。接触ソルバ(Matter.js と同構成を
+               正方形専用に内蔵): 均一グリッド broadphase → OBB-OBB SAT+
+               参照面クリッピング(接触≤2点) → 逐次インパルス(低反発+クーロン
+               摩擦+ウォームスタート、速度4回)+線形位置補正(slop 付き、3回)
+               → スリープ → 深部凍結(荷重下の長期スリープはソルバ除外)。
+               風化で支えが消えた近傍は局所ウェイクで静かに沈降(無反発+高減衰)
     [P3 comp ] bwT 基層+マスクで無傷領域だけ sceneT。穴の縁に厚みの影と欠けの縁
     [P4 block] instanced quads(snapT 世代参照+風化の退色+回転連動の
                ベベル照明・面グラデ・サイズ/明度ジッタ+ソフトドロップシャドウ)→ canvas
@@ -961,7 +966,6 @@
           uniform sampler2D uScene;
           uniform sampler2D uBw;
           uniform sampler2D uMask;
-          uniform sampler2D uHeightMap;
           uniform vec2 uGrid;
           uniform float uDepth;
           uniform int uDebug;
@@ -1060,10 +1064,8 @@
               return;
             }
             if (uDebug == 3) {
-              // pile silhouette (column heightmap) on a dark stage
-              float hcol = texture(uHeightMap, vec2(vUv.x, 0.5)).r;
-              vec3 c = vUv.y < hcol ? vec3(0.17, 0.16, 0.19) : vec3(0.055, 0.055, 0.065);
-              fragColor = vec4(c, 1.0);
+              // dark stage — the instanced blocks (gen-tinted) draw on top
+              fragColor = vec4(0.055, 0.055, 0.065, 1.0);
               return;
             }
             if (uDebug == 4) {
@@ -1251,7 +1253,6 @@
             "uScene",
             "uBw",
             "uMask",
-            "uHeightMap",
             "uGrid",
             "uDepth",
             "uDebug",
@@ -1370,13 +1371,6 @@
         let maskTex = null;
         let maskDirty = true;
 
-        // Column heightmap for deposition (kotonoha 簡略方式)
-        let HCOLS = 8;
-        let colH = new Float32Array(8);
-        let heightU8 = new Uint8Array(8);
-        let heightTex = null;
-        let heightDirty = true;
-
         // Rigid bodies (invariant #2)
         const MAX_BODIES = 2400;
         const FLOATS_PER_INSTANCE = 10;
@@ -1455,15 +1449,10 @@
           maskDirty = true;
           if (maskTex) gl.deleteTexture(maskTex);
           maskTex = createTexture(gridW, gridH, gl.R8, gl.RED, gl.LINEAR);
-          HCOLS = gw * 2;
-          colH = new Float32Array(HCOLS);
-          heightU8 = new Uint8Array(HCOLS);
-          heightDirty = true;
-          if (heightTex) gl.deleteTexture(heightTex);
-          heightTex = createTexture(HCOLS, 1, gl.R8, gl.RED, gl.LINEAR);
           // bodies reference cell geometry of the old grid — clear them
           bodies.length = 0;
           pendingGen.length = 0;
+          wsMap.clear();
           for (let k = 0; k < 3; k++) snapRefs[k] = 0;
           peeledCells = 0;
         }
@@ -1601,33 +1590,92 @@
         }
 
         /* ------------------------------------------------------------------
-           Rigid bodies — gravity, column-heightmap deposition, sleep,
-           weathering (invariants #2 #6)
+           Rigid bodies — contact-based mini engine (invariants #2 #6).
+           Matter.js と同構成(均一グリッド broadphase → OBB-OBB SAT+参照面
+           クリッピング → 逐次インパルス+ウォームスタート → 線形位置補正 →
+           スリープ/深部凍結)を「ほぼ均一サイズの正方形」専用に内蔵実装。
+           外部ライブラリは読み込まない(単一自己完結 HTML 規約)。
+           決定性: 固定 dt、cell-hash 乱数、ボディ配列順の反復。
         ------------------------------------------------------------------ */
 
-        function subtractContrib(b, amount) {
-          if (amount <= 0 || b.c0 < 0) return;
-          for (let c = b.c0; c <= b.c1; c++) {
-            colH[c] = Math.max(0, colH[c] - amount);
+        const VEL_ITERS = 4; // sequential-impulse velocity iterations
+        const POS_ITERS = 3; // linear position-correction iterations
+        const FRICTION = 0.5; // Coulomb μ (Matter.js Stack 帯: 0.4–0.6)
+        const MAX_ACTIVE = 600; // non-sleeping solver bodies (force-sleep over)
+        const SLEEP_STEPS = 22; // low-motion steps before sleeping (~0.37 s)
+        const FREEZE_AFTER = 2.0; // s asleep + loaded from above → frozen
+        let bodyIdSeq = 1;
+        let physStepCount = 0;
+        let physMsAvg = 0;
+        let physActiveNow = 0;
+        let physContactsNow = 0;
+
+        // Warm-start cache: accumulated normal/tangent impulses per body
+        // pair, rematched by contact-point proximity next step. Essential
+        // for a pile that rests WITHOUT jitter (Matter.js does the same).
+        const wsMap = new Map();
+        function pairKey(ia, ib) {
+          return ia * 67108864 + ib; // ids stay far below 2^26
+        }
+
+        function wakeBody(b, quiet) {
+          if (b.state === 0) return;
+          b.state = 0;
+          b.quiet = !!quiet; // quiet = weathering subsidence: no bounce
+          b.sleepCount = 0;
+          b.sleepT = 0;
+          b.motionS = 1e4;
+        }
+
+        function sleepBody(b) {
+          b.state = 1;
+          b.vx = 0;
+          b.vy = 0;
+          b.angv = 0; // keep b.ang — tilted rest poses persist (the look)
+          b.quiet = false;
+          b.sleepT = 0;
+          b.sleepCount = 0;
+          b.pushX = 0;
+          b.pushY = 0;
+          if (b.wRate === 0) {
+            const life =
+              (70 - 62 * Math.pow(state.weather, 1.2)) *
+              (0.7 +
+                0.6 *
+                  cellHash(Math.round(b.u * 997), Math.round(b.v * 991), 77));
+            b.wRate = 1 / Math.max(2, life);
+            // pile-height bound: blocks resting high on a tall pile fade 3×
+            if (b.y < canvas.height * 0.5) b.wRate *= 3;
           }
-          heightDirty = true;
         }
 
         function removeBody(idx) {
-          const b = bodies[idx];
-          snapRefs[b.gen] = Math.max(0, snapRefs[b.gen] - 1);
-          subtractContrib(b, b.hLeft);
+          const rb = bodies[idx];
+          snapRefs[rb.gen] = Math.max(0, rb ? snapRefs[rb.gen] - 1 : 0);
           bodies[idx] = bodies[bodies.length - 1];
           bodies.pop();
-          // blocks above the removed one are caught by the per-step
-          // resettle check (quiet subsidence) — no mass wake, no kicks
+          // the column above loses its support: wake it QUIETLY (zero
+          // velocity, no restitution) so the pile subsides without dancing.
+          for (let k = 0; k < bodies.length; k++) {
+            const b = bodies[k];
+            if (b.state === 0) continue;
+            const dx = Math.abs(b.x - rb.x);
+            const dy = rb.y - b.y; // >0 → b sits above the removed block
+            if (
+              dx < (b.size + rb.size) * 0.8 &&
+              dy > -rb.size * 0.4 &&
+              dy < rb.size * 2.2
+            ) {
+              wakeBody(b, true);
+            }
+          }
         }
 
         function forceExpireOldest() {
           let idx = -1;
           let oldest = Infinity;
           for (let k = 0; k < bodies.length; k++) {
-            if (bodies[k].asleep && bodies[k].born < oldest) {
+            if (bodies[k].state > 0 && bodies[k].born < oldest) {
               oldest = bodies[k].born;
               idx = k;
             }
@@ -1648,6 +1696,7 @@
           const tv = state.tumble;
           const sc = H / 750;
           const b = {
+            id: bodyIdSeq++,
             x: (cx + 0.5) * cellW,
             y: H - (cy + 0.5) * cellH,
             vx: (r1 - 0.5) * 2 * (30 + 170 * tv) * sc,
@@ -1655,182 +1704,686 @@
             ang: 0,
             angv: (r3 - 0.5) * 2 * (1.0 + 5.5 * tv),
             size,
+            h: size * 0.5,
+            invI: 6 / (size * size), // unit-mass square: I = m s² / 6
             u: (cx + 0.5) / gridW,
             v: (cy + 0.5) / gridH,
             uhx: (0.5 / gridW) * 0.98,
             uhy: (0.5 / gridH) * 0.98,
             gen: 0,
-            asleep: false,
-            settle: false,
-            bounces: 0,
-            slides: 0,
+            state: 0, // 0 active / 1 sleeping / 2 frozen (static deep pile)
+            quiet: false,
+            supported: false,
+            sleepCount: 0,
+            sleepT: 0,
+            motionS: 1e4,
+            pushX: 0,
+            pushY: 0,
             weather: 0,
             wRate: 0,
-            c0: -1,
-            c1: -1,
-            hAdd: 0,
-            hLeft: 0,
             born: simTime,
           };
           bodies.push(b);
           pendingGen.push(b);
         }
 
-        function physicsStep(dt) {
+        /* ---- broadphase: uniform grid buckets (cell ≥ max block diagonal).
+           Every body registers at its centroid; active bodies query the
+           surrounding 3×3 buckets for pair candidates. ---- */
+        const bpMap = new Map();
+        let bpCell = 32;
+        function bpKey(gx, gy) {
+          return (gx + 256) * 65536 + (gy + 256);
+        }
+        function buildBroadphase() {
+          bpMap.clear();
+          // max size = 1.14 cell → max diagonal ≈ 1.62 cell < 1.65 cell
+          bpCell = Math.max(8, Math.min(cellW, cellH) * 1.65);
+          for (let i = 0; i < bodies.length; i++) {
+            const b = bodies[i];
+            const key = bpKey(
+              Math.floor(b.x / bpCell),
+              Math.floor(b.y / bpCell),
+            );
+            let arr = bpMap.get(key);
+            if (!arr) {
+              arr = [];
+              bpMap.set(key, arr);
+            }
+            arr.push(i);
+          }
+        }
+
+        /* ---- narrowphase: OBB-OBB SAT with reference-face clipping
+           (Box2D-lite scheme, simplified for squares: |RotAᵀRotB| has one
+           independent entry K = |cosΔ| + |sinΔ|). Fills CN (normal A→B) and
+           CP (x, y, penetration) × up to 2; returns the point count. ---- */
+        const CP = new Float64Array(6);
+        const CN = new Float64Array(2);
+        const clipBuf = new Float64Array(4);
+
+        function clipSegment(buf, nx, ny, offset) {
+          const x0 = buf[0];
+          const y0 = buf[1];
+          const x1 = buf[2];
+          const y1 = buf[3];
+          const d0 = nx * x0 + ny * y0 - offset;
+          const d1 = nx * x1 + ny * y1 - offset;
+          let cnt = 0;
+          if (d0 <= 0) {
+            buf[cnt * 2] = x0;
+            buf[cnt * 2 + 1] = y0;
+            cnt++;
+          }
+          if (d1 <= 0) {
+            buf[cnt * 2] = x1;
+            buf[cnt * 2 + 1] = y1;
+            cnt++;
+          }
+          if (d0 * d1 < 0 && cnt < 2) {
+            const t = d0 / (d0 - d1);
+            buf[cnt * 2] = x0 + t * (x1 - x0);
+            buf[cnt * 2 + 1] = y0 + t * (y1 - y0);
+            cnt++;
+          }
+          return cnt;
+        }
+
+        // The face of the incident box most anti-parallel to n, in world.
+        function incidentEdge(h, px, py, cb, sb, nx, ny) {
+          const nbx = -(nx * cb + ny * sb);
+          const nby = -(-nx * sb + ny * cb);
+          let ax;
+          let ay;
+          let bx;
+          let by;
+          if (Math.abs(nbx) > Math.abs(nby)) {
+            if (nbx >= 0) {
+              ax = h; ay = -h; bx = h; by = h;
+            } else {
+              ax = -h; ay = h; bx = -h; by = -h;
+            }
+          } else if (nby >= 0) {
+            ax = h; ay = h; bx = -h; by = h;
+          } else {
+            ax = -h; ay = -h; bx = h; by = -h;
+          }
+          clipBuf[0] = px + ax * cb - ay * sb;
+          clipBuf[1] = py + ax * sb + ay * cb;
+          clipBuf[2] = px + bx * cb - by * sb;
+          clipBuf[3] = py + bx * sb + by * cb;
+        }
+
+        function collideBoxes(A, B) {
+          const ca = Math.cos(A.ang);
+          const sa = Math.sin(A.ang);
+          const cb = Math.cos(B.ang);
+          const sb = Math.sin(B.ang);
+          const hA = A.h;
+          const hB = B.h;
+          const dpx = B.x - A.x;
+          const dpy = B.y - A.y;
+          const dAx = dpx * ca + dpy * sa;
+          const dAy = -dpx * sa + dpy * ca;
+          const dBx = dpx * cb + dpy * sb;
+          const dBy = -dpx * sb + dpy * cb;
+          const K =
+            Math.abs(ca * cb + sa * sb) + Math.abs(sa * cb - ca * sb) + 2e-6;
+          const fAx = Math.abs(dAx) - hA - hB * K;
+          if (fAx > 0) return 0;
+          const fAy = Math.abs(dAy) - hA - hB * K;
+          if (fAy > 0) return 0;
+          const fBx = Math.abs(dBx) - hB - hA * K;
+          if (fBx > 0) return 0;
+          const fBy = Math.abs(dBy) - hB - hA * K;
+          if (fBy > 0) return 0;
+
+          // min-penetration axis; relative tolerance keeps face choice
+          // coherent frame-to-frame (Box2D-lite constants)
+          let axis = 0;
+          let sep = fAx;
+          let nx = dAx > 0 ? ca : -ca;
+          let ny = dAx > 0 ? sa : -sa;
+          const REL = 0.95;
+          const ABS = 0.01;
+          if (fAy > REL * sep + ABS * hA) {
+            axis = 1;
+            sep = fAy;
+            nx = dAy > 0 ? -sa : sa;
+            ny = dAy > 0 ? ca : -ca;
+          }
+          if (fBx > REL * sep + ABS * hB) {
+            axis = 2;
+            sep = fBx;
+            nx = dBx > 0 ? cb : -cb;
+            ny = dBx > 0 ? sb : -sb;
+          }
+          if (fBy > REL * sep + ABS * hB) {
+            axis = 3;
+            sep = fBy;
+            nx = dBy > 0 ? -sb : sb;
+            ny = dBy > 0 ? cb : -cb;
+          }
+
+          // reference box owns the axis; clip the other's incident face
+          let fnx;
+          let fny;
+          let refPx;
+          let refPy;
+          let refH;
+          let refC;
+          let refS;
+          if (axis < 2) {
+            fnx = nx;
+            fny = ny;
+            refPx = A.x;
+            refPy = A.y;
+            refH = hA;
+            refC = ca;
+            refS = sa;
+            incidentEdge(hB, B.x, B.y, cb, sb, fnx, fny);
+          } else {
+            fnx = -nx;
+            fny = -ny;
+            refPx = B.x;
+            refPy = B.y;
+            refH = hB;
+            refC = cb;
+            refS = sb;
+            incidentEdge(hA, A.x, A.y, ca, sa, fnx, fny);
+          }
+          const front = fnx * refPx + fny * refPy + refH;
+          const sdx = -fny;
+          const sdy = fnx;
+          const sideOff = sdx * refPx + sdy * refPy;
+          if (clipSegment(clipBuf, -sdx, -sdy, -sideOff + refH) < 2) return 0;
+          if (clipSegment(clipBuf, sdx, sdy, sideOff + refH) < 2) return 0;
+
+          let np = 0;
+          for (let k = 0; k < 2; k++) {
+            const px = clipBuf[k * 2];
+            const py = clipBuf[k * 2 + 1];
+            const s2 = fnx * px + fny * py - front;
+            if (s2 <= 0) {
+              CP[np * 3] = px;
+              CP[np * 3 + 1] = py;
+              CP[np * 3 + 2] = -s2;
+              np++;
+            }
+          }
+          CN[0] = nx;
+          CN[1] = ny;
+          return np;
+        }
+
+        /* ---- contacts + sequential-impulse solver ---- */
+        const contacts = [];
+
+        function restitutionNow(a, b) {
+          if (a.quiet || (b && b.quiet)) return 0;
+          return 0.06 + 0.09 * state.tumble; // Matter Stack 帯 0.05–0.15
+        }
+
+        function makeContact(A, B, np, wallId) {
+          const c = {
+            a: A,
+            b: B,
+            nx: CN[0],
+            ny: CN[1],
+            dynA: A.state === 0,
+            dynB: B ? B.state === 0 : false,
+            e: restitutionNow(A, B),
+            key: pairKey(A.id, B ? B.id : 67108860 + wallId),
+            p0: null,
+            p1: null,
+          };
+          const ws = wsMap.get(c.key);
+          for (let k = 0; k < np; k++) {
+            const px = CP[k * 3];
+            const py = CP[k * 3 + 1];
+            const pt = {
+              px,
+              py,
+              pen: CP[k * 3 + 2],
+              rax: px - A.x,
+              ray: py - A.y,
+              rbx: B ? px - B.x : 0,
+              rby: B ? py - B.y : 0,
+              mN: 0,
+              mT: 0,
+              bias: 0,
+              jn: 0,
+              jt: 0,
+            };
+            if (ws) {
+              // proximity rematch (squares move slowly relative to size)
+              const tol2 = A.h * A.h * 0.16;
+              for (let m = 0; m < ws.p.length; m++) {
+                const s = ws.p[m];
+                const dx = s.px - px;
+                const dy = s.py - py;
+                if (dx * dx + dy * dy < tol2) {
+                  pt.jn = s.jn;
+                  pt.jt = s.jt;
+                  break;
+                }
+              }
+            }
+            if (k === 0) c.p0 = pt;
+            else c.p1 = pt;
+          }
+          contacts.push(c);
+        }
+
+        // wall ids: 0 floor, 1 left, 2 right (static half-planes, same solver)
+        const bcCorners = new Float64Array(8);
+        function boundaryContacts(A, W, H) {
+          const axc = Math.cos(A.ang) * A.h;
+          const axs = Math.sin(A.ang) * A.h;
+          // corners: (±a ±b) where a=(axc,axs), b=(-axs,axc)
+          const corners = bcCorners;
+          corners[0] = A.x + axc - axs;
+          corners[1] = A.y + axs + axc;
+          corners[2] = A.x + axc + axs;
+          corners[3] = A.y + axs - axc;
+          corners[4] = A.x - axc - axs;
+          corners[5] = A.y - axs + axc;
+          corners[6] = A.x - axc + axs;
+          corners[7] = A.y - axs - axc;
+          for (let wall = 0; wall < 3; wall++) {
+            let nx = 0;
+            let ny = 0;
+            let i1 = -1;
+            let i2 = -1;
+            let p1 = 0;
+            let p2 = 0;
+            for (let k = 0; k < 4; k++) {
+              const cx = corners[k * 2];
+              const cy = corners[k * 2 + 1];
+              let pen;
+              if (wall === 0) pen = cy - H;
+              else if (wall === 1) pen = -cx;
+              else pen = cx - W;
+              if (pen > 0) {
+                if (pen > p1) {
+                  p2 = p1;
+                  i2 = i1;
+                  p1 = pen;
+                  i1 = k;
+                } else if (pen > p2) {
+                  p2 = pen;
+                  i2 = k;
+                }
+              }
+            }
+            if (i1 < 0) continue;
+            if (wall === 0) {
+              nx = 0;
+              ny = 1;
+            } else if (wall === 1) {
+              nx = -1;
+              ny = 0;
+            } else {
+              nx = 1;
+              ny = 0;
+            }
+            let np = 0;
+            CP[0] = corners[i1 * 2];
+            CP[1] = corners[i1 * 2 + 1];
+            CP[2] = p1;
+            np = 1;
+            if (i2 >= 0) {
+              CP[3] = corners[i2 * 2];
+              CP[4] = corners[i2 * 2 + 1];
+              CP[5] = p2;
+              np = 2;
+            }
+            CN[0] = nx;
+            CN[1] = ny;
+            makeContact(A, null, np, wall);
+          }
+        }
+
+        function genContacts(sc) {
+          contacts.length = 0;
           const W = canvas.width;
           const H = canvas.height;
-          const grav = 2.6 * H;
-          const colWpx = W / HCOLS;
-          for (let bi = bodies.length - 1; bi >= 0; bi--) {
-            const b = bodies[bi];
-            if (b.asleep) {
-              // resettle: if the pile under this block has sunk (weathering
-              // shrink of blocks below, relaxation spreading the pile), the
-              // block would hover in mid-air. Small gaps are absorbed by a
-              // QUIET SUBSIDENCE — the block stays asleep and its position
-              // eases down toward the support (no physics, no bounce, no
-              // spin: the pile thins and settles silently). Only a real
-              // void (a whole missing layer) re-enters physics, and then in
-              // settle mode: it drops straight, lands and sleeps without
-              // bouncing, rolling or spinning.
-              if (b.c0 >= 0) {
-                let support = 0;
-                for (let c = b.c0; c <= b.c1; c++) {
-                  const hh = colH[c] - b.hLeft;
-                  if (hh > support) support = hh;
-                }
-                const he2 =
-                  b.size *
-                  0.5 *
-                  (Math.abs(Math.cos(b.ang)) + Math.abs(Math.sin(b.ang)));
-                const gap = H - Math.max(0, support) - (b.y + he2);
-                if (gap > b.size * 1.6) {
-                  subtractContrib(b, b.hLeft);
-                  b.hLeft = 0;
-                  b.c0 = -1;
-                  b.asleep = false;
-                  b.settle = true; // silent drop: no bounce / roll / spin
-                  b.bounces = 2;
-                  b.slides = 8;
-                  b.vx = 0;
-                  b.vy = 0;
-                  b.angv = 0;
-                  continue;
-                }
-                if (gap > 0.5) {
-                  b.y += gap * Math.min(1, dt * 6);
+          const wakeV = 55 * sc;
+          for (let i = 0; i < bodies.length; i++) {
+            const Q = bodies[i];
+            if (Q.state !== 0) continue;
+            const gx = Math.floor(Q.x / bpCell);
+            const gy = Math.floor(Q.y / bpCell);
+            for (let oy = -1; oy <= 1; oy++) {
+              for (let ox = -1; ox <= 1; ox++) {
+                const arr = bpMap.get(bpKey(gx + ox, gy + oy));
+                if (!arr) continue;
+                for (let k = 0; k < arr.length; k++) {
+                  const j = arr[k];
+                  if (j === i) continue;
+                  const P = bodies[j];
+                  if (P.state === 0 && j < i) continue; // pair handled at j
+                  // canonical order by id → warm-start normals stay stable
+                  const A = P.id < Q.id ? P : Q;
+                  const B = P.id < Q.id ? Q : P;
+                  const rr = (A.h + B.h) * 1.4143;
+                  const ddx = B.x - A.x;
+                  const ddy = B.y - A.y;
+                  if (ddx * ddx + ddy * ddy > rr * rr) continue;
+                  const np = collideBoxes(A, B);
+                  if (np === 0) continue;
+                  // impact wake: a sleeping (not frozen) partner joins the
+                  // solve when actually hit — Matter's chained waking
+                  const S = A.state !== 0 ? A : B.state !== 0 ? B : null;
+                  if (S && S.state === 1) {
+                    const D = S === A ? B : A;
+                    const sp = Math.hypot(D.vx, D.vy) + Math.abs(D.angv) * D.h;
+                    if (sp > wakeV) wakeBody(S, false);
+                  }
+                  makeContact(A, B, np, 0);
                 }
               }
-              b.weather += dt * b.wRate;
-              if (b.weather > 0.62 && b.hLeft > 0) {
-                const targetLeft =
-                  b.hAdd * Math.max(0, 1 - (b.weather - 0.62) / 0.38);
-                if (targetLeft < b.hLeft) {
-                  subtractContrib(b, b.hLeft - targetLeft);
-                  b.hLeft = targetLeft;
-                }
-              }
-              if (b.weather >= 1) removeBody(bi);
-              continue;
             }
-            b.vy += grav * dt;
-            b.vx *= Math.exp(-0.5 * dt);
-            if (b.vy > 2.4 * H) b.vy = 2.4 * H;
+            boundaryContacts(Q, W, H);
+          }
+          physContactsNow = contacts.length;
+        }
+
+        function prestepContact(c, restThreshV) {
+          const a = c.a;
+          const b = c.b;
+          c.dynA = a.state === 0;
+          c.dynB = b ? b.state === 0 : false;
+          const iMa = c.dynA ? 1 : 0;
+          const iIa = c.dynA ? a.invI : 0;
+          const iMb = c.dynB ? 1 : 0;
+          const iIb = c.dynB && b ? b.invI : 0;
+          c.iMa = iMa;
+          c.iIa = iIa;
+          c.iMb = iMb;
+          c.iIb = iIb;
+          const nx = c.nx;
+          const ny = c.ny;
+          const tx = -ny;
+          const ty = nx;
+          for (let k = 0; k < 2; k++) {
+            const pt = k === 0 ? c.p0 : c.p1;
+            if (!pt) continue;
+            const rnA = pt.rax * ny - pt.ray * nx;
+            const rnB = pt.rbx * ny - pt.rby * nx;
+            pt.mN = 1 / (iMa + iMb + iIa * rnA * rnA + iIb * rnB * rnB);
+            const rtA = pt.rax * ty - pt.ray * tx;
+            const rtB = pt.rbx * ty - pt.rby * tx;
+            pt.mT = 1 / (iMa + iMb + iIa * rtA * rtA + iIb * rtB * rtB);
+            // restitution target from pre-solve approach speed
+            const vax = a.vx - a.angv * pt.ray;
+            const vay = a.vy + a.angv * pt.rax;
+            const vbx = b ? b.vx - b.angv * pt.rby : 0;
+            const vby = b ? b.vy + b.angv * pt.rbx : 0;
+            const vn = (vbx - vax) * nx + (vby - vay) * ny;
+            pt.bias = vn < -restThreshV ? -c.e * vn : 0;
+            // warm start
+            const Px = pt.jn * nx + pt.jt * tx;
+            const Py = pt.jn * ny + pt.jt * ty;
+            if (c.dynA) {
+              a.vx -= Px * iMa;
+              a.vy -= Py * iMa;
+              a.angv -= iIa * (pt.rax * Py - pt.ray * Px);
+            }
+            if (c.dynB) {
+              b.vx += Px * iMb;
+              b.vy += Py * iMb;
+              b.angv += iIb * (pt.rbx * Py - pt.rby * Px);
+            }
+          }
+        }
+
+        function solveContactVel(c) {
+          const a = c.a;
+          const b = c.b;
+          const nx = c.nx;
+          const ny = c.ny;
+          const tx = -ny;
+          const ty = nx;
+          for (let k = 0; k < 2; k++) {
+            const pt = k === 0 ? c.p0 : c.p1;
+            if (!pt) continue;
+            // normal impulse (accumulated, clamped ≥ 0)
+            let vax = a.vx - a.angv * pt.ray;
+            let vay = a.vy + a.angv * pt.rax;
+            let vbx = b ? b.vx - b.angv * pt.rby : 0;
+            let vby = b ? b.vy + b.angv * pt.rbx : 0;
+            const vn = (vbx - vax) * nx + (vby - vay) * ny;
+            let l = -pt.mN * (vn - pt.bias);
+            const jn0 = pt.jn;
+            pt.jn = Math.max(0, jn0 + l);
+            l = pt.jn - jn0;
+            let Px = l * nx;
+            let Py = l * ny;
+            if (c.dynA) {
+              a.vx -= Px * c.iMa;
+              a.vy -= Py * c.iMa;
+              a.angv -= c.iIa * (pt.rax * Py - pt.ray * Px);
+            }
+            if (c.dynB) {
+              b.vx += Px * c.iMb;
+              b.vy += Py * c.iMb;
+              b.angv += c.iIb * (pt.rbx * Py - pt.rby * Px);
+            }
+            // friction impulse (clamped to μ · jn — Coulomb cone)
+            vax = a.vx - a.angv * pt.ray;
+            vay = a.vy + a.angv * pt.rax;
+            vbx = b ? b.vx - b.angv * pt.rby : 0;
+            vby = b ? b.vy + b.angv * pt.rbx : 0;
+            const vt = (vbx - vax) * tx + (vby - vay) * ty;
+            let lt = -pt.mT * vt;
+            const maxF = FRICTION * pt.jn;
+            const jt0 = pt.jt;
+            pt.jt = Math.max(-maxF, Math.min(maxF, jt0 + lt));
+            lt = pt.jt - jt0;
+            Px = lt * tx;
+            Py = lt * ty;
+            if (c.dynA) {
+              a.vx -= Px * c.iMa;
+              a.vy -= Py * c.iMa;
+              a.angv -= c.iIa * (pt.rax * Py - pt.ray * Px);
+            }
+            if (c.dynB) {
+              b.vx += Px * c.iMb;
+              b.vy += Py * c.iMb;
+              b.angv += c.iIb * (pt.rbx * Py - pt.rby * Px);
+            }
+          }
+        }
+
+        // Linear position correction with slop (Matter.js scheme): pushes
+        // accumulate in pushX/Y and apply once, rotation untouched — the
+        // angular response lives in the velocity solve.
+        function solveContactPos(c) {
+          const a = c.a;
+          const b = c.b;
+          let pen = c.p0 ? c.p0.pen : 0;
+          if (c.p1 && c.p1.pen > pen) pen = c.p1.pen;
+          const nx = c.nx;
+          const ny = c.ny;
+          const bpx = b ? b.pushX : 0;
+          const bpy = b ? b.pushY : 0;
+          const remaining =
+            pen - ((bpx - a.pushX) * nx + (bpy - a.pushY) * ny);
+          const slop = Math.max(0.35, a.h * 0.08);
+          if (remaining <= slop) return;
+          const wA = c.dynA ? 1 : 0;
+          const wB = c.dynB ? 1 : 0;
+          const tot = wA + wB;
+          if (tot === 0) return;
+          const corr = (remaining - slop) * 0.42;
+          if (c.dynA) {
+            a.pushX -= (nx * corr * wA) / tot;
+            a.pushY -= (ny * corr * wA) / tot;
+          }
+          if (c.dynB) {
+            b.pushX += (nx * corr * wB) / tot;
+            b.pushY += (ny * corr * wB) / tot;
+          }
+        }
+
+        // Periodic geometric scan (every 15 steps): (a) sleeping/frozen
+        // bodies that lost their support wake quietly and subside;
+        // (b) long-sleeping bodies carrying load freeze (leave the solver).
+        function supportScan() {
+          buildBroadphase();
+          const H = canvas.height;
+          for (let i = 0; i < bodies.length; i++) {
+            const b = bodies[i];
+            if (b.state === 0) continue;
+            let hasSupport = b.y > H - b.size * 2.0; // on/near the floor
+            let load = false;
+            const gx = Math.floor(b.x / bpCell);
+            const gy = Math.floor(b.y / bpCell);
+            for (let oy = -1; oy <= 1 && !(hasSupport && load); oy++) {
+              for (let ox = -1; ox <= 1; ox++) {
+                const arr = bpMap.get(bpKey(gx + ox, gy + oy));
+                if (!arr) continue;
+                for (let k = 0; k < arr.length; k++) {
+                  const j = arr[k];
+                  if (j === i) continue;
+                  const o = bodies[j];
+                  const dx = Math.abs(o.x - b.x);
+                  if (dx > (o.h + b.h) * 1.25) continue;
+                  const dy = o.y - b.y; // + → o below b (y-down)
+                  const span = (o.h + b.h) * 1.6;
+                  if (dy > 0 && dy < span) hasSupport = true;
+                  else if (dy < 0 && -dy < span) load = true;
+                }
+              }
+            }
+            if (!hasSupport) {
+              wakeBody(b, true); // quiet subsidence, never a bounce
+            } else if (b.state === 1 && b.sleepT > FREEZE_AFTER && load) {
+              b.state = 2; // deep-pile freeze: drawn only, solver skips it
+            }
+          }
+        }
+
+        function physicsStep(dt) {
+          const t0 = performance.now();
+          const W = canvas.width;
+          const H = canvas.height;
+          const sc = H / 750;
+          physStepCount++;
+
+          // ---- weathering + lifetime (resting bodies only: falling chips
+          // stay fresh, matching the frozen-snapshot look)
+          for (let i = bodies.length - 1; i >= 0; i--) {
+            const b = bodies[i];
+            if (b.state > 0) {
+              b.sleepT += dt;
+              b.weather += dt * b.wRate;
+              if (b.weather >= 1) removeBody(i);
+            }
+          }
+
+          // ---- integrate active bodies (semi-implicit Euler)
+          let active = 0;
+          for (let i = 0; i < bodies.length; i++) {
+            const b = bodies[i];
+            b.supported = false;
+            if (b.state !== 0) continue;
+            active++;
+            b.vy += 2.6 * H * dt;
+            const dragL = b.quiet ? 2.4 : 0.5;
+            const dragA = b.quiet ? 1.6 : 0.15;
+            b.vx *= Math.exp(-dragL * dt);
+            b.angv *= Math.exp(-dragA * dt);
+            // anti-tunneling speed cap: one block edge per fixed step
+            const vmax = Math.min(2.4 * H, (b.size * 0.85) / SDT);
+            if (b.vy > vmax) b.vy = vmax;
+            else if (b.vy < -vmax) b.vy = -vmax;
+            if (b.vx > vmax) b.vx = vmax;
+            else if (b.vx < -vmax) b.vx = -vmax;
             b.x += b.vx * dt;
             b.y += b.vy * dt;
             b.ang += b.angv * dt;
-            b.angv *= Math.exp(-0.15 * dt);
-            const he =
-              b.size * 0.5 * (Math.abs(Math.cos(b.ang)) + Math.abs(Math.sin(b.ang)));
-            if (b.x < he) {
-              b.x = he;
-              b.vx = Math.abs(b.vx) * 0.4;
-            } else if (b.x > W - he) {
-              b.x = W - he;
-              b.vx = -Math.abs(b.vx) * 0.4;
+          }
+          physActiveNow = active;
+
+          if (active > 0) {
+            buildBroadphase();
+            genContacts(sc);
+            const restThreshV = 30 * sc;
+            for (let k = 0; k < contacts.length; k++) {
+              prestepContact(contacts[k], restThreshV);
             }
-            const c0 = Math.max(0, Math.floor((b.x - b.size * 0.45) / colWpx));
-            const c1 = Math.min(HCOLS - 1, Math.floor((b.x + b.size * 0.45) / colWpx));
-            let ground = 0;
-            for (let c = c0; c <= c1; c++) if (colH[c] > ground) ground = colH[c];
-            const floorY = H - ground;
-            if (b.y + he >= floorY && b.vy > 0) {
-              b.y = floorY - he;
-              const rest = 0.1 + 0.3 * state.tumble;
-              // local slope: does the pile drop off just beyond this block?
-              const cl = Math.max(0, c0 - 2);
-              const cr = Math.min(HCOLS - 1, c1 + 2);
-              const dropL = ground - colH[cl];
-              const dropR = ground - colH[cr];
-              const drop = Math.max(dropL, dropR);
-              if (!b.settle && b.vy > 0.28 * H && b.bounces < 2) {
-                b.vy = -b.vy * rest;
-                b.vx *= 0.55;
-                b.angv *= 0.5;
-                b.bounces++;
-              } else if (!b.settle && drop > b.size * 0.9 && b.slides < 8) {
-                // steep top: roll toward the lower flank instead of stacking
-                // (natural angle of repose — the pile spreads sideways)
-                const dir = dropL > dropR ? -1 : 1;
-                const r = cellHash(
-                  Math.round(b.x + b.slides * 37),
-                  Math.round(b.y),
-                  91,
-                );
-                const sc2 = H / 750;
-                b.vx = dir * (60 + 120 * r) * sc2;
-                b.vy = -(30 + 50 * r) * sc2;
-                b.angv = dir * (2.0 + 3.0 * r);
-                b.slides++;
-              } else {
-                b.asleep = true;
-                b.settle = false;
-                b.vx = 0;
-                b.vy = 0;
-                b.angv = 0;
-                b.hAdd = b.size * 0.72;
-                b.hLeft = b.hAdd;
-                b.c0 = c0;
-                b.c1 = c1;
-                for (let c = c0; c <= c1; c++) colH[c] += b.hAdd;
-                const life =
-                  (70 - 62 * Math.pow(state.weather, 1.2)) *
-                  (0.7 +
-                    0.6 *
-                      cellHash(
-                        Math.round(b.u * 997),
-                        Math.round(b.v * 991),
-                        77,
-                      ));
-                b.wRate = 1 / Math.max(2, life);
-                if (ground > 0.5 * H) b.wRate *= 3; // pile height stays bounded
-                heightDirty = true;
+            for (let it = 0; it < VEL_ITERS; it++) {
+              for (let k = 0; k < contacts.length; k++) {
+                solveContactVel(contacts[k]);
               }
             }
-          }
-          // angle-of-repose relaxation (CRAFT §E2 — no needle towers).
-          // rm/colW ≈ 0.7 gives a natural ~35° resting slope; two alternating
-          // sweeps per step let steep piles crumble sideways quickly.
-          const rm = Math.min(cellW, cellH) * 0.35;
-          const k = Math.min(1, dt * 10);
-          for (let pass = 0; pass < 2; pass++) {
-            const fwd = pass === 0;
-            for (let s = 0; s < HCOLS - 1; s++) {
-              const c = fwd ? s : HCOLS - 2 - s;
-              const d = colH[c] - colH[c + 1];
-              if (d > rm) {
-                const t = (d - rm) * 0.5 * k;
-                colH[c] -= t;
-                colH[c + 1] += t;
-                heightDirty = true;
-              } else if (d < -rm) {
-                const t = (-d - rm) * 0.5 * k;
-                colH[c] += t;
-                colH[c + 1] -= t;
-                heightDirty = true;
+            for (let it = 0; it < POS_ITERS; it++) {
+              for (let k = 0; k < contacts.length; k++) {
+                solveContactPos(contacts[k]);
               }
             }
+            // apply positional pushes + support flags + store warm impulses
+            for (let k = 0; k < contacts.length; k++) {
+              const c = contacts[k];
+              if (c.ny > 0.6) c.a.supported = true;
+              else if (c.b && c.ny < -0.6) c.b.supported = true;
+              const rec = { stamp: physStepCount, p: [] };
+              if (c.p0) {
+                rec.p.push({ px: c.p0.px, py: c.p0.py, jn: c.p0.jn, jt: c.p0.jt });
+              }
+              if (c.p1) {
+                rec.p.push({ px: c.p1.px, py: c.p1.py, jn: c.p1.jn, jt: c.p1.jt });
+              }
+              wsMap.set(c.key, rec);
+            }
+            for (let i = 0; i < bodies.length; i++) {
+              const b = bodies[i];
+              if (b.state !== 0) continue;
+              if (b.pushX !== 0 || b.pushY !== 0) {
+                b.x += b.pushX;
+                b.y += b.pushY;
+                b.pushX = 0;
+                b.pushY = 0;
+              }
+              // ---- sleep bookkeeping (Matter-style smoothed motion)
+              const motion =
+                b.vx * b.vx + b.vy * b.vy + b.angv * b.angv * b.size * b.size;
+              b.motionS = 0.75 * b.motionS + 0.25 * motion;
+              const thresh = 15 * sc * (15 * sc);
+              if (b.motionS < thresh && b.supported) b.sleepCount++;
+              else b.sleepCount = Math.max(0, b.sleepCount - 2);
+              if (b.sleepCount >= SLEEP_STEPS) {
+                sleepBody(b);
+                active--;
+              }
+            }
+            // ---- active cap: force-sleep the oldest supported movers
+            if (active > MAX_ACTIVE) {
+              const cand = [];
+              for (let i = 0; i < bodies.length; i++) {
+                const b = bodies[i];
+                if (b.state === 0 && b.supported) cand.push(b);
+              }
+              cand.sort((p, q) => p.born - q.born || p.id - q.id);
+              for (let k = 0; k < cand.length && active > MAX_ACTIVE; k++) {
+                sleepBody(cand[k]);
+                active--;
+              }
+            }
+          } else {
+            physContactsNow = 0;
           }
+
+          if (physStepCount % 15 === 0 && bodies.length > 0) supportScan();
+          if (physStepCount % 120 === 0 && wsMap.size > 4096) {
+            for (const [key, rec] of wsMap) {
+              if (rec.stamp < physStepCount - 3) wsMap.delete(key);
+            }
+          }
+
+          physMsAvg = physMsAvg * 0.9 + (performance.now() - t0) * 0.1;
         }
 
         function simStep(dt) {
@@ -2010,44 +2563,15 @@
           gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
         }
 
-        function uploadHeight() {
-          if (!heightDirty) return;
-          heightDirty = false;
-          const H = canvas.height;
-          for (let c = 0; c < HCOLS; c++) {
-            heightU8[c] = Math.max(
-              0,
-              Math.min(255, Math.round((colH[c] / H) * 255)),
-            );
-          }
-          gl.bindTexture(gl.TEXTURE_2D, heightTex);
-          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-          gl.texSubImage2D(
-            gl.TEXTURE_2D,
-            0,
-            0,
-            0,
-            HCOLS,
-            1,
-            gl.RED,
-            gl.UNSIGNED_BYTE,
-            heightU8,
-          );
-          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
-        }
-
         function renderComp() {
           renderPass(null, programs.comp, () => {
             const u = locations.comp;
             bindTexture(0, targets.scene.tex);
             bindTexture(1, targets.bw.tex);
             bindTexture(2, maskTex);
-            bindTexture(3, heightTex);
             gl.uniform1i(u.uScene, 0);
             gl.uniform1i(u.uBw, 1);
             gl.uniform1i(u.uMask, 2);
-            gl.uniform1i(u.uHeightMap, 3);
             gl.uniform2f(u.uGrid, gridW, gridH);
             gl.uniform1f(u.uDepth, state.depth);
             gl.uniform1i(u.uDebug, state.debugView);
@@ -2135,11 +2659,12 @@
           }
           let sleeping = 0;
           for (let k = 0; k < bodies.length; k++) {
-            if (bodies[k].asleep) sleeping++;
+            if (bodies[k].state > 0) sleeping++;
           }
           readout.textContent =
             `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${canvas.height}` +
-            ` / 剥離 ${peeledCells} セル / ボディ ${bodies.length} (堆積 ${sleeping})`;
+            ` / 剥離 ${peeledCells} セル / ボディ ${bodies.length} (堆積 ${sleeping})` +
+            ` / 物理 ${physMsAvg.toFixed(2)}ms (可動 ${physActiveNow}・接触 ${physContactsNow})`;
         }
 
         function frame(now) {
@@ -2168,7 +2693,6 @@
           flushSnapshot();
           renderBw();
           uploadMask();
-          uploadHeight();
           renderComp();
           if (state.debugView === 0 || state.debugView === 3) renderBlocks();
 
