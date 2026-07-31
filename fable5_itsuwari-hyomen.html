@@ -41,7 +41,11 @@
                参照面クリッピング(接触≤2点) → 逐次インパルス(低反発+クーロン
                摩擦+ウォームスタート、速度4回)+線形位置補正(slop 付き、3回)
                → スリープ → 深部凍結(荷重下の長期スリープはソルバ除外)。
-               風化で支えが消えた近傍は局所ウェイクで静かに沈降(無反発+高減衰)
+               スリープ許可は「低運動+下支え+接地連結」の3条件(接地連結=
+               床/壁または grounded な静止体への接触チェーン)。15step毎に接触
+               グラフを床/壁からBFSして grounded を再判定し、非接地の静止塊
+               (空中ジャム=floating island)は quiet ウェイクで再落下させる。
+               風化で支えが消えた近傍も同経路で静かに沈降(無反発+高減衰)
     [P3 comp ] bwT 基層+マスクで無傷領域だけ sceneT。穴の縁に厚みの影と欠けの縁
     [P4 block] instanced quads(snapT 世代参照+風化の退色+回転連動の
                ベベル照明・面グラデ・サイズ/明度ジッタ+ソフトドロップシャドウ)→ canvas
@@ -1601,7 +1605,7 @@
         const VEL_ITERS = 4; // sequential-impulse velocity iterations
         const POS_ITERS = 3; // linear position-correction iterations
         const FRICTION = 0.5; // Coulomb μ (Matter.js Stack 帯: 0.4–0.6)
-        const MAX_ACTIVE = 600; // non-sleeping solver bodies (force-sleep over)
+        const MAX_ACTIVE = 900; // non-sleeping solver bodies (force-sleep over)
         const SLEEP_STEPS = 22; // low-motion steps before sleeping (~0.37 s)
         const FREEZE_AFTER = 2.0; // s asleep + loaded from above → frozen
         let bodyIdSeq = 1;
@@ -1638,6 +1642,10 @@
           b.sleepCount = 0;
           b.pushX = 0;
           b.pushY = 0;
+          // it was only allowed to sleep because it reached ground this step
+          // (see sleep bookkeeping / force-sleep gates) — mark it grounded so
+          // the next lander can inherit the chain before the periodic scan.
+          b.grounded = true;
           // pile-height bound: blocks resting high on a tall pile fade 3×
           b.wFast = b.y < canvas.height * 0.5;
         }
@@ -1707,6 +1715,8 @@
             state: 0, // 0 active / 1 sleeping / 2 frozen (static deep pile)
             quiet: false,
             supported: false,
+            grounded: false, // connected to floor through a resting chain
+            groundedNow: false, // this step: touched ground or a grounded body
             airT: 0.2, // spawned mid-air: bounce-eligible from the start
             sleepCount: 0,
             sleepT: 0,
@@ -2230,40 +2240,130 @@
           }
         }
 
-        // Periodic geometric scan (every 15 steps): (a) sleeping/frozen
-        // bodies that lost their support wake quietly and subside;
-        // (b) long-sleeping bodies carrying load freeze (leave the solver).
-        function supportScan() {
+        // OBB-OBB proximity test (fast SAT rejection with a contact margin,
+        // no clipping): are A and B within `margin` of touching? Used by the
+        // ground-connectivity flood fill — a resting pair separated by more
+        // than the slop is NOT an edge of the contact graph.
+        function boxesTouch(A, B, margin) {
+          const ca = Math.cos(A.ang);
+          const sa = Math.sin(A.ang);
+          const cb = Math.cos(B.ang);
+          const sb = Math.sin(B.ang);
+          const hA = A.h + margin;
+          const hB = B.h + margin;
+          const dpx = B.x - A.x;
+          const dpy = B.y - A.y;
+          const K =
+            Math.abs(ca * cb + sa * sb) + Math.abs(sa * cb - ca * sb) + 2e-6;
+          if (Math.abs(dpx * ca + dpy * sa) - hA - hB * K > 0) return false;
+          if (Math.abs(-dpx * sa + dpy * ca) - hA - hB * K > 0) return false;
+          if (Math.abs(dpx * cb + dpy * sb) - hB - hA * K > 0) return false;
+          if (Math.abs(-dpx * sb + dpy * cb) - hB - hA * K > 0) return false;
+          return true;
+        }
+
+        // Ground-connectivity flood fill over the RESTING (sleeping/frozen)
+        // bodies. Seeds = bodies whose outermost corner touches the floor or
+        // a side wall; edges = box-box proximity contacts between resting
+        // bodies. Sets b.grounded on every resting body and returns the count
+        // of resting bodies NOT connected to ground (the "floating island"
+        // metric). Local "has a neighbour below" support is insufficient —
+        // a dense mid-air jam has neighbours below yet touches no ground, so
+        // it must be caught by global connectivity, not a per-body scan.
+        // (repair #4: contact-based physics' classic floating-island problem.)
+        function scanGroundConnectivity() {
           buildBroadphase();
+          const W = canvas.width;
           const H = canvas.height;
+          const margin = Math.max(1.5, Math.min(cellW, cellH) * 0.22);
+          const rest = [];
           for (let i = 0; i < bodies.length; i++) {
             const b = bodies[i];
             if (b.state === 0) continue;
-            let hasSupport = b.y > H - b.size * 2.0; // on/near the floor
-            let load = false;
+            b.grounded = false;
+            rest.push(b);
+          }
+          // seed the BFS with floor/wall contacts (rotated half-diagonal)
+          const queue = [];
+          for (let r = 0; r < rest.length; r++) {
+            const b = rest[r];
+            const hd =
+              b.h * (Math.abs(Math.cos(b.ang)) + Math.abs(Math.sin(b.ang)));
+            if (
+              b.y + hd >= H - margin ||
+              b.x - hd <= margin ||
+              b.x + hd >= W - margin
+            ) {
+              b.grounded = true;
+              queue.push(b);
+            }
+          }
+          // BFS across the resting contact graph
+          let head = 0;
+          while (head < queue.length) {
+            const b = queue[head++];
             const gx = Math.floor(b.x / bpCell);
             const gy = Math.floor(b.y / bpCell);
-            for (let oy = -1; oy <= 1 && !(hasSupport && load); oy++) {
+            for (let oy = -1; oy <= 1; oy++) {
               for (let ox = -1; ox <= 1; ox++) {
                 const arr = bpMap.get(bpKey(gx + ox, gy + oy));
                 if (!arr) continue;
                 for (let k = 0; k < arr.length; k++) {
-                  const j = arr[k];
-                  if (j === i) continue;
-                  const o = bodies[j];
-                  const dx = Math.abs(o.x - b.x);
-                  if (dx > (o.h + b.h) * 1.25) continue;
-                  const dy = o.y - b.y; // + → o below b (y-down)
-                  const span = (o.h + b.h) * 1.6;
-                  if (dy > 0 && dy < span) hasSupport = true;
-                  else if (dy < 0 && -dy < span) load = true;
+                  const o = bodies[arr[k]];
+                  if (o.state === 0 || o.grounded) continue;
+                  if (boxesTouch(b, o, margin)) {
+                    o.grounded = true;
+                    queue.push(o);
+                  }
                 }
               }
             }
-            if (!hasSupport) {
+          }
+          let ungrounded = 0;
+          for (let r = 0; r < rest.length; r++) {
+            if (!rest[r].grounded) ungrounded++;
+          }
+          return ungrounded;
+        }
+
+        // Periodic scan (every 15 steps): ground connectivity replaces the old
+        // local support test. (a) resting bodies NOT connected to the floor
+        // through a contact chain — floating islands, or piles that lost their
+        // support to weathering — wake quietly and subside; (b) grounded,
+        // long-asleep bodies carrying load freeze (leave the solver).
+        function supportScan() {
+          scanGroundConnectivity(); // sets b.grounded, (re)builds broadphase
+          for (let i = 0; i < bodies.length; i++) {
+            const b = bodies[i];
+            if (b.state === 0) continue;
+            if (!b.grounded) {
               wakeBody(b, true); // quiet subsidence, never a bounce
-            } else if (b.state === 1 && b.sleepT > FREEZE_AFTER && load) {
-              b.state = 2; // deep-pile freeze: drawn only, solver skips it
+              continue;
+            }
+            if (b.state === 1 && b.sleepT > FREEZE_AFTER) {
+              // freeze only if something rests on top (keeps the exposed top
+              // layer solver-active so new falls still land on it)
+              let load = false;
+              const gx = Math.floor(b.x / bpCell);
+              const gy = Math.floor(b.y / bpCell);
+              for (let oy = -1; oy <= 0 && !load; oy++) {
+                for (let ox = -1; ox <= 1; ox++) {
+                  const arr = bpMap.get(bpKey(gx + ox, gy + oy));
+                  if (!arr) continue;
+                  for (let k = 0; k < arr.length; k++) {
+                    const o = bodies[arr[k]];
+                    if (o === b) continue;
+                    if (Math.abs(o.x - b.x) > (o.h + b.h) * 1.25) continue;
+                    const dy = o.y - b.y; // < 0 → o above b (y-down)
+                    if (dy < 0 && -dy < (o.h + b.h) * 1.6) {
+                      load = true;
+                      break;
+                    }
+                  }
+                  if (load) break;
+                }
+              }
+              if (load) b.state = 2; // deep-pile freeze: drawn only
             }
           }
         }
@@ -2305,6 +2405,7 @@
             if (b.supported) b.airT = 0;
             else b.airT += dt;
             b.supported = false;
+            b.groundedNow = false;
             active++;
             b.vy += 2.6 * H * dt;
             const dragL = b.quiet ? 2.4 : 0.5;
@@ -2346,11 +2447,29 @@
                 solveContactPos(contacts[k]);
               }
             }
-            // apply positional pushes + support flags + store warm impulses
+            // apply positional pushes + support flags + ground propagation +
+            // store warm impulses. Ground connectivity is threaded through the
+            // contact list each step: a boundary (floor/wall) contact grounds
+            // the body; a contact with an already-grounded resting body grounds
+            // the active one. A mid-air jam touches neither, so no member is
+            // grounded and none may sleep — it keeps falling (repair #4).
             for (let k = 0; k < contacts.length; k++) {
               const c = contacts[k];
-              if (c.ny > 0.6) c.a.supported = true;
-              else if (c.b && c.ny < -0.6) c.b.supported = true;
+              const a = c.a;
+              const b = c.b;
+              if (!b) {
+                if (c.ny > 0.6) a.supported = true;
+                a.groundedNow = true; // touching the floor or a wall
+              } else {
+                if (c.ny > 0.6) a.supported = true;
+                else if (c.ny < -0.6) b.supported = true;
+                if (a.state === 0 && b.state > 0 && b.grounded) {
+                  a.groundedNow = true;
+                }
+                if (b.state === 0 && a.state > 0 && a.grounded) {
+                  b.groundedNow = true;
+                }
+              }
               const rec = { stamp: physStepCount, p: [] };
               if (c.p0) {
                 rec.p.push({ px: c.p0.px, py: c.p0.py, jn: c.p0.jn, jt: c.p0.jt });
@@ -2374,24 +2493,42 @@
                 b.vx * b.vx + b.vy * b.vy + b.angv * b.angv * b.size * b.size;
               b.motionS = 0.75 * b.motionS + 0.25 * motion;
               const thresh = 15 * sc * (15 * sc);
-              if (b.motionS < thresh && b.supported) b.sleepCount++;
-              else b.sleepCount = Math.max(0, b.sleepCount - 2);
+              // sleep only when low-motion AND supported from below AND
+              // grounded (connected to the floor) — a floating jam is
+              // low-motion + supported but not grounded, so it stays awake.
+              if (b.motionS < thresh && b.supported && b.groundedNow) {
+                b.sleepCount++;
+              } else {
+                b.sleepCount = Math.max(0, b.sleepCount - 2);
+              }
               if (b.sleepCount >= SLEEP_STEPS) {
                 sleepBody(b);
                 active--;
               }
             }
-            // ---- active cap: force-sleep the oldest supported movers
+            // ---- active cap: force-sleep the oldest GROUNDED supported
+            // movers only (never freeze a falling/floating body in mid-air).
             if (active > MAX_ACTIVE) {
               const cand = [];
               for (let i = 0; i < bodies.length; i++) {
                 const b = bodies[i];
-                if (b.state === 0 && b.supported) cand.push(b);
+                if (b.state === 0 && b.supported && b.groundedNow) cand.push(b);
               }
               cand.sort((p, q) => p.born - q.born || p.id - q.id);
               for (let k = 0; k < cand.length && active > MAX_ACTIVE; k++) {
                 sleepBody(cand[k]);
                 active--;
+              }
+              // if the overage is all airborne (no grounded candidate), bound
+              // the solver cost by expiring the oldest movers instead of
+              // freezing them in the air.
+              if (active > MAX_ACTIVE) {
+                for (let i = bodies.length - 1; i >= 0 && active > MAX_ACTIVE; i--) {
+                  if (bodies[i].state === 0) {
+                    removeBody(i);
+                    active--;
+                  }
+                }
               }
             }
           } else {
@@ -2408,10 +2545,14 @@
           physMsAvg = physMsAvg * 0.9 + (performance.now() - t0) * 0.1;
         }
 
-        // Diagnostic probe (verification aid; no effect on rendering)
+        // Diagnostic probe (verification aid; no effect on rendering).
+        // `ungrounded` runs an independent ground-connectivity flood fill on
+        // the current resting bodies — the machine metric for the
+        // floating-island bug (repair #4): >0 before the fix, ~0 after.
         window.__physProbe = () => {
           const H = canvas.height;
           const sc = H / 750;
+          const ungrounded = scanGroundConnectivity();
           const sample = [];
           let sup = 0;
           let slp = 0;
@@ -2440,6 +2581,7 @@
             active: physActiveNow,
             contacts: physContactsNow,
             supported: sup,
+            ungrounded, // resting bodies not connected to the floor (repair #4)
             sleeping: slp,
             frozen: frz,
             thresh: +(15 * sc * (15 * sc)).toFixed(2),
