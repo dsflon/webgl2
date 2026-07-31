@@ -1624,6 +1624,7 @@
           b.quiet = !!quiet; // quiet = weathering subsidence: no bounce
           b.sleepCount = 0;
           b.sleepT = 0;
+          b.airT = 0;
           b.motionS = 1e4;
         }
 
@@ -1637,21 +1638,13 @@
           b.sleepCount = 0;
           b.pushX = 0;
           b.pushY = 0;
-          if (b.wRate === 0) {
-            const life =
-              (70 - 62 * Math.pow(state.weather, 1.2)) *
-              (0.7 +
-                0.6 *
-                  cellHash(Math.round(b.u * 997), Math.round(b.v * 991), 77));
-            b.wRate = 1 / Math.max(2, life);
-            // pile-height bound: blocks resting high on a tall pile fade 3×
-            if (b.y < canvas.height * 0.5) b.wRate *= 3;
-          }
+          // pile-height bound: blocks resting high on a tall pile fade 3×
+          b.wFast = b.y < canvas.height * 0.5;
         }
 
         function removeBody(idx) {
           const rb = bodies[idx];
-          snapRefs[rb.gen] = Math.max(0, rb ? snapRefs[rb.gen] - 1 : 0);
+          snapRefs[rb.gen] = Math.max(0, snapRefs[rb.gen] - 1);
           bodies[idx] = bodies[bodies.length - 1];
           bodies.pop();
           // the column above loses its support: wake it QUIETLY (zero
@@ -1714,13 +1707,16 @@
             state: 0, // 0 active / 1 sleeping / 2 frozen (static deep pile)
             quiet: false,
             supported: false,
+            airT: 0.2, // spawned mid-air: bounce-eligible from the start
             sleepCount: 0,
             sleepT: 0,
             motionS: 1e4,
             pushX: 0,
             pushY: 0,
             weather: 0,
-            wRate: 0,
+            // per-block lifetime jitter (cell-hash, no time in the seed)
+            wJit: 0.7 + 0.6 * cellHash(cx, cy, 77),
+            wFast: false,
             born: simTime,
           };
           bodies.push(b);
@@ -1919,8 +1915,15 @@
         /* ---- contacts + sequential-impulse solver ---- */
         const contacts = [];
 
+        // Airtime-gated restitution: only a body that has actually been in
+        // free flight bounces. Inside a settled pile every contact gets
+        // e = 0 — with any nonzero pile restitution a ~300-body pile
+        // self-excites into a permanent churn (measured mean ~16 px/s)
+        // regardless of the bias threshold; with the gate it decays to
+        // < 0.2 px/s while genuine falls still bounce (0.05–0.15 band).
         function restitutionNow(a, b) {
           if (a.quiet || (b && b.quiet)) return 0;
+          if (a.airT < 0.12 && (!b || b.airT < 0.12)) return 0;
           return 0.06 + 0.09 * state.tumble; // Matter Stack 帯 0.05–0.15
         }
 
@@ -2273,12 +2276,19 @@
           physStepCount++;
 
           // ---- weathering + lifetime (resting bodies only: falling chips
-          // stay fresh, matching the frozen-snapshot look)
+          // stay fresh, matching the frozen-snapshot look). The lifetime is
+          // evaluated against the CURRENT weather slider each step, so
+          // turning 風化 up visibly ages the existing pile too.
+          const lifeBase = 70 - 62 * Math.pow(state.weather, 1.2);
           for (let i = bodies.length - 1; i >= 0; i--) {
             const b = bodies[i];
             if (b.state > 0) {
               b.sleepT += dt;
-              b.weather += dt * b.wRate;
+              const life = Math.max(
+                2,
+                lifeBase * b.wJit * (b.wFast ? 1 / 3 : 1),
+              );
+              b.weather += dt / life;
               if (b.weather >= 1) removeBody(i);
             }
           }
@@ -2287,8 +2297,14 @@
           let active = 0;
           for (let i = 0; i < bodies.length; i++) {
             const b = bodies[i];
+            if (b.state !== 0) {
+              b.airT = 0;
+              b.supported = false;
+              continue;
+            }
+            if (b.supported) b.airT = 0;
+            else b.airT += dt;
             b.supported = false;
-            if (b.state !== 0) continue;
             active++;
             b.vy += 2.6 * H * dt;
             const dragL = b.quiet ? 2.4 : 0.5;
@@ -2310,7 +2326,13 @@
           if (active > 0) {
             buildBroadphase();
             genContacts(sc);
-            const restThreshV = 30 * sc;
+            // restitution only for genuine impacts: the threshold must sit
+            // far above the per-step gravity velocity (grav·dt). At ~2×
+            // grav·dt settled wedges still catch the bias occasionally and
+            // the pile self-excites in a limit cycle (measured: totalSpeed
+            // ~20 px/s forever); at 5× it is unreachable at rest while real
+            // falls (≥ a few block heights) still bounce.
+            const restThreshV = Math.max(110 * sc, 5.0 * 2.6 * H * SDT);
             for (let k = 0; k < contacts.length; k++) {
               prestepContact(contacts[k], restThreshV);
             }
@@ -2385,6 +2407,47 @@
 
           physMsAvg = physMsAvg * 0.9 + (performance.now() - t0) * 0.1;
         }
+
+        // Diagnostic probe (verification aid; no effect on rendering)
+        window.__physProbe = () => {
+          const H = canvas.height;
+          const sc = H / 750;
+          const sample = [];
+          let sup = 0;
+          let slp = 0;
+          let frz = 0;
+          for (let i = 0; i < bodies.length; i++) {
+            const b = bodies[i];
+            if (b.state === 1) slp++;
+            else if (b.state === 2) frz++;
+            if (b.supported) sup++;
+            if (i % 97 === 0) {
+              sample.push({
+                st: b.state,
+                sup: b.supported,
+                slc: b.sleepCount,
+                mo: +b.motionS.toFixed(2),
+                vx: +b.vx.toFixed(2),
+                vy: +b.vy.toFixed(2),
+                av: +b.angv.toFixed(3),
+                y: Math.round(b.y),
+                q: b.quiet,
+              });
+            }
+          }
+          return {
+            n: bodies.length,
+            active: physActiveNow,
+            contacts: physContactsNow,
+            supported: sup,
+            sleeping: slp,
+            frozen: frz,
+            thresh: +(15 * sc * (15 * sc)).toFixed(2),
+            ms: +physMsAvg.toFixed(3),
+            step: physStepCount,
+            sample,
+          };
+        };
 
         function simStep(dt) {
           simTime += dt;
