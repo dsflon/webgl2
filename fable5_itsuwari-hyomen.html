@@ -56,7 +56,10 @@
                ボディ上限は二段構え: 上限-300 からは最古の堆積を約1秒の
                フェードで間引き(doom)、瞬時消去は真の過負荷時のみ。
                重力は「ベクトル」で、モバイルの左右傾き(deviceorientation の
-               gamma)を ema+レート制限(≤60°/s)で最大 ±40° 傾ける。傾くと
+               beta/gamma を screen.orientation.angle θ で画面座標へ回転:
+               screenTilt = gamma·cosθ − beta·sinθ。縦・横持ちのどちらでも
+               「画面上の左右」が下り方向になる。beta/gamma とも ±40° に
+               クランプ)を ema+レート制限(≤60°/s)で最大 ±40° 傾ける。傾くと
                山は下り側へ流れて壁際に寄る(接地判定=重力方向との内積、
                壁は接地連結の種、方向が 3° 変わると堆積を quiet ウェイク)
     [P3 comp ] bwT 基層+マスクで無傷領域だけ sceneT。穴の縁に厚みの影と欠けの縁
@@ -75,7 +78,9 @@
     edge    輪郭の感度(0.50)— sobel 輪郭のしきい値と線の太さ
     tilt    傾きの効き(0.60)— モバイルで端末を左右に傾けたとき重力を傾ける
             最大角(1.0 で 40°)。0 で傾き入力を無効化。PC は傾きイベントが
-            来ないので常に無効(見た目は従来どおり)
+            来ないので常に無効(見た目は従来どおり)。縦持ち・横持ち
+            (screen.orientation.angle = 0/90/180/270)いずれでも「画面上の
+            左右」が下り方向になるよう入力を画面座標へ回転する
     プリセット: 壁画の剥落(標準)/ 検知の世界 / 崩れ続ける夜
 
   実行方法:
@@ -86,6 +91,8 @@
     モバイル: 端末を左右に傾けると重力が傾き、堆積した破片が下り側へ流れて
     壁際に寄る(iOS 13+ は最初のタップで傾きセンサの許可を一度だけ要求。
     拒否・非対応・PC では傾きは無効で、それ以外は従来どおり動作する)。
+    縦持ち・横持ちの両方に対応し、回転しても「画面の左右」がそのまま
+    下り方向になる(回転直後もレート制限つきで滑らかに追従する)。
     ?fakesource=1 … カメラ不使用。GLSL 合成シーン(揺れる人物+振り子ランプ+雲)で駆動
     ?freeze=1     … 時間駆動を停止(合成シーン・物理・伝播・修復。決定的静止フレーム)
     ?prewarm=<秒> … 初回描画前に固定 dt で決定的早送り。スクリプトの剥離イベント
@@ -94,7 +101,8 @@
                     剥離セル数とボディ数の時系列を window.__settleLog に記録する
                     (修復完了 → 床が空になる、の機械証拠)
     ?tilttest=1   … 検証用。fakesource でも傾き入力を有効化(window.__setTilt(deg)
-                    で合成 gamma を注入できる)。通常運用では使わない
+                    で画面座標の傾きを直接注入、deviceorientation イベントを
+                    dispatch すれば向き補正込みの経路を通せる)。通常運用では使わない
     uDebug: 0=最終 / 1=剥離マスク / 2=裏世界のみ / 3=ブロックのみ / 4=標本
 
   依存: なし(外部ライブラリ・MLモデル不使用)。WebGL2 / GLSL ES 3.00 単体。
@@ -2836,11 +2844,26 @@
         window.addEventListener("blur", endDrag);
 
         /* ------------------------------------------------------------------
-           Device tilt (mobile, secondary input) — gamma (left/right roll)
-           tilts the SOLVER'S GRAVITY VECTOR, so the pile slides downhill and
-           gathers against the lower wall. Desktop / permission denied /
-           unsupported: no events arrive and everything behaves as before.
-           Recipe (permission flow) follows fable5_senkohanabi.html.
+           Device tilt (mobile, secondary input) — the device's left/right
+           roll AS SEEN ON SCREEN tilts the SOLVER'S GRAVITY VECTOR, so the
+           pile slides downhill and gathers against the lower wall. Desktop /
+           permission denied / unsupported: no events arrive and everything
+           behaves as before. Recipe (permission flow) follows
+           fable5_senkohanabi.html.
+
+           deviceorientation's (beta, gamma) live in the DEVICE frame: gamma
+           is the left/right roll only while the device is held UPRIGHT. Once
+           the phone is turned to landscape, gamma becomes the front/back axis
+           and no longer matches "left/right on screen". So the pair is
+           rotated into SCREEN space by the current screen.orientation.angle:
+
+             screenTilt = gamma·cos θ − beta·sin θ      (θ = orientation angle)
+               θ=0   (portrait)        →  gamma
+               θ=90  (landscape-left)  → −beta
+               θ=180 (portrait upside) → −gamma
+               θ=270 (landscape-right) →  beta
+
+           θ=0 reproduces the previous portrait-only behaviour exactly.
         ------------------------------------------------------------------ */
 
         // tilt is an external input like the pointer: verification runs
@@ -2849,17 +2872,64 @@
         const TILT_INPUT_OK =
           TILT_TEST || (!FREEZE && PREWARM === 0 && SETTLE === 0 && !FAKE);
         let tiltActive = false;
-        let tiltGammaDeg = 0; // raw-ish, clamped ±40°
+        let tiltScreenDeg = 0; // left/right tilt in SCREEN space, clamped ±40°
+        let rawGammaDeg = 0; // last raw sensor pair (device frame)
+        let rawBetaDeg = 0;
+        let screenAngleDeg = 0; // screen.orientation.angle, normalized 0..359
         let gravAng = 0; // eased gravity tilt actually used by the solver (rad)
         let gravAngWake = 0; // angle at which the pile was last woken
         let gDirX = 0; // gravity unit vector (screen space, y down)
         let gDirY = 1;
 
+        function readScreenAngle() {
+          const so = window.screen && window.screen.orientation;
+          let a =
+            so && typeof so.angle === "number" ? so.angle : window.orientation;
+          if (typeof a !== "number" || !isFinite(a)) a = 0;
+          screenAngleDeg = ((a % 360) + 360) % 360;
+        }
+        readScreenAngle();
+
+        // beta is the pitch axis and swings far wider than gamma (±180°), so
+        // it gets the same ±40° clamp before the rotation — a phone laid flat
+        // or stood up must not be able to slam gravity to the rail.
+        function recomputeScreenTilt() {
+          const g = Math.max(-40, Math.min(40, rawGammaDeg));
+          const b = Math.max(-40, Math.min(40, rawBetaDeg));
+          const th = (screenAngleDeg * Math.PI) / 180;
+          const t = g * Math.cos(th) - b * Math.sin(th);
+          tiltScreenDeg = Math.max(-40, Math.min(40, t));
+        }
+
         function onDeviceOrientation(ev) {
           if (!TILT_INPUT_OK) return;
-          if (ev.gamma == null) return;
+          if (ev.gamma == null && ev.beta == null) return;
           tiltActive = true;
-          tiltGammaDeg = Math.max(-40, Math.min(40, ev.gamma));
+          if (ev.gamma != null) rawGammaDeg = ev.gamma;
+          if (ev.beta != null) rawBetaDeg = ev.beta;
+          recomputeScreenTilt();
+        }
+
+        // Turning the phone changes θ by 90° in one step, which would jump
+        // the TARGET angle. It is only a target: updateGravityTilt still eases
+        // it through the same ema + 60°/s rate limit, so the pile flows to the
+        // new downhill instead of being teleported.
+        function onScreenAngleChange() {
+          readScreenAngle();
+          recomputeScreenTilt();
+        }
+        window.addEventListener("orientationchange", onScreenAngleChange, {
+          passive: true,
+        });
+        if (
+          window.screen &&
+          window.screen.orientation &&
+          typeof window.screen.orientation.addEventListener === "function"
+        ) {
+          window.screen.orientation.addEventListener(
+            "change",
+            onScreenAngleChange,
+          );
         }
 
         let tiltRequested = false;
@@ -2908,7 +2978,7 @@
         function updateGravityTilt(dt) {
           const target =
             TILT_INPUT_OK && tiltActive
-              ? Math.max(-1, Math.min(1, tiltGammaDeg / 35)) *
+              ? Math.max(-1, Math.min(1, tiltScreenDeg / 35)) *
                 TILT_MAX_ANG *
                 state.tilt
               : 0;
@@ -2931,14 +3001,25 @@
           }
         }
 
-        // Test path for the tilt route (headless has no real sensor):
-        // window.__setTilt(deg) feeds the same handler a synthetic gamma.
+        // Test paths for the tilt route (headless has no real sensor):
+        //   __setTilt(deg)  — inject the SCREEN-space tilt directly, skipping
+        //                     the orientation rotation (used by the physics
+        //                     stress tests; unaffected by screen angle).
+        //   the orientation mapping itself is verified by dispatching real
+        //   `deviceorientation` events with a faked screen.orientation.angle.
         window.__setTilt = (deg) => {
-          onDeviceOrientation({ gamma: deg });
-          return { gamma: tiltGammaDeg, gravDeg: +((gravAng * 180) / Math.PI).toFixed(2) };
+          if (!TILT_INPUT_OK) return { gamma: 0, gravDeg: 0 };
+          tiltActive = true;
+          tiltScreenDeg = Math.max(-40, Math.min(40, deg));
+          return {
+            gamma: tiltScreenDeg,
+            gravDeg: +((gravAng * 180) / Math.PI).toFixed(2),
+          };
         };
         window.__gravProbe = () => ({
           gravDeg: +((gravAng * 180) / Math.PI).toFixed(2),
+          screenTilt: +tiltScreenDeg.toFixed(2),
+          screenAngle: screenAngleDeg,
           tiltActive,
           enabled: TILT_INPUT_OK,
         });
