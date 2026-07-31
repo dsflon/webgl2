@@ -1,0 +1,12 @@
+{"at":"2026-07-31T07:33:45.579Z","event":"init","status":"created"}
+{"at":"2026-07-31T07:39:41.381Z","event":"attempt:brief#1","status":"created"}
+{"at":"2026-07-31T07:40:06.334Z","event":"status:briefed","status":"briefed"}
+{"at":"2026-07-31T07:43:15.517Z","event":"attempt:order#1","status":"briefed"}
+{"at":"2026-07-31T07:43:24.137Z","event":"status:ordered","status":"ordered"}
+{"at":"2026-07-31T07:43:24.279Z","event":"cost","status":"ordered"}
+{"at":"2026-07-31T08:20:33.970Z","event":"attempt:implement#1","status":"ordered"}
+{"at":"2026-07-31T08:21:08.449Z","event":"status:implemented","status":"implemented"}
+{"at":"2026-07-31T08:21:08.588Z","event":"attempt:runtime#1","status":"implemented"}
+{"at":"2026-07-31T08:26:08.750Z","event":"status:runtime_ok","status":"runtime_ok"}
+{"at":"2026-07-31T08:26:44.655Z","event":"needs_review","status":"needs_review"}
+{"at":"2026-07-31T08:26:44.824Z","event":"cost","status":"needs_review"}

@@ -1,0 +1,23 @@
+{
+  "slug": "itsuwari-hyomen",
+  "theme": "偽りの表面 — Webカメラ映像は実はブロックの集合体で、クリック/タップで剥離して物理演算で崩れ落ち、背後の白黒輪郭の世界が露出する",
+  "status": "needs_review",
+  "attempts": {
+    "brief": 1,
+    "order": 1,
+    "implement": 1,
+    "runtime": 1,
+    "aesthetic": 0
+  },
+  "last_error": null,
+  "requires_human": true,
+  "blocked_reason": "60分タイムアウト到達。S0〜S3は全合格(brief 1回/order 1回/implement 1回/runtime 全11チェックpass)。失敗による停止ではなく時間切れ — S4(美的レビュー2pass)とS5(提出)が未実施。再開指示で S4 から続行可",
+  "resume_stage": "aesthetic",
+  "cost": {
+    "loops": 4,
+    "approx_tokens": 320000,
+    "wall_minutes": 77
+  },
+  "pr_url": null,
+  "updated_at": "2026-07-31T08:26:44.824Z"
+}
