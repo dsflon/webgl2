@@ -33,20 +33,22 @@
     video / fakeScene ─► [P0 scene] cover-fit+mirror      sceneT  RGBA8 長辺≤1024
     sceneT ───────────► [P1 bw   ] sobel+無彩ポスタライズ  bwT     RGBA8 長辺≤512
     sceneT ─(剥離時)──► [P2 snap ] copyTexSubImage2D      snapT×3 RGBA8 sceneT同寸
-    [CPU mask] グリッド(基準 47×30)剥離/伝播/修復 → R8 小テクスチャへ一方向転送
-    [CPU phys] 剥離セル→剛体ボディ(≤1600)。列ハイトマップ堆積+スリープ+寿命
+    [CPU mask] グリッド(基準 64×40)剥離/伝播/修復 → R8 小テクスチャへ一方向転送
+    [CPU phys] 剥離セル→剛体ボディ(≤1600)。列ハイトマップ堆積(安息角緩和+
+               斜面スライド+支え喪失時の再落下)+スリープ+寿命
     [P3 comp ] bwT 基層+マスクで無傷領域だけ sceneT。穴の縁に厚みの影と欠けの縁
     [P4 block] instanced quads(snapT 世代参照+風化の退色)→ canvas
 
-  スライダー(写真らしさ ↔ 様式の強さ):
-    block   ブロックの大きさ — グリッドセルの辺長(小=細かい破片/大=大きな板)
-    burst   崩れの規模 — クリック起点の初期剥離半径
-    spread  追い崩れ — 支持喪失伝播の確率と持続(0=起点のみ/1=広く連鎖)
-    tumble  破片の暴れ — 剥離時の初速・角速度・反発係数
-    heal    修復の速さ — 剥離マスクの回復時定数(0=ほぼ直らない)
-    weather 破片の風化 — 堆積ブロックの退色・消滅までの寿命
-    depth   裏世界の暗さ — 白黒世界の沈み(明暗レンジの圧縮と黒レベル)
-    edge    輪郭の感度 — sobel 輪郭のしきい値と線の太さ
+  スライダー(写真らしさ ↔ 様式の強さ。カッコ内は既定値):
+    block   ブロックの大きさ(0.50)— グリッドセルの辺長(小=細かい破片/大=大きな板。
+            既定は細かめ=画面幅の約 1/64。上限側が旧既定相当の大きな板)
+    burst   崩れの規模(0.50)— クリック起点の初期剥離半径
+    spread  追い崩れ(0.55)— 支持喪失伝播の確率と持続(0=起点のみ/1=広く連鎖)
+    tumble  破片の暴れ(0.50)— 剥離時の初速・角速度・反発係数
+    heal    修復の速さ(0.35)— 剥離マスクの回復時定数(0=ほぼ直らない)
+    weather 破片の風化(0.50)— 堆積ブロックの退色・消滅までの寿命
+    depth   裏世界の暗さ(0.30)— 白黒世界の沈み(既定は明るめの線画。上げると夜へ)
+    edge    輪郭の感度(0.50)— sobel 輪郭のしきい値と線の太さ
     プリセット: 壁画の剥落(標準)/ 検知の世界 / 崩れ続ける夜
 
   実行方法:
@@ -442,13 +444,13 @@
         })();
 
         const DEFAULTS = {
-          block: 0.45,
+          block: 0.5,
           burst: 0.5,
           spread: 0.55,
           tumble: 0.5,
           heal: 0.35,
           weather: 0.5,
-          depth: 0.6,
+          depth: 0.3,
           edge: 0.5,
         };
 
@@ -458,7 +460,7 @@
           kenchi: {
             label: "検知の世界",
             vals: {
-              block: 0.45,
+              block: 0.5,
               burst: 0.5,
               spread: 0.45,
               tumble: 0.5,
@@ -471,7 +473,7 @@
           yoru: {
             label: "崩れ続ける夜",
             vals: {
-              block: 0.5,
+              block: 0.6,
               burst: 0.6,
               spread: 0.7,
               tumble: 0.55,
@@ -1394,7 +1396,7 @@
         function rebuildGrid() {
           const W = canvas.width;
           const H = canvas.height;
-          let gw = Math.round(68 - state.block * 46); // 68 (fine) .. 22 (slabs)
+          let gw = Math.round(82 - state.block * 36); // 82 (fine) .. 46 (slabs)
           gw = Math.max(12, Math.min(96, gw));
           let cw = W / gw;
           let gh = Math.max(6, Math.round(H / cw));
@@ -1636,6 +1638,7 @@
             gen: 0,
             asleep: false,
             bounces: 0,
+            slides: 0,
             weather: 0,
             wRate: 0,
             c0: -1,
@@ -1656,6 +1659,33 @@
           for (let bi = bodies.length - 1; bi >= 0; bi--) {
             const b = bodies[bi];
             if (b.asleep) {
+              // resettle: if the pile under this block has sunk (weathering
+              // shrink of blocks below, relaxation spreading the pile), the
+              // block would hover in mid-air — wake it so it falls again.
+              // Own contribution is excluded; blocks stacked above keep it
+              // counted as "support", so piles unstack top-down over a few
+              // steps instead of popping all at once.
+              if (b.c0 >= 0) {
+                let support = 0;
+                for (let c = b.c0; c <= b.c1; c++) {
+                  const hh = colH[c] - b.hLeft;
+                  if (hh > support) support = hh;
+                }
+                const he2 =
+                  b.size *
+                  0.5 *
+                  (Math.abs(Math.cos(b.ang)) + Math.abs(Math.sin(b.ang)));
+                const gap = H - Math.max(0, support) - (b.y + he2);
+                if (gap > b.size * 0.35) {
+                  subtractContrib(b, b.hLeft);
+                  b.hLeft = 0;
+                  b.c0 = -1;
+                  b.asleep = false;
+                  b.bounces = 2; // settle directly; weathering state kept
+                  b.slides = Math.max(0, b.slides - 2);
+                  continue;
+                }
+              }
               b.weather += dt * b.wRate;
               if (b.weather > 0.62 && b.hLeft > 0) {
                 const targetLeft =
@@ -1692,11 +1722,31 @@
             if (b.y + he >= floorY && b.vy > 0) {
               b.y = floorY - he;
               const rest = 0.1 + 0.3 * state.tumble;
+              // local slope: does the pile drop off just beyond this block?
+              const cl = Math.max(0, c0 - 2);
+              const cr = Math.min(HCOLS - 1, c1 + 2);
+              const dropL = ground - colH[cl];
+              const dropR = ground - colH[cr];
+              const drop = Math.max(dropL, dropR);
               if (b.vy > 0.28 * H && b.bounces < 2) {
                 b.vy = -b.vy * rest;
                 b.vx *= 0.55;
                 b.angv *= 0.5;
                 b.bounces++;
+              } else if (drop > b.size * 0.9 && b.slides < 8) {
+                // steep top: roll toward the lower flank instead of stacking
+                // (natural angle of repose — the pile spreads sideways)
+                const dir = dropL > dropR ? -1 : 1;
+                const r = cellHash(
+                  Math.round(b.x + b.slides * 37),
+                  Math.round(b.y),
+                  91,
+                );
+                const sc2 = H / 750;
+                b.vx = dir * (60 + 120 * r) * sc2;
+                b.vy = -(30 + 50 * r) * sc2;
+                b.angv = dir * (2.0 + 3.0 * r);
+                b.slides++;
               } else {
                 b.asleep = true;
                 b.vx = 0;
@@ -1722,21 +1772,27 @@
               }
             }
           }
-          // angle-of-repose relaxation (CRAFT §E2 — no needle towers)
-          const rm = Math.min(cellW, cellH) * 0.9;
-          const k = Math.min(1, dt * 5);
-          for (let c = 0; c < HCOLS - 1; c++) {
-            const d = colH[c] - colH[c + 1];
-            if (d > rm) {
-              const t = (d - rm) * 0.5 * k;
-              colH[c] -= t;
-              colH[c + 1] += t;
-              heightDirty = true;
-            } else if (d < -rm) {
-              const t = (-d - rm) * 0.5 * k;
-              colH[c] += t;
-              colH[c + 1] -= t;
-              heightDirty = true;
+          // angle-of-repose relaxation (CRAFT §E2 — no needle towers).
+          // rm/colW ≈ 0.7 gives a natural ~35° resting slope; two alternating
+          // sweeps per step let steep piles crumble sideways quickly.
+          const rm = Math.min(cellW, cellH) * 0.35;
+          const k = Math.min(1, dt * 10);
+          for (let pass = 0; pass < 2; pass++) {
+            const fwd = pass === 0;
+            for (let s = 0; s < HCOLS - 1; s++) {
+              const c = fwd ? s : HCOLS - 2 - s;
+              const d = colH[c] - colH[c + 1];
+              if (d > rm) {
+                const t = (d - rm) * 0.5 * k;
+                colH[c] -= t;
+                colH[c + 1] += t;
+                heightDirty = true;
+              } else if (d < -rm) {
+                const t = (-d - rm) * 0.5 * k;
+                colH[c] += t;
+                colH[c + 1] -= t;
+                heightDirty = true;
+              }
             }
           }
         }
