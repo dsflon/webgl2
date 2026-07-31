@@ -13,3 +13,5 @@
 {"at":"2026-07-31T08:38:08.142Z","event":"status:runtime_ok","status":"runtime_ok"}
 {"at":"2026-07-31T08:38:08.502Z","event":"attempt:aesthetic#1","status":"runtime_ok"}
 {"at":"2026-07-31T08:49:50.045Z","event":"status:aesthetic_ok","status":"aesthetic_ok"}
+{"at":"2026-07-31T08:52:01.002Z","event":"status:submitted","status":"submitted"}
+{"at":"2026-07-31T08:52:01.173Z","event":"cost","status":"submitted"}
