@@ -33,15 +33,17 @@
     video / fakeScene ─► [P0 scene] cover-fit+mirror      sceneT  RGBA8 長辺≤1024
     sceneT ───────────► [P1 bw   ] sobel+無彩ポスタライズ  bwT     RGBA8 長辺≤512
     sceneT ─(剥離時)──► [P2 snap ] copyTexSubImage2D      snapT×3 RGBA8 sceneT同寸
-    [CPU mask] グリッド(基準 64×40)剥離/伝播/修復 → R8 小テクスチャへ一方向転送
-    [CPU phys] 剥離セル→剛体ボディ(≤1600)。列ハイトマップ堆積(安息角緩和+
-               斜面スライド+支え喪失時の再落下)+スリープ+寿命
+    [CPU mask] グリッド(基準 82列、セル上限 12000)剥離/伝播/修復 → R8 一方向転送
+    [CPU phys] 剥離セル→剛体ボディ(≤2400)。列ハイトマップ堆積(安息角緩和+
+               斜面スライド)+スリープ+寿命。支えが痩せた分はスリープのまま
+               静かに沈降(大きな崩落のみ無反発の沈降モードで再落下)
     [P3 comp ] bwT 基層+マスクで無傷領域だけ sceneT。穴の縁に厚みの影と欠けの縁
-    [P4 block] instanced quads(snapT 世代参照+風化の退色)→ canvas
+    [P4 block] instanced quads(snapT 世代参照+風化の退色+回転連動の
+               ベベル照明・面グラデ・サイズ/明度ジッタ+ソフトドロップシャドウ)→ canvas
 
   スライダー(写真らしさ ↔ 様式の強さ。カッコ内は既定値):
-    block   ブロックの大きさ(0.50)— グリッドセルの辺長(小=細かい破片/大=大きな板。
-            既定は細かめ=画面幅の約 1/64。上限側が旧既定相当の大きな板)
+    block   ブロックの大きさ(0.50)— グリッドセルの辺長。既定は細かい破片=
+            画面幅の約 1/82(レンジ 1/100〜1/64)
     burst   崩れの規模(0.50)— クリック起点の初期剥離半径
     spread  追い崩れ(0.55)— 支持喪失伝播の確率と持続(0=起点のみ/1=広く連鎖)
     tumble  破片の暴れ(0.50)— 剥離時の初速・角速度・反発係数
@@ -473,7 +475,7 @@
           yoru: {
             label: "崩れ続ける夜",
             vals: {
-              block: 0.6,
+              block: 0.9,
               burst: 0.6,
               spread: 0.7,
               tumble: 0.55,
@@ -1097,11 +1099,14 @@
           layout(location = 1) in vec4 aB; // uv center, uv half extents
           layout(location = 2) in vec2 aC; // snapshot generation, weathering
           uniform vec2 uRes;
+          uniform int uShadow;
+          uniform vec2 uShadowOff;
           out vec2 vLocal;
           out vec2 vUvC;
           out vec2 vUvH;
           flat out int vGen;
           out float vFade;
+          out float vAng;
           const vec2 CORNERS[6] = vec2[6](
             vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5),
             vec2(-0.5, 0.5), vec2(0.5, -0.5), vec2(0.5, 0.5)
@@ -1111,9 +1116,10 @@
             vLocal = corner;
             float cs = cos(aA.w);
             float sn = sin(aA.w);
+            float sizeMul = uShadow == 1 ? 1.18 : 1.0;
             vec2 off = vec2(cs * corner.x - sn * corner.y,
-                            sn * corner.x + cs * corner.y) * aA.z;
-            vec2 px = aA.xy + off;
+                            sn * corner.x + cs * corner.y) * aA.z * sizeMul;
+            vec2 px = aA.xy + off + (uShadow == 1 ? uShadowOff : vec2(0.0));
             vec2 clip = vec2(px.x / uRes.x * 2.0 - 1.0,
                              1.0 - px.y / uRes.y * 2.0);
             gl_Position = vec4(clip, 0.0, 1.0);
@@ -1121,6 +1127,7 @@
             vUvH = aB.zw;
             vGen = int(aC.x + 0.5);
             vFade = aC.y;
+            vAng = aA.w;
           }
         `;
 
@@ -1131,14 +1138,27 @@
           in vec2 vUvH;
           flat in int vGen;
           in float vFade;
+          in float vAng;
           uniform sampler2D uSnap0;
           uniform sampler2D uSnap1;
           uniform sampler2D uSnap2;
           uniform float uDepth;
           uniform int uDebug;
+          uniform highp int uShadow;
           out vec4 fragColor;
           ${CHUNK_TONE}
+          float bhash(vec2 p) {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+          }
           void main() {
+            float dEdge = max(abs(vLocal.x), abs(vLocal.y));
+            float alphaW = 1.0 - smoothstep(0.62, 1.0, vFade);
+            if (uShadow == 1) {
+              // soft drop shadow cast onto whatever is beneath the block
+              float a = (1.0 - smoothstep(0.16, 0.5, dEdge)) * 0.32 * alphaW;
+              fragColor = vec4(0.0, 0.0, 0.0, a);
+              return;
+            }
             vec2 uv = vUvC + vec2(vLocal.x, -vLocal.y) * vUvH * 2.0;
             vec3 c;
             if (vGen == 1) c = texture(uSnap1, uv).rgb;
@@ -1147,12 +1167,25 @@
             // weathering: assimilate into the bw world, then dissolve
             float ph1 = smoothstep(0.05, 0.7, vFade);
             c = mix(c, bwTone(lumaOf(c), uDepth), ph1);
-            float alpha = 1.0 - smoothstep(0.62, 1.0, vFade);
-            // block thickness: darkened rim + a faint top-left catch light
-            float dEdge = max(abs(vLocal.x), abs(vLocal.y));
-            c *= 1.0 - 0.38 * smoothstep(0.36, 0.5, dEdge);
-            float lite = smoothstep(0.40, 0.5, max(-vLocal.x, -vLocal.y));
-            c += 0.10 * lite * (1.0 - ph1);
+            float alpha = alphaW;
+            // static per-block brightness jitter (cell-hash via source uv)
+            c *= 0.92 + 0.16 * bhash(vUvC * 611.3);
+            // plaster-chip lighting: the face is grazed from the upper left
+            // and the edge facets catch or lose the light with the block's
+            // rotation (thickness cue — a chip of wall, not confetti)
+            float cs = cos(vAng);
+            float sn = sin(vAng);
+            vec2 wl = vec2(cs * vLocal.x - sn * vLocal.y,
+                           sn * vLocal.x + cs * vLocal.y); // screen, y down
+            c *= 1.0 - wl.y * 0.16;
+            vec2 nl = abs(vLocal.x) > abs(vLocal.y)
+              ? vec2(sign(vLocal.x), 0.0)
+              : vec2(0.0, sign(vLocal.y));
+            vec2 nw = vec2(cs * nl.x - sn * nl.y, sn * nl.x + cs * nl.y);
+            float lit = dot(nw, normalize(vec2(-0.45, -0.89)));
+            float band = smoothstep(0.30, 0.5, dEdge);
+            c *= 1.0 - band * 0.30 * (1.0 - max(lit, 0.0));
+            c += band * 0.16 * max(lit, 0.0) * (1.0 - ph1 * 0.6);
             if (uDebug == 3) {
               vec3 tint = vGen == 0 ? vec3(0.90, 0.30, 0.25)
                 : vGen == 1 ? vec3(0.30, 0.80, 0.40)
@@ -1230,6 +1263,8 @@
             "uSnap2",
             "uDepth",
             "uDebug",
+            "uShadow",
+            "uShadowOff",
           ]),
         };
 
@@ -1343,7 +1378,7 @@
         let heightDirty = true;
 
         // Rigid bodies (invariant #2)
-        const MAX_BODIES = 1600;
+        const MAX_BODIES = 2400;
         const FLOATS_PER_INSTANCE = 10;
         const bodies = [];
         const pendingGen = [];
@@ -1396,11 +1431,14 @@
         function rebuildGrid() {
           const W = canvas.width;
           const H = canvas.height;
-          let gw = Math.round(82 - state.block * 36); // 82 (fine) .. 46 (slabs)
-          gw = Math.max(12, Math.min(96, gw));
+          let gw = Math.round(100 - state.block * 36); // 100 (fine) .. 64 (slabs)
+          gw = Math.max(12, Math.min(110, gw));
           let cw = W / gw;
           let gh = Math.max(6, Math.round(H / cw));
-          while (gw > 12 && gw * gh > 4200) {
+          // cell budget: heal (60Hz) and propagation (12Hz) are O(N) CPU
+          // loops and the mask upload is N bytes/frame — 12000 cells stays
+          // in the microsecond range; bodies are capped separately.
+          while (gw > 12 && gw * gh > 12000) {
             gw -= 2;
             cw = W / gw;
             gh = Math.max(6, Math.round(H / cw));
@@ -1575,30 +1613,14 @@
           heightDirty = true;
         }
 
-        function wakeAbove(c0, c1, yTop) {
-          for (let k = 0; k < bodies.length; k++) {
-            const b2 = bodies[k];
-            if (!b2.asleep || b2.c1 < c0 || b2.c0 > c1) continue;
-            if (b2.y < yTop - 1) {
-              subtractContrib(b2, b2.hLeft);
-              b2.hLeft = 0;
-              b2.c0 = -1;
-              b2.asleep = false;
-              b2.bounces = 2;
-            }
-          }
-        }
-
         function removeBody(idx) {
           const b = bodies[idx];
           snapRefs[b.gen] = Math.max(0, snapRefs[b.gen] - 1);
           subtractContrib(b, b.hLeft);
-          const c0 = b.c0;
-          const c1 = b.c1;
-          const y = b.y;
           bodies[idx] = bodies[bodies.length - 1];
           bodies.pop();
-          if (c0 >= 0) wakeAbove(c0, c1, y);
+          // blocks above the removed one are caught by the per-step
+          // resettle check (quiet subsidence) — no mass wake, no kicks
         }
 
         function forceExpireOldest() {
@@ -1617,7 +1639,9 @@
         function spawnBody(cx, cy) {
           if (bodies.length >= MAX_BODIES) forceExpireOldest();
           const H = canvas.height;
-          const size = Math.min(cellW, cellH) * 0.96;
+          // slight size jitter (cell-hash): varied rubble, not confetti
+          const size =
+            Math.min(cellW, cellH) * (0.8 + 0.34 * cellHash(cx, cy, 17));
           const r1 = cellHash(cx, cy, 11);
           const r2 = cellHash(cx, cy, 12);
           const r3 = cellHash(cx, cy, 13);
@@ -1637,6 +1661,7 @@
             uhy: (0.5 / gridH) * 0.98,
             gen: 0,
             asleep: false,
+            settle: false,
             bounces: 0,
             slides: 0,
             weather: 0,
@@ -1661,10 +1686,13 @@
             if (b.asleep) {
               // resettle: if the pile under this block has sunk (weathering
               // shrink of blocks below, relaxation spreading the pile), the
-              // block would hover in mid-air — wake it so it falls again.
-              // Own contribution is excluded; blocks stacked above keep it
-              // counted as "support", so piles unstack top-down over a few
-              // steps instead of popping all at once.
+              // block would hover in mid-air. Small gaps are absorbed by a
+              // QUIET SUBSIDENCE — the block stays asleep and its position
+              // eases down toward the support (no physics, no bounce, no
+              // spin: the pile thins and settles silently). Only a real
+              // void (a whole missing layer) re-enters physics, and then in
+              // settle mode: it drops straight, lands and sleeps without
+              // bouncing, rolling or spinning.
               if (b.c0 >= 0) {
                 let support = 0;
                 for (let c = b.c0; c <= b.c1; c++) {
@@ -1676,14 +1704,21 @@
                   0.5 *
                   (Math.abs(Math.cos(b.ang)) + Math.abs(Math.sin(b.ang)));
                 const gap = H - Math.max(0, support) - (b.y + he2);
-                if (gap > b.size * 0.35) {
+                if (gap > b.size * 1.6) {
                   subtractContrib(b, b.hLeft);
                   b.hLeft = 0;
                   b.c0 = -1;
                   b.asleep = false;
-                  b.bounces = 2; // settle directly; weathering state kept
-                  b.slides = Math.max(0, b.slides - 2);
+                  b.settle = true; // silent drop: no bounce / roll / spin
+                  b.bounces = 2;
+                  b.slides = 8;
+                  b.vx = 0;
+                  b.vy = 0;
+                  b.angv = 0;
                   continue;
+                }
+                if (gap > 0.5) {
+                  b.y += gap * Math.min(1, dt * 6);
                 }
               }
               b.weather += dt * b.wRate;
@@ -1728,12 +1763,12 @@
               const dropL = ground - colH[cl];
               const dropR = ground - colH[cr];
               const drop = Math.max(dropL, dropR);
-              if (b.vy > 0.28 * H && b.bounces < 2) {
+              if (!b.settle && b.vy > 0.28 * H && b.bounces < 2) {
                 b.vy = -b.vy * rest;
                 b.vx *= 0.55;
                 b.angv *= 0.5;
                 b.bounces++;
-              } else if (drop > b.size * 0.9 && b.slides < 8) {
+              } else if (!b.settle && drop > b.size * 0.9 && b.slides < 8) {
                 // steep top: roll toward the lower flank instead of stacking
                 // (natural angle of repose — the pile spreads sideways)
                 const dir = dropL > dropR ? -1 : 1;
@@ -1749,6 +1784,7 @@
                 b.slides++;
               } else {
                 b.asleep = true;
+                b.settle = false;
                 b.vx = 0;
                 b.vy = 0;
                 b.angv = 0;
@@ -2058,6 +2094,15 @@
           gl.enable(gl.BLEND);
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
           gl.bindVertexArray(blocksVao);
+          if (state.debugView === 0) {
+            // soft drop shadows first, then the blocks on top
+            const cell = Math.min(cellW, cellH);
+            gl.uniform1i(u.uShadow, 1);
+            gl.uniform2f(u.uShadowOff, cell * 0.28, cell * 0.42);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, n);
+          }
+          gl.uniform1i(u.uShadow, 0);
+          gl.uniform2f(u.uShadowOff, 0, 0);
           gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, n);
           gl.bindVertexArray(null);
           gl.disable(gl.BLEND);
