@@ -51,3 +51,5 @@
 [https://dsflon.github.io/webgl2/opus5_koe.html](https://dsflon.github.io/webgl2/opus5_koe.html)
 
 [https://dsflon.github.io/webgl2/fable5_kirie-portrait.html](https://dsflon.github.io/webgl2/fable5_kirie-portrait.html)
+
+[https://dsflon.github.io/webgl2/fable5_itsuwari-hyomen.html](https://dsflon.github.io/webgl2/fable5_itsuwari-hyomen.html)
