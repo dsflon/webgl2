@@ -8,9 +8,9 @@
   概要:
     Webカメラにはいつも通りの自分と風景が映る。しかしそれは偽りで、クリック/タップ
     した点を中心に表面が正方形ブロックとして剥離し、回転しながら崩れ落ちて画面下に
-    堆積する。剥がれた穴からは本当の世界 — 彩度ゼロで味気ない、sobel 輪郭と粗い明暗
-    だけの白黒世界 — が露出する。剥がれたブロックは剥離した瞬間の色を凍結したまま
-    積もり、背後の白黒世界だけが動き続ける。放置すると表面は緩やかに自己修復する。
+    堆積する。剥がれた穴からは本当の世界 — 彩度ゼロでポジネガ反転した、黒い地に
+    白いスクリブル線描だけの世界 — が露出する。剥がれたブロックは剥離した瞬間の色を
+    凍結したまま積もり、背後の線描世界だけが動き続ける。放置すると表面は自己修復する。
 
   様式解析の要約(視覚的不変量、優先順):
     1. 無傷の表面は生のカメラ映像そのもの — 継ぎ目・格子・タイル感は一切見えない。
@@ -26,10 +26,14 @@
        立ったブロックが倒れる、が接触点トルクから自然に出る。
     5. 崩壊は部分的 — クリックは手のひら大。支持喪失伝播(ストレス場の幾何減衰)で
        周縁セルが時間差で追い崩れ、必ず有限半径で止まる。乱数は cell-hash。
-    4. 裏世界は彩度ゼロ — ライブ輝度の sobel 輪郭+3〜4 段の無彩ポスタライズを
-       暗めに沈める。ライブ検知なので裏世界の被写体は動き続ける。
+    4. 裏世界は彩度ゼロのポジネガ線描 — fable5_scribble-cam.html のスクリブル
+       シェーダ(sobel 接線 ↔ curl ノイズの流れ場+ドメインワープした方向性
+       ラインノイズ 3 オクターブ+輝度→線密度ゲート+静的スペックル)を
+       フルフレームで移植(MediaPipe の人物マスクは持ち込まない。外部依存ゼロを
+       維持)。既定はネガ(黒地に白線)。毎フレーム再計算されるライブ描画なので
+       裏世界の被写体は動き続けるが、線パターンの乱数は座標のみ由来で静的。
     6. 自己修復と風化 — マスクは穴の端から ema 的長時定数で回復。堆積ブロックは
-       寿命で退色して白黒世界に同化し消滅(ボディ数・堆積高さは有界)。風化は
+       寿命で退色して裏の線描世界に同化し消滅(ボディ数・堆積高さは有界)。風化は
        修復と連動: 元セルが修復済みになったブロックは残り寿命を 2〜4 秒
        (cell-hash ジッタ)に切り詰められ、消えた分だけ山が quiet ウェイク
        (無反発)で静かに沈降 — 表面が直るほど床の証拠も消えていき、
@@ -37,7 +41,8 @@
 
   パイプライン図(P2 のみイベント時、他は毎フレーム):
     video / fakeScene ─► [P0 scene] cover-fit+mirror      sceneT  RGBA8 長辺≤1024
-    sceneT ───────────► [P1 bw   ] sobel+無彩ポスタライズ  bwT     RGBA8 長辺≤512
+    sceneT ───────────► [P1 bw   ] スクリブル線描(ポジネガ) bwT    RGBA8 長辺≤512
+                        (sobel 接線+curl 流れ場+方向性ラインノイズ 3 oct)
     sceneT ─(剥離時)──► [P2 snap ] copyTexSubImage2D      snapT×3 RGBA8 sceneT同寸
     [CPU mask] グリッド(基準 82列、セル上限 12000)剥離/伝播/修復 → R8 一方向転送
     [CPU phys] 剥離セル→剛体ボディ(≤2400)。接触ソルバ(Matter.js と同構成を
@@ -82,8 +87,10 @@
     tumble  破片の暴れ(0.50)— 剥離時の初速・角速度・反発係数
     heal    修復の速さ(0.35)— 剥離マスクの回復時定数(0=ほぼ直らない)
     weather 破片の風化(0.50)— 堆積ブロックの退色・消滅までの寿命
-    depth   裏世界の暗さ(0.30)— 白黒世界の沈み(既定は明るめの線画。上げると夜へ)
-    edge    輪郭の感度(0.50)— sobel 輪郭のしきい値と線の太さ
+    nega    ポジネガ(0.90)— 裏世界の反転度。1=完全なネガ(黒地に白線)/
+            0=ポジ(白地に黒線)。中間は連続補間(中点付近は線のインク階調を
+            保護して図が消えないようにする)
+    edge    輪郭の感度(0.50)— sobel 輪郭の線密度ブーストのしきい値と強さ
     tilt    傾きの効き(0.60)— モバイルで端末を左右に傾けたとき重力を傾ける
             最大角(1.0 で 40°)。0 で傾き入力を無効化。PC は傾きイベントが
             来ないので常に無効(見た目は従来どおり)。縦持ち・横持ち
@@ -515,7 +522,7 @@
           tumble: 0.5,
           heal: 0.35,
           weather: 0.5,
-          depth: 0.3,
+          nega: 0.9,
           edge: 0.5,
           tilt: 0.6,
         };
@@ -532,7 +539,7 @@
               tumble: 0.5,
               heal: 0.62,
               weather: 0.62,
-              depth: 0.42,
+              nega: 0.96,
               edge: 0.78,
               tilt: 0.6,
             },
@@ -546,7 +553,7 @@
               tumble: 0.55,
               heal: 0.04,
               weather: 0.15,
-              depth: 0.95,
+              nega: 1.0,
               edge: 0.55,
               tilt: 0.75,
             },
@@ -577,8 +584,8 @@
           ["tumble", "破片の暴れ", "剥離時の初速・回転・反発", 0, 1, 0.01],
           ["heal", "修復の速さ", "0=ほぼ直らない / 1=すぐ戻る", 0, 1, 0.01],
           ["weather", "破片の風化", "堆積ブロックの退色と寿命", 0, 1, 0.01],
-          ["depth", "裏世界の暗さ", "白黒世界の沈み(黒レベル)", 0, 1, 0.01],
-          ["edge", "輪郭の感度", "sobel 輪郭のしきい値と太さ", 0, 1, 0.01],
+          ["nega", "ポジネガ", "1=ネガ(黒地に白線) / 0=ポジ(白地に黒線)", 0, 1, 0.01],
+          ["edge", "輪郭の感度", "sobel 輪郭の線密度ブースト", 0, 1, 0.01],
           ["tilt", "傾きの効き", "モバイル: 端末を傾けると山が流れる", 0, 1, 0.01],
         ];
 
@@ -586,7 +593,8 @@
           <h1>FABLE5 · 偽りの表面</h1>
           <p>
             いつも通りの映像は貼りものの表面。クリック/ドラッグで正方形の
-            ブロックが剥離して崩れ落ち、彩度ゼロの白黒世界が露出する。
+            ブロックが剥離して崩れ落ち、ポジネガ反転した黒地に白線描の
+            世界が露出する。
             破片は剥がれた瞬間の映像を凍結したまま画面下に積もり、
             放置すると表面は緩やかに自己修復する。
           </p>
@@ -811,20 +819,31 @@
           }
         `;
 
-        // Shared achromatic tone mapping of the "true" bw world:
-        // 4 posterized gray steps sunk by uDepth, plus the sobel line color.
+        // Shared achromatic tone mapping of the "true" world.
+        // negaInk maps scribble ink coverage (0 = ground, 1 = full line) to
+        // the pos/neg tone: nega 1 = white lines on black, 0 = black on
+        // white. Near the crossing (nega ≈ 0.5) the ground and line ramps
+        // would meet in flat gray, so a mid-protection term re-injects an
+        // ink-graded tone and keeps the drawing readable at every value.
+        // bwTone is kept as the weathering TARGET of pile blocks (invariant
+        // 6: fade into the true world) — it is fed a nega-derived depth so
+        // fading chips sink toward the ground tone of the current world.
         const CHUNK_TONE = `
           float lumaOf(vec3 c) {
             return dot(c, vec3(0.299, 0.587, 0.114));
+          }
+          vec3 negaInk(float ink, float ng) {
+            float g = mix(0.93, 0.03, ng);
+            float li = mix(0.055, 1.0, ng);
+            vec3 col = vec3(mix(g, li, ink));
+            float mid = 1.0 - abs(2.0 * ng - 1.0);
+            return mix(col, vec3(mix(0.30, 0.72, ink)), mid * 0.42);
           }
           vec3 bwTone(float l, float dpt) {
             float lq = clamp(floor(l * 4.0) / 3.0, 0.0, 1.0);
             float hi = mix(0.92, 0.30, dpt);
             float lo = mix(0.24, 0.045, dpt);
             return vec3(mix(lo, hi, lq));
-          }
-          vec3 bwLine(float dpt) {
-            return vec3(mix(0.06, 0.005, dpt));
           }
         `;
 
@@ -977,23 +996,51 @@
           }
         `;
 
-        // P1 — the true bw world: live sobel contours over a 4-step
-        // achromatic posterize, sunk dark by uDepth. Runs every frame so the
-        // world behind the holes keeps moving.
+        // P1 — the true world behind the surface: a live scribble drawing,
+        // ported from fable5_scribble-cam.html (FS_PREP + FS_SCRIBBLE merged
+        // into one pass at bw resolution; the MediaPipe mask gating of the
+        // original is deliberately NOT carried over — full-frame scribble,
+        // zero external dependencies). Sobel tangents blended toward curl
+        // noise make the flow field; 3 octaves of domain-warped directional
+        // line noise draw the strokes; luminance gates the line density;
+        // a static speckle grain roughens the ground. uNega flips the ink:
+        // 1 = white lines on black (negative), 0 = black on white.
+        // Runs every frame so the world behind the holes keeps moving, but
+        // every seed is coordinate-only (no time) — a still input is still.
         const bwFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
           out vec4 fragColor;
           uniform sampler2D uScene;
           uniform vec2 uTexel;
-          uniform float uDepth;
+          uniform vec2 uBwRes;
+          uniform float uNega;
           uniform float uEdge;
           ${CHUNK_NOISE}
           ${CHUNK_TONE}
+          float fbm(vec2 p) {
+            float v = 0.0;
+            float a = 0.5;
+            for (int i = 0; i < 3; i++) {
+              v += a * vnoise(p);
+              p = p * 2.03 + 11.7;
+              a *= 0.5;
+            }
+            return v;
+          }
+          // curl of an fbm potential — divergence-free organic meander for
+          // flat regions where the sobel tangent has nothing to follow
+          vec2 curlNoise(vec2 p) {
+            float e = 0.02;
+            float dpdy = fbm(p + vec2(0.0, e)) - fbm(p - vec2(0.0, e));
+            float dpdx = fbm(p + vec2(e, 0.0)) - fbm(p - vec2(e, 0.0));
+            return vec2(dpdy, -dpdx);
+          }
           float lumAt(vec2 uv) {
             return lumaOf(texture(uScene, uv).rgb);
           }
           void main() {
+            // ---- sobel on the live luminance ----
             float l00 = lumAt(vUv + uTexel * vec2(-1.0, -1.0));
             float l01 = lumAt(vUv + uTexel * vec2(-1.0, 0.0));
             float l02 = lumAt(vUv + uTexel * vec2(-1.0, 1.0));
@@ -1006,14 +1053,64 @@
             float gx = (l20 + 2.0 * l21 + l22) - (l00 + 2.0 * l01 + l02);
             float gy = (l02 + 2.0 * l12 + l22) - (l00 + 2.0 * l10 + l20);
             float mag = length(vec2(gx, gy));
-            float thr = mix(0.60, 0.12, uEdge);
-            float wdt = mix(0.30, 0.14, uEdge);
-            float edgeM = smoothstep(thr, thr + wdt, mag);
-            vec3 tone = bwTone(l11, uDepth);
-            // static sensor grain (cell-coordinate seed, no time)
-            tone *= 1.0 + (vnoise(vUv * vec2(240.0, 200.0)) - 0.5) * 0.07;
-            vec3 col = mix(tone, bwLine(uDepth), edgeM);
-            fragColor = vec4(col, 1.0);
+            // edge tangent (gradient rotated 90°) vs curl-noise meander
+            vec2 tang = normalize(vec2(-gy, gx) + 1e-6);
+            vec2 curl = normalize(curlNoise(vUv * 3.0) + 1e-6);
+            float fw = clamp(smoothstep(0.03, 0.30, mag) * 1.3, 0.0, 1.0);
+            vec2 dir = normalize(mix(curl, tang, fw) + 1e-6);
+            float theta = atan(dir.y, dir.x);
+
+            // ---- luminance → line density ----
+            // High thresholds: mid tones stay empty ground and only true
+            // highlights fill with a dense tangle — the drawing is carried
+            // by the contour boost (white outlines on black, per the ref).
+            float Lc = clamp((l11 - 0.5) * 1.35 + 0.5, 0.0, 1.0);
+            float dens = smoothstep(0.74, 0.98, Lc) * 0.95;
+            // contour boost: brows / frames / silhouettes stay legible even
+            // at mid luminance (uEdge = threshold + strength of the boost)
+            float eBoost = smoothstep(mix(0.42, 0.08, uEdge),
+              mix(0.80, 0.26, uEdge), mag);
+            dens = max(dens,
+              eBoost * mix(0.6, 1.0, uEdge) * smoothstep(0.015, 0.08, Lc));
+
+            // ---- 3 octaves of domain-warped directional line noise ----
+            float aspect = uBwRes.x / max(1.0, uBwRes.y);
+            vec2 auv = vUv * vec2(aspect, 1.0);
+            float acc = 0.0;
+            for (int i = 0; i < 3; i++) {
+              float fi = float(i);
+              float sc = 46.0 * (1.0 + fi * 0.8);
+              // orientation wobble (tangle) + fixed per-octave rotation
+              float wob = (fbm(auv * sc * 0.30 + fi * 17.1) - 0.5) * 2.2;
+              float a2 = theta + wob + fi * 0.35;
+              vec2 dirO = vec2(cos(a2), sin(a2));
+              vec2 nrm = vec2(-dirO.y, dirO.x);
+              // domain warp bends parallel stripes into loops and hooks
+              float warp = (fbm(auv * sc * 0.09 + fi * 7.7) - 0.5) * 7.0;
+              float phase = dot(auv, nrm) * sc + warp + fi * 0.618;
+              // along-line coordinate → segments for density gating
+              float s = dot(auv, dirO) * sc * 0.35 +
+                (fbm(auv * sc * 0.20 + fi * 3.3) - 0.5) * 2.0;
+              vec2 cell = vec2(floor(phase), floor(s));
+              float r1 = hash12(cell + fi * 31.7);
+              float r2 = hash12(cell + fi * 57.3 + 11.0);
+              float pr = dens * (1.0 - fi * 0.18);
+              float on = step(r1, pr);
+              // thin AA line at every integer phase (pixel-exact via fwidth)
+              float f = abs(fract(phase) - 0.5);
+              float wpx = fwidth(phase);
+              float lw = 0.9 * wpx;
+              float line = (1.0 - smoothstep(lw, lw + wpx, f)) * on *
+                (0.55 + 0.45 * r2);
+              acc = acc + line * (1.0 - acc);
+            }
+
+            // ---- static speckle grain (coordinate seed only, no time) ----
+            vec2 gp = floor(vUv * uBwRes);
+            float gh = hash12(gp + 7.3);
+            float ink = clamp(acc + (gh - 0.5) * 0.14 +
+              step(0.986, hash12(gp + 41.7)) * 0.30, 0.0, 1.0);
+            fragColor = vec4(negaInk(ink, uNega), 1.0);
           }
         `;
 
@@ -1030,6 +1127,7 @@
           uniform sampler2D uMask;
           uniform vec2 uGrid;
           uniform float uDepth;
+          uniform float uNega;
           uniform int uDebug;
           ${CHUNK_NOISE}
           ${CHUNK_TONE}
@@ -1051,15 +1149,15 @@
 
           vec3 specimenView(vec2 uv) {
             vec3 c = vec3(0.115, 0.11, 0.125);
-            // (a) bw tone ramp: 4 posterize steps + line color
+            // (a) nega ink ramp: ground → 3 density steps → full line,
+            // at the current pos/neg setting (the bw-world tone specimen)
             if (uv.y > 0.80 && uv.y < 0.93) {
               float fx = (uv.x - 0.05) / 0.90;
               if (fx >= 0.0 && fx < 1.0) {
                 float ci = floor(fx * 5.0);
                 float lf = fract(fx * 5.0);
                 if (lf > 0.06 && lf < 0.94) {
-                  if (ci < 3.5) c = bwTone((ci + 0.5) / 4.0, uDepth);
-                  else c = bwLine(uDepth);
+                  c = negaInk(ci / 4.0, uNega);
                 }
               }
             }
@@ -1310,13 +1408,20 @@
             "uFake",
             "uHasVideo",
           ]),
-          bw: getLocations(programs.bw, ["uScene", "uTexel", "uDepth", "uEdge"]),
+          bw: getLocations(programs.bw, [
+            "uScene",
+            "uTexel",
+            "uBwRes",
+            "uNega",
+            "uEdge",
+          ]),
           comp: getLocations(programs.comp, [
             "uScene",
             "uBw",
             "uMask",
             "uGrid",
             "uDepth",
+            "uNega",
             "uDebug",
           ]),
           blocks: getLocations(programs.blocks, [
@@ -3170,13 +3275,21 @@
           });
         }
 
+        // The weathering TARGET tone of pile blocks (and the specimen's
+        // weathering row) follows the current world: deep nega → fade toward
+        // dark grays, positive → light grays (invariant 6 stays coherent).
+        function negaDepthEq() {
+          return 0.15 + 0.7 * state.nega;
+        }
+
         function renderBw() {
           renderPass(targets.bw, programs.bw, () => {
             const u = locations.bw;
             bindTexture(0, targets.scene.tex);
             gl.uniform1i(u.uScene, 0);
             gl.uniform2f(u.uTexel, 1 / bwW, 1 / bwH);
-            gl.uniform1f(u.uDepth, state.depth);
+            gl.uniform2f(u.uBwRes, bwW, bwH);
+            gl.uniform1f(u.uNega, state.nega);
             gl.uniform1f(u.uEdge, state.edge);
           });
         }
@@ -3214,7 +3327,8 @@
             gl.uniform1i(u.uBw, 1);
             gl.uniform1i(u.uMask, 2);
             gl.uniform2f(u.uGrid, gridW, gridH);
-            gl.uniform1f(u.uDepth, state.depth);
+            gl.uniform1f(u.uDepth, negaDepthEq());
+            gl.uniform1f(u.uNega, state.nega);
             gl.uniform1i(u.uDebug, state.debugView);
           });
         }
@@ -3254,7 +3368,7 @@
           gl.uniform1i(u.uSnap1, 1);
           gl.uniform1i(u.uSnap2, 2);
           gl.uniform2f(u.uRes, canvas.width, canvas.height);
-          gl.uniform1f(u.uDepth, state.depth);
+          gl.uniform1f(u.uDepth, negaDepthEq());
           gl.uniform1i(u.uDebug, state.debugView);
           gl.enable(gl.BLEND);
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
