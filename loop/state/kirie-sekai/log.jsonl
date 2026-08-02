@@ -14,3 +14,5 @@
 {"at":"2026-08-02T04:20:53.524Z","event":"error","status":"runtime_ok"}
 {"at":"2026-08-02T04:20:53.639Z","event":"needs_review","status":"needs_review"}
 {"at":"2026-08-02T04:20:53.752Z","event":"cost","status":"needs_review"}
+{"at":"2026-08-02T05:02:55.313Z","event":"status:submitted","status":"submitted"}
+{"at":"2026-08-02T05:02:55.470Z","event":"cost","status":"submitted"}

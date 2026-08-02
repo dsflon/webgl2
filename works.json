@@ -1,5 +1,20 @@
 [
   {
+    "slug": "fable5_kirie-sekai",
+    "file": "fable5_kirie-sekai.html",
+    "title": "切り紙の世界",
+    "date": "2026-08-02",
+    "desc": "カメラに映った世界のすべて — 人も、部屋も、窓も — が多層ペーパーカットになる。画面全体が輝度で切り分けられた4〜8枚の紙のレイヤーとなり、各層は切り口の厚みと下の層への落ち影を持つ。検知を使わず、映るものすべてが同じ紙のセットから切り出される風景箱。切り紙の積層ポートレートの発展形。Fable 5 で制作。",
+    "model": "Fable 5",
+    "tags": [
+      "WebGL2",
+      "Paper Cut",
+      "Quantize"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_kirie-sekai.jpg"
+  },
+  {
     "slug": "fable5_itsuwari-hyomen",
     "file": "fable5_itsuwari-hyomen.html",
     "title": "偽りの表面",
