@@ -1,0 +1,84 @@
+{
+  "artifact": {
+    "file": "fable5_kirie-sekai.html",
+    "screenshots": [
+      "loop/state/kirie-sekai/shots/small_final.png",
+      "loop/state/kirie-sekai/shots/small_night.png",
+      "loop/state/kirie-sekai/shots/final_day.png",
+      "loop/state/kirie-sekai/shots/final_night.png",
+      "loop/state/kirie-sekai/shots/final_sepia.png",
+      "loop/state/kirie-sekai/shots/final_warm.png",
+      "loop/state/kirie-sekai/shots/crop_day_person.png",
+      "loop/state/kirie-sekai/shots/crop_day_window.png",
+      "loop/state/kirie-sekai/shots/crop_night_center.png",
+      "loop/state/kirie-sekai/shots/zoom_head.png",
+      "loop/state/kirie-sekai/shots/zoom_wall.png",
+      "loop/state/kirie-sekai/shots/final_d1.png",
+      "loop/state/kirie-sekai/shots/final_d2.png",
+      "loop/state/kirie-sekai/shots/final_d3.png",
+      "loop/state/kirie-sekai/shots/final_d4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "窓辺に座る人物の室内ポートレート。フラットな色面が段状に重なり、各段の縁に細い明るいエッジと下への影が見える——切り紙/レイヤードペーパー風のイラストに見える(brief 参照前の記録)。テーマ『多層ペーパーカットの風景箱』と被写体・様式ともに一致し、単なるポスタライズ写真には見えない。ただし前景の暗帯と服の内部にわずかな写真的グラデーションの気配があり、そこだけ紙でなく塗りに読める。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 3,
+      "evidence": "zoom_wall.png では壁の3帯(ベージュ/中テール/暗テール)に切り口ハイライト+短い落ち影が明瞭で紙積層として成立、zoom_head.png でも髪の周囲の多段の帯に厚みが読める。しかし『面の内部はほぼ平坦』が複数箇所で破れている: (a) final_day.png / final_night.png の画面最下帯(机)は量子化されていない連続グラデーション+暗いビネット状の塊で、紙でなく塗りに見える。(b) crop_day_person.png の黒いセーター内部に滑らかな縦の襞の陰影(連続階調)が残存。(c) crop_night_center.png / final_night.png の顔・上着は頬から顎へ写真的なグラデーションが広く残り、夜プリセットは半分ペイント調に退行している。(d) zoom_head.png の黒髪内部に放射状の淡いストリーク(元映像の階調)が透けている。紙エンジン自体は動いているが、量子化を免れた連続階調の領域が広く、様式の核が部分的に崩れている。",
+      "reject_reasons": [
+        "画面最下帯(机)が量子化されない連続グラデーション+ビネットで紙として読めない(final_day/final_night)",
+        "セーター・夜プリセットの顔と上着の内部に写真の連続階調が広く残存(crop_day_person / crop_night_center)",
+        "髪内部に元映像由来の放射ストリークが透ける(zoom_head)"
+      ],
+      "fix_instructions": [
+        "因果診断: kuwahara+quantile の量子化後に、量子化前の平滑輝度(または元映像)を soft-light 的に再混入している/暗部保護が最下帯・服・夜プリセットの肌で量子化を実質バイパスしており、連続階調がそのまま最終合成に届いている。ビネットも量子化後段に掛かるため紙トーンを壊す。",
+        "処方: 量子化後の各面の内部変調を fbm 紙グレイン(振幅≤0.03、cell-hash 位相)のみに制限し、量子化前輝度の後段再混入とビネットを撤去する(暗い机は最暗の紙トーン1段としてフラットにスナップ)。夜プリセットの肌・上着も oklab パレットスナップの対象に含め、量子化段数の範囲(4〜8)内で処理する。修正後は zoom_wall/crop_night_center 相当の等倍クロップで面内の輝度レンジがグレイン振幅以下であることを確認する。"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "zoom_head.png(等倍)で髪・顔・壁の境界を確認: いずれも大きな曲率のハサミ曲線で、1〜2px の鋸歯・ちぎれた飛び地の粒は見当たらない。final_day.png 全景でも紙吹雪状の小片やノイズ島は無く、髪の右の小さな白片(髷の紙片)や果実・ランプは最小紙片サイズ以上の明快な形。crop_day_window.png の窓枠まわりは細い帯が多段に重なりやや busy だが、各帯は連続しており『ちぎれ』ではない。final_d3.png の境界帯ビューでも境界線は連続した滑らかなループで、断片化・毛羽立ちは確認できなかった。減点候補として zoom_head.png の壁境界にごく弱い揺らぎ(数px の波打ち)があるが、手切りの揺れの範囲で工芸を壊していない。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "zoom_wall.png: ベージュ帯→中テール帯→暗テール帯の各境界で、落ち影は常に上の(明るい)層が下の(暗い)層へ下向きに落とし、切り口ハイライトは上縁——光源は一貫して上方。ランプの円も上縁ハイライト+下側の影で同じ光源に従う。zoom_head.png と crop_day_person.png でも壁(明)→人物(暗)→髪(最暗)の順に明→手前の重なりが固定され、影の方向の反転箇所は見つけられなかった。final_d3.png の境界帯ビューでもハイライト側(明)と影側(暗)の帯の付き方が全画面で同相。final_night.png / final_sepia.png のプリセット替えでも層順・影方向は保たれる。edge darkening も控えめで、ランダムな縁取りには見えない。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "final_d4.png(標本ビュー)にプリセットごとの紙セットの階段(テール/ベージュ系、橙/紫紺系、褐色系)が表示され、final_day.png・final_night.png・final_sepia.png の全レイヤー色がそれぞれの紙セットに収まっている。day は teal×生成りの2系統+肌+橙アクセント(果実・ランプ)で色数が絞られ、ref_1_hijab.jpg の『少ない紙トーンの階段』の言語に合致。実写色がそのまま段々になった気配(雑多な色相の残存)は crop_day_window.png の空の淡いブルーグレー程度で、これもセット内のトーンに読める。fbm の紙繊維グレインは zoom_wall.png の面内に確認できる。夜プリセットの顔の連続グラデーションは inv1 で減点済みのためここでは重複減点しないが、パレット自体の統一は保たれている。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "静止画からは時間挙動を直接判定しない。V1 運動応答チェック pass(unfrozen mean|Δ|=11.07/255 で量子化境界が動く合成シーンに追従)、および V1 flicker=0.000 pass を判定根拠とする。final.png(ゆらぎを停止 ON)と final_warm.png(OFF)の比較でも境界位置は保たれており、静止画側に沸き立ちを示唆する痕跡(境界の多重ゴースト等)は見つけられなかった。ema ドリフトの単調上昇なしは実装者の自己申告のため加点根拠にはせず、5 ではなく 4 に留める。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 6,
+      "score": 3,
+      "evidence": "人物のシルエット・髪・顔の輪郭は全プリセットで明快に読める(small_final.png でも人物と分かる)。目と眉は final_day.png・crop_night_center.png で暗い小紙片として明瞭に生存。しかし『口』が読めない: final_day.png と final_sepia.png では鼻下〜顎が肌トーンの面に統合され口の紙片が消失、crop_night_center.png(夜)でも口の位置に判別可能な紙片が確認できない。ref_2_curls_man.jpg の『目・唇だけ精密』という参照言語に対し唇が欠落している。加えて鼻のハイライトが巨大な白い紙片(final_day.png の顔中央)に肥大し、顔の判読をむしろ歪めている。目・眉が生きているため 1〜2 ではないが、不変量の明示要件(目・眉・口)を満たさないため 3。",
+      "reject_reasons": [
+        "口の紙片が全プリセットで最小紙片フロアに吸収されて消失(final_day / final_sepia / crop_night_center)",
+        "鼻ハイライトが過大な白紙片に肥大し顔の比率を歪める(final_day 顔中央)"
+      ],
+      "fix_instructions": [
+        "因果診断: 全画面 quantile では口唇のような低コントラスト・小面積の暗部が最小紙片サイズのフロア(下層への統合)に食われて消える。一方、鼻梁のハイライトは局所細分で明側に 2 段割り当てられ、白トーンへスナップされた面が肥大している——暗部保護と明部細分のバランスが顔で逆転している。",
+        "処方: 局所コントラスト応答の quantile 細分を暗側に寄せる(暗部の精密 0.60→0.75〜0.85 相当)。輝度下位 ~5% かつ画面幅比 0.5〜2% の暗い小面(口・目・眉)は最小紙片統合の例外として最暗トーンの紙片で保持する。同時に明側は最明トーンへのスナップしきい値を 1 段引き上げ、鼻ハイライトの白面積を現状の 1/2〜1/3 に縮小する。修正後、3 プリセット全ての final で目・眉・口の 3 要素が独立した紙片として読めることを確認する。"
+      ]
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 4
+  },
+  "verdict": "fail",
+  "summary": "第一印象は『多層ペーパーカットの風景箱』としてテーマに一致し、切り口ハイライト・下向きの落ち影・限定パレット・滑らかなハサミ曲線という紙エンジンの骨格は壁面(zoom_wall)で高品質に成立している。V1 の運動応答・flicker も pass。しかし fail とする理由が2つ残る: (1) inv1=3 — 画面最下帯・セーター・夜プリセットの顔に量子化を免れた写真の連続階調が広く残り、当該領域だけ紙でなく塗りに退行している。(2) inv6=3 — 目・眉は紙片として生きているが口が全プリセットで消失し、鼻の白ハイライト片が肥大して顔の判読を歪める。いずれも量子化後段の連続トーン再混入の撤去と、暗部小紙片の保護/明部スナップの再配分という数値調整で到達可能な距離にある。"
+}

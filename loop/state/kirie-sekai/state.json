@@ -9,7 +9,29 @@
     "runtime": 1,
     "aesthetic": 1
   },
-  "last_error": null,
+  "last_error": [
+    {
+      "path": "invariants[6]",
+      "rule": "aesthetic",
+      "severity": "error",
+      "message": "口が3プリセット+finalの全てで紙片として消失(Checker A/B一致)。目・眉は最暗紙片で生存。鼻ハイライトが巨大な白紙片に肥大(review2)",
+      "hint": "口唇は中輝度・低コントラストの小面のため暗部保護に乗らずquantile量子化で肌トーンに吸収。顔スケール局所ウィンドウ(~8%)の局所quantile細分で口幅相当(1.5〜3%)の暗色小紙片を肌セット最暗段として保持。口紙片はinv2の最小紙片幅フロアを上回る太さ≥1%の1枚で出す。明側スナップを1段引き上げ鼻の白面積を1/2〜1/3に"
+    },
+    {
+      "path": "invariants[1]",
+      "rule": "aesthetic",
+      "severity": "error",
+      "message": "面内の連続階調が広範囲に残存: 机の下帯グラデ+ビネット/セーター襞の縦縞/夜プリセットの顔の写真的グラデ/髪内部の放射スジ(review2、Aも副次指摘)",
+      "hint": "量子化後段への連続輝度再混入とビネットを撤去。面内変調はfbm紙グレイン(振幅≤0.03、cell-hash位相)のみに制限。机は最暗紙トーン1段にフラットスナップ。夜の肌・上着もoklabスナップ対象に。修正後は等倍クロップで面内輝度レンジがグレイン振幅以下であること"
+    },
+    {
+      "path": "invariants[2]",
+      "rule": "aesthetic",
+      "severity": "error",
+      "message": "窓桟・引き紐が幅1〜3pxの糸状ストリップとして残存(画面幅比0.2〜0.3%)。窓ガラス縁に1〜2pxの入れ子ハイライトリング多重、桟交差部に破片の団子(review1)",
+      "hint": "最小帯幅フロアが島面積しか見ておらず細長い帯が素通し。境界帯の帯幅を擬似sdfで測り画面幅比0.8〜1.2%未満の帯は無条件に下層統合。hysteresisの段統合(隣接段の輝度差<0.06は統合)。層間隔が切り口帯幅より狭い場所ではrim/影の描画を抑制"
+    }
+  ],
   "requires_human": false,
   "blocked_reason": null,
   "resume_stage": null,
@@ -19,5 +41,5 @@
     "wall_minutes": 12
   },
   "pr_url": null,
-  "updated_at": "2026-08-02T01:53:38.425Z"
+  "updated_at": "2026-08-02T02:05:27.287Z"
 }
