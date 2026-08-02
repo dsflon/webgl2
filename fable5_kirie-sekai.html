@@ -15,18 +15,22 @@
        量子化場を quantile しきい値(CPU 統計 ~200ms 毎 readback → ema+hysteresis)で
        4〜8 段に量子化。境界近傍の擬似 sdf 帯((F-T)/fwidth(F))で切り口ハイライト+
        単一光源方向オフセットの落ち影。面内部は平坦。
-    2. ハサミの滑らかさ(マーク) — 量子化場の低周波性が境界曲率を保証。fwidth 比較の
-       最小帯幅フロア(~4px 未満の帯は下の層へ統合)。乱数は cell-hash のみ。
+    2. ハサミの滑らかさ(マーク) — 量子化場の低周波性が境界曲率を保証。擬似 sdf の
+       最小帯幅フロア(画面幅比 ~0.9% 未満の帯は下の層へ統合し rim/影も抑制)。
+       暗部フロアの紙片は min-tap 膨張で幅 ≥1% に太らせる(糸の禁止)。乱数は cell-hash のみ。
     3. 奥行きの秩序(知覚/場) — 量子化レベル⇔前後関係を固定対応。「明=手前/暗=手前」は
        プリセットで反転し、量子化場そのものを F=1-L に反転することで rim の付く側・
        落ち影の向きが自動的に一貫して反転する(光源は常に左上)。
     5. 時間安定(時間) — 平滑輝度は ping-pong の時間 ema、しきい値は CPU 側
        hysteresis(不感帯)+ema。乱数シードに時間を混ぜない。静止入力で完全静止。
     4. 限定パレット(色) — 各層の色を oklab で紙セット(プリセット3種の紙トーン階段)へ
-       スナップ。紙グレインは fbm で層ごとに位相を変える。
-    6. 人物の判読性(知覚) — 検知なしで、細平滑輝度の暗部フロア(最暗の数%を
-       インク紙として保持=目・眉)+局所コントラストに応じた量子化段の局所細分
-       (中間平滑場で帯を1回半分割する従属レイヤー)。
+       スナップ。シーンのクロマはレベル別平均(CPU 統計)1色のみ=紙 1 枚 1 色。
+       紙グレインは fbm で層ごとに位相を変える(面内の変調はグレインのみ)。
+    6. 人物の判読性(知覚) — 検知なしで、細平滑輝度の暗部フロア(最暗の数%の
+       小さな面のみをインク紙として保持=目・眉。大きな暗部と糸状の線は除外)+
+       口スケール(中間ぼかしと量子化場の輝度差)の shade 紙片(唇=肌より一段
+       暗い紙)+局所コントラストに応じた量子化段の局所細分+最明紙へのスナップ
+       しきい値の引き上げ(鼻ハイライトの白面積を抑制)。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
     入力: カメラ映像 or ?fakesource=1(GLSL 合成: 窓のある室内+動く人物+振り子ランプ+雲)
@@ -35,11 +39,16 @@
                 (rgb=平坦色, a=fine輝度)
     [P1b band ] struct の分離ガウス2段: σ小→bandM(細分場)   bandM★  ≤384
                 さらに σ大→bandT(量子化場)                  bandT★  ≤384
-    [P2 stats ] R=量子化場輝度 G=fine輝度                    statsT RGBA8 128×128
+    [P2 stats ] R=量子化場輝度 G=fine輝度 B/A=oklab a,b      statsT RGBA8 128×128
                 → CPU readback ~200ms 毎 → ヒストグラム(64bin) → quantile →
                 hysteresis+ema → uniform しきい値配列
-    [P3 comp  ] 量子化(4〜8層, プリセットで F 反転)+擬似 sdf 帯の切り口/落ち影+
-                暗部フロア+局所細分+oklab 紙パレット+fbm 紙グレイン → canvas(DPR≤2)
+                +レベル別平均クロマ(uAB: 紙1枚=1色の平坦クロマ。量子化前の
+                連続クロマを合成段で再混入しない — 面内変調は紙グレインのみ)
+    [P3 comp  ] 量子化(4〜8層, プリセットで F 反転)+最小帯幅フロア(画面幅比
+                ~0.9%未満の帯は下層へ統合・rim/影も抑制)+擬似 sdf 帯の
+                切り口/落ち影+暗部フロア(小面・太らせ≥1%のみ)+口スケールの
+                shade 紙片+局所細分+oklab 紙パレット+fbm 紙グレイン
+                → canvas(DPR≤2)。ビネットなし
 
   実行方法:
     python3 -m http.server 8888 → http://localhost:8888/fable5_kirie-sekai.html を開き
@@ -884,7 +893,10 @@
         // P2 — quantile statistics source, read back on the CPU at a low
         // cadence (~200 ms — never every frame, repo rule §8-13).
         // R = luminance of the quantization field (bandT), G = the fine
-        // luminance (struct alpha; feeds the dark-floor quantile).
+        // luminance (struct alpha; feeds the dark-floor quantile),
+        // B/A = packed oklab a/b of the quantization field colour — the CPU
+        // averages them PER QUANTIZED LEVEL, so every paper sheet gets ONE
+        // flat chroma (no continuous chroma re-mix in the composite, inv 1).
         const statsFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -892,10 +904,15 @@
           uniform sampler2D uBand;
           uniform sampler2D uStruct;
           float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          ${CHUNK_OKLAB}
           void main() {
-            float L = lumaf(texture(uBand, vUv).rgb);
+            vec3 c = texture(uBand, vUv).rgb;
+            float L = lumaf(c);
             float fine = texture(uStruct, vUv).a;
-            fragColor = vec4(L, fine, 0.0, 1.0);
+            vec3 lab = lin2oklab(srgb2lin(c));
+            fragColor = vec4(L, fine,
+              clamp(lab.y * 1.25 + 0.5, 0.0, 1.0),
+              clamp(lab.z * 1.25 + 0.5, 0.0, 1.0));
           }
         `;
 
@@ -922,6 +939,7 @@
           uniform float uTh[7];
           uniform int uN;
           uniform float uDark;
+          uniform vec2 uAB[8];
           ${CHUNK_NOISE}
           ${CHUNK_OKLAB}
           ${CHUNK_PAL}
@@ -951,15 +969,16 @@
 
           // paper colour at stack position f (0=deepest, 1=front): the
           // paper set's tone, pulled toward the scene's chroma by
-          // 1-uPalette. The paper lightness staircase always wins, so the
-          // scene can tint the papers but never re-posterize them
-          // (invariant 4).
-          vec3 layerColor(vec3 camC, float f) {
+          // 1-uPalette. The scene chroma is the CPU-averaged PER-LEVEL
+          // oklab a/b (uAB) — one flat chroma per sheet. Sampling the
+          // continuous pre-quantization field here would re-introduce
+          // photographic gradients inside the faces (inv 1 repair), so the
+          // only in-face modulation left downstream is the fbm grain.
+          vec3 layerColor(int lvl, float f) {
             vec3 ramp = paperRamp(uPreset, f);
             vec3 labR = lin2oklab(srgb2lin(ramp));
-            vec3 lab = lin2oklab(srgb2lin(camC));
-            lab.x = labR.x;
-            lab.yz *= 1.35;
+            vec2 ab = uAB[clamp(lvl, 0, 7)] * 1.35;
+            vec3 lab = vec3(labR.x, ab);
             return clamp(oklab2srgb(mix(lab, labR, uPalette)), 0.0, 1.0);
           }
 
@@ -1040,11 +1059,14 @@
             vec2 px = vUv * uResolution;
 
             vec4 st = texture(uStruct, vUv);
-            vec3 camC = texture(uBandM, vUv).rgb;
-            float L = lumaf(texture(uBand, vUv).rgb);
+            vec4 bm = texture(uBandM, vUv);
+            vec4 bt = texture(uBand, vUv);
+            float L = lumaf(bt.rgb);
             float F = orientF(L);
             float fineL = st.a;
-            float Fm = orientF(lumaf(camC));
+            float bmFine = bm.a;   // fine luminance @ medium blur (thin-strip test)
+            float btFine = bt.a;   // fine luminance @ heavy blur (large-area test)
+            float Fm = orientF(lumaf(bm.rgb));
 
             if (uDebug == 1) {
               fragColor = vec4(vec3(F), 1.0);
@@ -1066,21 +1088,35 @@
             float fwF = max(fwidth(F), 1e-4);
             int lvl; float Tdn; float Tup;
             levelOf(F, lvl, Tdn, Tup);
-            // minimum paper width: a band under ~4 px on screen cannot be
-            // cut from paper — fold the sliver into the band below (inv. 2)
-            if (Tdn > -0.5 && Tup < 1.5 && (Tup - Tdn) < fwF * 4.0) {
-              lvl = max(lvl - 1, 0);
-              Tdn = lvl > 0 ? uTh[lvl - 1] : -1.0;
+            // minimum paper BAND WIDTH floor, measured as the pseudo-sdf
+            // width of the band itself ((Tup-Tdn)/|∇F|): any strip narrower
+            // than ~0.9% of the screen width cannot be cut from paper —
+            // fold it into the band below, repeatedly if the thresholds are
+            // crowded (steep edges: window bars, cords, nested rings; inv 2).
+            float minPx = 0.009 * uResolution.x;
+            for (int k = 0; k < 3; k++) {
+              if (lvl > 0 && Tdn > -0.5 && Tup < 1.5 &&
+                  (min(Tup, 1.0) - Tdn) < fwF * minPx) {
+                lvl -= 1;
+                Tdn = lvl > 0 ? uTh[lvl - 1] : -1.0;
+              } else { break; }
             }
-            vec3 col = layerColor(camC, (float(lvl) + 0.5) / float(uN));
+            // band width in px after folding; where the layer spacing is
+            // still narrower than the cut-edge scale, mute rim + shadow
+            // (no ring pile-ups at high-contrast borders).
+            float widthPx = (min(Tup, 1.0) - max(Tdn, 0.0)) / fwF;
+            float reliefScale = smoothstep(minPx * 0.5, minPx * 1.2, widthPx);
+            vec3 col = layerColor(lvl, (float(lvl) + 0.5) / float(uN));
             // ≥1.5 px AA crossfade at the cut line (clean cut, no dither)
             if (Tup < 1.5) {
-              vec3 colUp = layerColor(camC, (float(lvl) + 1.5) / float(uN));
+              vec3 colUp = layerColor(lvl + 1, (float(lvl) + 1.5) / float(uN));
               col = mix(col, colUp,
                 smoothstep(Tup - fwF * 1.5, Tup + fwF * 1.5, F));
             }
             float rim; float shd;
             bandRelief(F, Fo, Tdn, Tup, rimW, rim, shd);
+            rim *= reliefScale;
+            shd *= reliefScale;
 
             // ---- local subdivision (invariant 6): where the heavy field
             // erased local structure, split the band ONCE at its midpoint
@@ -1088,27 +1124,59 @@
             // with its own weak rim/shadow. Gated by detail + local
             // contrast, and only inside bands wide enough for real paper.
             float fwM = max(fwidth(Fm), 1e-4);
-            float widthPx = (min(Tup, 1.0) - max(Tdn, 0.0)) / fwF;
-            float contrastW = smoothstep(0.030, 0.105, abs(Fm - F));
+            float contrastW = smoothstep(0.035, 0.065, abs(Fm - F));
             // abs(Fm-F) is also large next to every BIG edge (two blur radii
             // disagree there) — without an interior gate the subdivision
             // draws a halo contour parallel to each main cut. Only allow it
             // WELL INSIDE the band (F away from both thresholds).
-            float insideW = smoothstep(0.12, 0.30,
-              min(F - max(Tdn, 0.0), min(Tup, 1.0) - F) /
-                max(min(Tup, 1.0) - max(Tdn, 0.0), 1e-4));
-            float subGate = smoothstep(0.10, 0.65, uDetail) * contrastW *
-              insideW * step(10.0, widthPx) * flat0;
+            float bandRel = min(F - max(Tdn, 0.0), min(Tup, 1.0) - F) /
+              max(min(Tup, 1.0) - max(Tdn, 0.0), 1e-4);
+            float insideW = smoothstep(0.13, 0.22, bandRel);
+            // the gate saturates fast (near-binary): a HALF-engaged
+            // subdivision is a continuous tone wash, not a paper cut (inv 1)
+            float subGate = smoothstep(0.30, 0.55,
+              smoothstep(0.08, 0.48, uDetail) * contrastW * insideW *
+                step(10.0, widthPx)) * flat0;
             float midT = 0.5 * (max(Tdn, 0.0) + min(Tup, 1.0));
-            float subHi = smoothstep(midT - fwM * 1.5, midT + fwM * 1.5, Fm);
+            // the split line sits toward the BRIGHT-paper side of the band
+            // (one-step-raised bright snap): the white sheet only appears
+            // for genuinely bright pockets — shrinks the giant nose
+            // highlight to a small piece (inv 6 repair).
+            float hiT = mix(midT,
+              uInvert == 1 ? max(Tdn, 0.0) : min(Tup, 1.0), 0.40);
+            float subHi = smoothstep(hiT - fwM * 1.5, hiT + fwM * 1.5, Fm);
+            float fLo = float(lvl) + (uInvert == 1 ? 0.30 : 0.22);
+            float fHi = float(lvl) + (uInvert == 1 ? 0.78 : 0.70);
             vec3 subCol = mix(
-              layerColor(camC, (float(lvl) + 0.22) / float(uN)),
-              layerColor(camC, (float(lvl) + 0.78) / float(uN)), subHi);
-            col = mix(col, subCol, subGate * 0.85);
-            float dSub = (Fm - midT) / fwM;
+              layerColor(lvl, fLo / float(uN)),
+              layerColor(lvl, fHi / float(uN)), subHi);
+            col = mix(col, subCol, subGate * 0.9);
+            float dSub = (Fm - hiT) / fwM;
             float rimS = exp(-max(dSub, 0.0) / max(rimW, 0.5)) * subGate;
             float shdS = (1.0 - subHi) *
-              smoothstep(midT, midT + min(0.035, fwM * 3.0), FmO) * subGate;
+              smoothstep(hiT, hiT + min(0.035, fwM * 3.0), FmO) * subGate;
+
+            // ---- mouth-scale shade piece (invariant 6 repair): a mid-tone
+            // small面 that is one step darker than its surroundings at the
+            // face scale (the LIPS) is neither dark enough for the ink
+            // floor nor big enough to survive the heavy quantization —
+            // detect it as a medium-vs-heavy luminance dip (a ~1.5-3%
+            // screen-width dark pocket; thin 0.2% strips dilute away in the
+            // medium blur and stay OUT), well inside its band, and keep it
+            // as ONE flat piece of the next-darker paper of the same set.
+            float dLoc = uInvert == 1 ? (Fm - F) : (F - Fm);
+            // width test as amplitude retention: a mouth-wide pocket keeps
+            // most of its fine dip in the medium blur (ratio→~0.7) while a
+            // 0.2-0.6% thread (cord, bars) dilutes away (ratio→~0.3)
+            float shadeThin = smoothstep(0.40, 0.55,
+              dLoc / max(L - fineL, 0.03));
+            float shadeGate = smoothstep(0.040, 0.065, dLoc) * shadeThin *
+              smoothstep(0.14, 0.26, bandRel) *
+              smoothstep(0.10, 0.50, uDetail) * flat0;
+            float dirD = uInvert == 1 ? 1.0 : -1.0;
+            vec3 shadeCol = layerColor(lvl,
+              (float(lvl) + 0.5 + dirD) / float(uN));
+            col = mix(col, shadeCol, shadeGate * 0.92);
 
             // ---- cut rims + cast shadows (the paper thickness) ----
             vec3 edgeC = paperEdgeP(uPreset);
@@ -1121,14 +1189,40 @@
             col *= 1.0 - shdS * shdAmp * 0.5;
 
             // ---- dark floor (invariant 6): the darkest few percent of the
-            // FINE field survive as the deepest ink paper (eyes / brows /
-            // nostrils) — one extra sheet with a thin rim, never blurred
-            // away by the heavy quantization field.
+            // FINE field survive as the deepest ink paper — but ONLY as
+            // SMALL CHUNKY pieces (eyes / brows / nostrils):
+            //  · smallD  — the piece must be locally darker than the heavy
+            //    field, so LARGE dark areas (desk, sweater, hair interior)
+            //    stay flat quantized paper instead of a blotchy ink wash
+            //    (inv 1 repair: the dark floor must not bypass quantization)
+            //  · chunky  — the piece must still be dark in the MEDIUM blur,
+            //    so 0.2-0.3% thread strips (window bars, cords) dilute away
+            //    and never print as ink threads (inv 2 repair)
+            // The edge is cut at pixel scale (fwidth AA), not with a wide
+            // luminance smoothstep — no soft ink gradients.
             float dGate = smoothstep(0.05, 0.45, uDetail) * flat0;
-            float dFloor = smoothstep(uDark + 0.022, uDark - 0.022, fineL) * dGate;
+            // fatten the ink source to the minimum paper width: a min-tap
+            // dilation (~±0.3% of the screen) turns any surviving dark
+            // line (a lamp cord, a window bar kept as a MOTIF) into one
+            // piece ≥ ~1% wide instead of a 0.2-0.6% thread (inv 2), while
+            // eyes and brows stay separate pieces (dilation < their gap).
+            vec2 dpx = vec2(0.0029, 0.0029 * uAspect);
+            float inkL = fineL;
+            inkL = min(inkL, texture(uStruct, vUv + vec2( dpx.x, 0.0)).a);
+            inkL = min(inkL, texture(uStruct, vUv + vec2(-dpx.x, 0.0)).a);
+            inkL = min(inkL, texture(uStruct, vUv + vec2(0.0,  dpx.y)).a);
+            inkL = min(inkL, texture(uStruct, vUv + vec2(0.0, -dpx.y)).a);
+            inkL = min(inkL, texture(uStruct, vUv + dpx * 0.71).a);
+            inkL = min(inkL, texture(uStruct, vUv - dpx * 0.71).a);
+            inkL = min(inkL, texture(uStruct, vUv + dpx * vec2(0.71, -0.71)).a);
+            inkL = min(inkL, texture(uStruct, vUv + dpx * vec2(-0.71, 0.71)).a);
+            float wIn = max(fwidth(inkL), 1e-4);
+            float smallD = smoothstep(0.06, 0.14, btFine - inkL);
+            float dFloor = smoothstep(uDark + wIn * 1.5, uDark - wIn * 1.5, inkL)
+              * dGate * smallD;
             vec3 ink = inkColorP(uPreset);
             col = mix(col, ink, dFloor * 0.92);
-            float dIf = (fineL - uDark) / max(fwidth(fineL), 1e-4);
+            float dIf = (inkL - uDark) / wIn;
             col = mix(col, ink * 1.9 + vec3(0.09),
               exp(-abs(dIf) / 1.4) * dFloor * 0.28);
 
@@ -1148,9 +1242,8 @@
             col *= 1.0 + (fbm(px * 0.15 + ph * 1.7) - 0.5) * (0.018 + 0.065 * uGrain);
             col *= 1.0 - 0.05 * uGrain * step(0.9945, hash12(floor(px * 0.7) + ph));
 
-            // restrained edge darkening + white guard
-            vec2 vq = (vUv - 0.5) * vec2(uAspect, 1.0);
-            col *= mix(0.92, 1.0, smoothstep(1.45, 0.50, length(vq)));
+            // white guard (no vignette: any post-quantization radial
+            // darkening breaks the flat paper tones — inv 1 repair)
             col = clamp(col, 0.0, 0.985);
             fragColor = vec4(col, 1.0);
           }
@@ -1209,7 +1302,7 @@
           composite: getLocations(programs.composite, [
             "uStruct", "uBand", "uBandM", "uResolution", "uAspect",
             "uRelief", "uPalette", "uDetail", "uGrain",
-            "uPreset", "uInvert", "uDebug", "uTh[0]", "uN", "uDark",
+            "uPreset", "uInvert", "uDebug", "uTh[0]", "uN", "uDark", "uAB[0]",
           ]),
         };
 
@@ -1356,13 +1449,17 @@
         const statsBuf = new Uint8Array(STATS_RES * STATS_RES * 4);
         const histL = new Float32Array(BINS);
         const histFine = new Float32Array(BINS);
+        const abAcc = new Float32Array(8 * 3);   // per-level Σa, Σb, count
         const DEAD = 0.006;        // hysteresis dead zone (invariant 5)
-        const MIN_GAP = 0.045;     // min threshold separation (anti-sliver)
+        const MIN_GAP = 0.065;     // min threshold separation — adjacent
+                                   // levels closer than this in luminance
+                                   // merge (anti-sliver / anti-ring, inv 2)
 
         const TH = {
           th: new Float32Array(7),
           n: 6,
           dark: 0.10,
+          ab: new Float32Array(16),   // per-level flat oklab chroma (a,b)×8
           inv: -1,
           seeded: false,
         };
@@ -1440,6 +1537,12 @@
             if (lo !== null && hi !== null && hi - lo > 0.05) {
               const even = lo + ((hi - lo) * (i + 1)) / n;
               tgt = t * 0.55 + even * 0.45;
+              // raise the snap into the BRIGHTEST paper (the front sheet
+              // for day, the deepest for night) toward the field extreme:
+              // a pocket must be decisively bright to earn the whitest
+              // sheet — shrinks the bloated white nose piece (inv 6)
+              if (inv !== 1 && i === n - 2) tgt += 0.30 * (hi - tgt);
+              if (inv === 1 && i === 0) tgt -= 0.30 * (tgt - lo);
             }
             TH.th[i] = snap ? tgt : smoothScalar(TH.th[i], tgt, k);
           }
@@ -1447,15 +1550,85 @@
             if (TH.th[i] < TH.th[i - 1] + MIN_GAP) TH.th[i] = TH.th[i - 1] + MIN_GAP;
           }
           // dark floor from the FINE histogram (actual darkness, never
-          // inverted): the darkest 2–7 % — eyes, brows, nostrils — become
-          // the extra ink sheet (invariant 6). Scales with the detail knob.
-          const dq = quantileOf(histFine, count, 0.02 + 0.05 * state.detail);
+          // inverted): the darkest 2–9 % — eyes, brows, nostrils — become
+          // the extra ink sheet (invariant 6). Scales with the detail knob
+          // (the shader's contrast gates keep large dark areas out, so the
+          // wider quantile only thickens the small feature pieces).
+          const dq = quantileOf(histFine, count, 0.02 + 0.07 * state.detail);
           if (dq !== null) {
             const dTarget = Math.min(Math.max(dq, 0.02), 0.45);
             TH.dark = snap ? dTarget : smoothScalar(TH.dark, dTarget, k);
           }
+          // per-level average oklab chroma (packed into stats B/A by the
+          // GPU): ONE flat chroma per paper sheet — the composite never
+          // touches the continuous pre-quantization chroma again (inv 1).
+          abAcc.fill(0);
+          for (let i = 0; i < count; i++) {
+            const o = i * 4;
+            let v = statsBuf[o] / 255;
+            if (inv === 1) v = 1 - v;
+            let lvl = 0;
+            for (let j = 0; j < n - 1; j++) if (v > TH.th[j]) lvl = j + 1;
+            abAcc[lvl * 3] += statsBuf[o + 2] / 255 - 0.5;
+            abAcc[lvl * 3 + 1] += statsBuf[o + 3] / 255 - 0.5;
+            abAcc[lvl * 3 + 2] += 1;
+          }
+          for (let l = 0; l < 8; l++) {
+            const cnt = abAcc[l * 3 + 2];
+            if (cnt < 16) continue;   // empty level: keep the previous tint
+            const ta = abAcc[l * 3] / (cnt * 1.25);
+            const tb = abAcc[l * 3 + 1] / (cnt * 1.25);
+            if (snap) {
+              TH.ab[l * 2] = ta;
+              TH.ab[l * 2 + 1] = tb;
+            } else {
+              TH.ab[l * 2] += (ta - TH.ab[l * 2]) * k;
+              TH.ab[l * 2 + 1] += (tb - TH.ab[l * 2 + 1]) * k;
+            }
+          }
           TH.seeded = true;
-          // diagnostic for headless probing
+          // diagnostic for headless probing: sample the three luminance
+          // fields (fine / medium / heavy) at a canvas uv — used to
+          // calibrate the small-piece gates against real field values.
+          window.__fieldProbe = (u, v) => {
+            const read = (t) => {
+              const x = Math.min(t.width - 1, Math.max(0, Math.round(u * t.width)));
+              const y = Math.min(t.height - 1, Math.max(0, Math.round(v * t.height)));
+              gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+              const type = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE);
+              let out;
+              if (type === gl.FLOAT) {
+                const b = new Float32Array(4);
+                gl.readPixels(x, y, 1, 1, gl.RGBA, gl.FLOAT, b);
+                out = Array.from(b);
+              } else if (type === gl.HALF_FLOAT) {
+                const b = new Uint16Array(4);
+                gl.readPixels(x, y, 1, 1, gl.RGBA, gl.HALF_FLOAT, b);
+                out = Array.from(b, (h) => {
+                  const s = h >> 15 ? -1 : 1;
+                  const e = (h >> 10) & 0x1f;
+                  const m = h & 0x3ff;
+                  if (e === 0) return s * m * 2 ** -24;
+                  if (e === 31) return m ? NaN : s * Infinity;
+                  return s * (1 + m / 1024) * 2 ** (e - 15);
+                });
+              } else {
+                const b = new Uint8Array(4);
+                gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, b);
+                out = Array.from(b, (q) => q / 255);
+              }
+              gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+              return out;
+            };
+            const luma = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+            const sc = read(structPing ? targets.structB : targets.structA);
+            const bm = read(targets.bandM);
+            const bt = read(targets.bandT);
+            return {
+              fine: sc[3], bmFine: bm[3], btFine: bt[3],
+              Lmed: luma(bm), Lheavy: luma(bt), dark: TH.dark,
+            };
+          };
           window.__thDbg = {
             th: Array.from(TH.th.slice(0, Math.max(n - 1, 0))),
             n, dark: TH.dark, inv,
@@ -1572,6 +1745,7 @@
               gl.uniform1fv(u["uTh[0]"], TH.th);
               gl.uniform1i(u.uN, TH.n);
               gl.uniform1f(u.uDark, TH.dark);
+              gl.uniform2fv(u["uAB[0]"], TH.ab);
             });
           }
 
