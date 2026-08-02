@@ -27,8 +27,15 @@
     5. 時間安定(時間) — 平滑輝度は ping-pong の時間 ema、しきい値は CPU 側
        hysteresis(不感帯)+ema。乱数シードに時間を混ぜない。静止入力で完全静止。
     4. 限定パレット(色) — 各層の色を oklab で紙セット(プリセット3種の紙トーン階段)へ
-       スナップ。シーンのクロマはレベル別平均(CPU 統計)1色のみ=紙 1 枚 1 色。
-       紙グレインは fbm で層ごとに位相を変える(面内の変調はグレインのみ)。
+       スナップ。シーンのクロマは「レベル×クロマビン」別平均(CPU 統計)1色のみ=
+       紙 1 枚 1 色。紙グレインは fbm で層ごとに位相を変える(面内の変調はグレインのみ)。
+    7. 色による切り分け(色/マーク) — 量子化場と同じ平滑クロマ(oklab a/b)を
+       無彩1+有彩3〜5 のビンへ量子化し、同じ輝度レベルでもビンが違えば別の紙にする
+       (赤い服と同輝度の緑の壁が1枚に溶けない)。ビン境界にも輝度境界と同じ機構
+       (擬似 sdf 帯・光源内積の片側ゲート・統一 AA・最小帯幅フロア)で切り口+落ち影を
+       付けるが 0.62 倍に抑え、輝度境界が近い場所では帯を消す(多重リング防止)。
+       ビンの前後関係は「暖色が手前」の固定順(光源一貫性)。彩度が
+       しきい値(シーンのクロマ分位点+hysteresis+ema)未満の領域は無彩ビン1つに落ちる。
     6. 人物の判読性(知覚) — 検知なしで、細平滑輝度の暗部フロア(最暗の数%の
        小さな面のみをインク紙として保持=目・眉。大きな暗部と糸状の線は除外)+
        口スケール(中間ぼかしと量子化場の輝度差)の shade 紙片(唇=肌より一段
@@ -42,14 +49,19 @@
                 (rgb=平坦色, a=fine輝度)
     [P1b band ] struct の分離ガウス2段: σ小→bandM(細分場)   bandM★  ≤384
                 さらに σ大→bandT(量子化場)                  bandT★  ≤384
+    [P2b chrom] bandT の oklab a/b + クロマ量 を1回だけ変換        chromaT★ ≤384
+                (合成段のクロマタップを cbrt 無しの単純 fetch にするため)
     [P2 stats ] R=量子化場輝度 G=fine輝度 B/A=oklab a,b      statsT RGBA8 128×128
                 → CPU readback ~200ms 毎 → ヒストグラム(64bin) → quantile →
                 hysteresis+ema → uniform しきい値配列
-                +レベル別平均クロマ(uAB: 紙1枚=1色の平坦クロマ。量子化前の
-                連続クロマを合成段で再混入しない — 面内変調は紙グレインのみ)
+                +クロマ分位点→無彩しきい値 uCThr(hysteresis+ema)
+                +レベル×ビン別平均クロマ(uAB2[8×6]: 紙1枚=1色の平坦クロマ。
+                量子化前の連続クロマを合成段で再混入しない — 面内変調は紙グレインのみ)
     [P3 comp  ] 量子化(4〜8層, プリセットで F 反転。全境界タップ勾配ベースの対称
-                1〜1.5px AA)+最小帯幅フロア(画面幅比 ~1.0%未満の帯は下層へ統合・
-                rim/影も抑制)+擬似 sdf 帯の切り口(光源内積の片側ゲート)/落ち影+
+                1〜1.5px AA)+クロマビン量子化(無彩1+有彩3〜5。同一輝度レベル内でも
+                別の紙)+最小帯幅フロア(画面幅比 ~1.0%未満の帯は下層へ統合・
+                rim/影も抑制)+擬似 sdf 帯の切り口(光源内積の片側ゲート)/落ち影
+                (輝度境界=主 / クロマ境界=従 0.62倍。両者が重なる所はクロマ側を減衰)+
                 暗部フロア(小面・太らせ≥1%のみ)+口スケールの shade 紙片+局所細分+
                 oklab 紙パレット+fbm 紙グレイン → canvas(DPR≤2)。ビネットなし
 
@@ -61,18 +73,23 @@
     ?freeze=1     … 全ての時間駆動を停止し決定的な静止フレーム(合成シーンも静止)
     ?prewarm=<秒> … 初回描画前に固定 dt で決定的に早送り(ema・しきい値の収束済み状態)
     デバッグ表示: 0=最終 1=平滑輝度(量子化場) 2=量子化レベルのみ(切り口・影なし)
-                  3=境界帯の可視化(rim=橙/落ち影=青/細分=緑) 4=標本
+                  3=境界帯の可視化(rim=橙/落ち影=青/細分=緑/クロマ境界=マゼンタ・紫)
+                  4=標本
 
-  スライダーの説明(写真らしさ ↔ 様式の強さ。計7本。カッコ内は既定値):
+  スライダーの説明(写真らしさ ↔ 様式の強さ。計8本。カッコ内は既定値):
     紙の枚数   量子化レイヤー数(4↔8)(0.75 — 判読性寄りの多め)
     紙の厚み   切り口ハイライトと落ち影の強さ・オフセット(0.55)
     ハサミの丸み kuwahara/ぼかし平滑半径(境界曲率と最小紙片サイズ)(0.35)
     紙の色統一 oklab パレットスナップの強さ(0=実写色寄り)(0.5)
+    色の切り分け クロマビンの数と感度(0=明暗のみで従来と同一/上げると同じ明るさでも
+               色が違えば別の紙になり、その境界にも控えめな切り口・落ち影が付く)
+               (0.55 = 昼。プリセット既定: 昼 0.55 / 夜 0.45 / セピア 0.2)
     落ち着き   しきい値/平滑輝度 ema の時定数(安定↔追従)(0.55)
     暗部の精密 暗部小紙片の保護と局所細分(顔の判読性)(0.75)
     紙の質感   繊維グレインと紙の色ムラ(0.4)
   ※ 既定は「映っているものが判読できる」側に調整済み(レイヤー多め・平滑弱め・
-    実写色寄り・暗部保護強め)。様式を強くしたい場合は各スライダーを様式側へ。
+    実写色寄り・暗部保護強め・色でも切り分ける)。様式を強くしたい場合は各スライダーを
+    様式側へ。プリセットを切り替えると「色の切り分け」はその紙セットの既定値になる。
   select は「プリセット」(昼の風景箱/夜の風景箱/セピアの標本箱)と「デバッグ表示」のみ。
 
   依存: なし(外部 ML 不使用。カメラのみ)。WebGL2 / GLSL ES 3.00 単体。
@@ -301,6 +318,7 @@
           relief: 0.55,
           smooth: 0.35,
           palette: 0.5,
+          hue: 0.55,
           calm: 0.55,
           detail: 0.75,
           grain: 0.4,
@@ -320,6 +338,7 @@
           ["relief", "紙の厚み", "切り口ハイライトと落ち影の強さ・オフセット", 0, 1, 0.01],
           ["smooth", "ハサミの丸み", "平滑半径(境界曲率と最小紙片サイズ)", 0, 1, 0.01],
           ["palette", "紙の色統一", "oklab パレットスナップの強さ(0=実写色寄り)", 0, 1, 0.01],
+          ["hue", "色の切り分け", "同じ明るさでも色が違えば別の紙に(0=明暗のみ)", 0, 1, 0.01],
           ["calm", "落ち着き", "しきい値/平滑輝度 ema の時定数(安定↔追従)", 0, 1, 0.01],
           ["detail", "暗部の精密", "暗部小紙片の保護と局所細分(顔の判読性)", 0, 1, 0.01],
           ["grain", "紙の質感", "繊維グレインと紙の色ムラ", 0, 1, 0.01],
@@ -328,6 +347,12 @@
         // Presets switch the paper set AND the depth order (bright-front /
         // dark-front) as one consistent unit (order §6, §8-16).
         const PRESETS = ["昼の風景箱", "夜の風景箱", "セピアの標本箱"];
+        // …and each carries its own default for the colour-cut knob: the
+        // day box splits colour freely, the night box a little less (its
+        // cut edges are already boosted — piling chroma cuts on top reads
+        // as an echo, CRAFT §A9), the sepia specimen box is a MONOCHROME
+        // intent so it only splits genuinely strong colour.
+        const PRESET_HUE = [0.55, 0.45, 0.2];
 
         // forward declaration — the stats cadence clock (updateThresholds).
         // Preset changes rewind it so the thresholds re-snap immediately.
@@ -341,6 +366,8 @@
             カメラに映る世界全体が、多層ペーパーカットの風景箱になります。
             画面全体の明暗が 4〜8 枚のフラットな紙レイヤーに切り分けられ、
             各層は切り口のハイライトと下の層への落ち影を持ちます。
+            さらに「色の切り分け」を上げると、同じ明るさでも色が違えば
+            別の紙として切り分けます(プリセットごとに既定値が変わります)。
           </p>
           <div class="select-row">
             <span>プリセット</span>
@@ -415,6 +442,8 @@
         });
         document.getElementById("presetSel").addEventListener("change", (event) => {
           state.preset = Number(event.currentTarget.value);
+          // the paper set carries its own colour-cut default (§6)
+          setSlider("hue", PRESET_HUE[state.preset] ?? DEFAULTS.hue);
           // the depth orientation may flip: re-snap the thresholds on the
           // very next stats pass (no slow crossfade through a wrong order)
           lastStatWall = -1e9;
@@ -714,6 +743,17 @@
             vec2 dxy = abs(p - wc) - wh;
             float dframe = max(dxy.x, dxy.y);
             if (dframe > 0.0 && dframe < 0.020) c = vec3(0.235, 0.195, 0.155);
+            // two flat colour panels on the wall, edge to edge. Their
+            // LUMINANCE is deliberately equal (0.4210 vs 0.4167 under the
+            // 0.299/0.587/0.114 weights, i.e. far inside one quantile band)
+            // while their hue is opposite. The tone stack alone cannot cut
+            // between them — only the chroma bins can. This is the fake
+            // scene's test element for 色の切り分け; it is static, so it
+            // does not touch the --motion contract.
+            if (p.x > 0.060 && p.x < 0.360 && p.y > 0.245 && p.y < 0.377) {
+              c = p.x < 0.210 ? vec3(0.720, 0.300, 0.260)
+                              : vec3(0.090, 0.563, 0.520);
+            }
             // pendant lamp (top right, swings — motion)
             vec2 piv = vec2(0.865, 1.02);
             float ang = 0.30 * sin(t * 0.85);
@@ -921,6 +961,28 @@
           }
         `;
 
+        // P2b — the smooth CHROMA field. The very same quantization field
+        // (bandT: kuwahara → time EMA → two Gaussians) converted to oklab
+        // a/b + chroma magnitude ONCE, at band resolution, so the composite
+        // can tap it ~10 times per pixel without paying for cube roots.
+        // The composite quantizes this into 1 achromatic + 3–5 hue bins:
+        // two pixels in the same TONE level but different colour bins are
+        // different sheets of paper (order §2).
+        // Packing is identical for the RGBA16F and the RGBA8 fallback
+        // (a,b → ×1.25+0.5 as in P2; C → ×2.5), so both run the same maths.
+        const chromaFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uBand;
+          ${CHUNK_OKLAB}
+          void main() {
+            vec3 lab = lin2oklab(srgb2lin(texture(uBand, vUv).rgb));
+            fragColor = vec4(lab.y * 1.25 + 0.5, lab.z * 1.25 + 0.5,
+              clamp(length(lab.yz) * 2.5, 0.0, 1.0), 1.0);
+          }
+        `;
+
         // P3 — the composite: the whole frame quantized into 4–8 paper
         // layers with cut rims + cast shadows (the predecessor's stack
         // engine, full-frame), dark-floor ink pieces, local subdivision,
@@ -931,11 +993,13 @@
           out vec4 fragColor;
           uniform sampler2D uStruct;   // rgb kuwahara colour (ema), a fine luminance
           uniform sampler2D uBand;     // heavy blur — the quantization field
-          uniform sampler2D uBandM;    // medium blur — subdivision field + chroma
+          uniform sampler2D uBandM;    // medium blur — subdivision field
+          uniform sampler2D uChroma;   // oklab a/b + chroma of the quant field
           uniform vec2 uResolution;
           uniform float uAspect;
           uniform float uRelief;
           uniform float uPalette;
+          uniform float uHue;          // 0 = tone-only (the previous build)
           uniform float uDetail;
           uniform float uGrain;
           uniform int uPreset;
@@ -944,7 +1008,9 @@
           uniform float uTh[7];
           uniform int uN;
           uniform float uDark;
-          uniform vec2 uAB[8];
+          uniform float uCThr;         // achromatic radius (CPU quantile+ema)
+          uniform int uNB;             // number of CHROMATIC bins (3..5)
+          uniform vec2 uAB2[48];       // flat oklab chroma per level×bin (8×6)
           ${CHUNK_NOISE}
           ${CHUNK_OKLAB}
           ${CHUNK_PAL}
@@ -971,19 +1037,73 @@
               smoothstep(-0.9, 0.9, d);
           }
 
+          // ---- chroma bins: the SECOND cutting rule (uHue) --------------
+          // Resolved once per pixel at the top of main(), before any
+          // layerColor() call, and left at zero when uHue == 0 so the tone
+          // -only build survives pixel for pixel.
+          const float TAU_C = 6.28318530718;
+          const float HOFF = 0.17;   // fixed spoke rotation (never cell-hash)
+          const float WARM = 0.95;   // oklab hue angle of a warm paper
+          float gHueAmt = 0.0;       // master gate (0 at uHue=0)
+          float gNbF = 3.0;          // chromatic bin count as float
+          int   gBinH = 1;           // bin one paper width along +∇colour
+          int   gBinN = 1;           // …and along −∇colour (0 = achromatic)
+          float gWH = 1.0;           // AA weight between those two
+          float gWC = 0.0;           // AA weight achromatic ↔ chromatic
+          float gFOff = 0.0;         // per-bin rung offset on the paper ramp
+          float gTint = 0.0;         // per-bin hue kept through the snap
+
+          vec3 chromaAt(vec2 uv) {
+            vec3 cf = texture(uChroma, uv).rgb;
+            return vec3((cf.x - 0.5) / 1.25, (cf.y - 0.5) / 1.25, cf.z / 2.5);
+          }
+          float hueNorm(vec2 ab) { return atan(ab.y, ab.x) / TAU_C + 0.5; }
+          // depth of a bin = how WARM its centre hue is. Warm papers sit in
+          // front of cool ones — that fixed, scene-independent order is what
+          // makes the chroma cut's rim side and shadow direction consistent
+          // frame-wide (invariant 3), exactly like level ⇔ depth for tone.
+          float binDepthF(float k) {
+            return cos(((k + 0.5 - HOFF) / gNbF - 0.5) * TAU_C - WARM);
+          }
+          // the piecewise-constant bin-depth field (the cast-shadow source)
+          float depthAt(vec2 uv) {
+            vec3 cf = chromaAt(uv);
+            if (cf.z < uCThr) return 0.0;
+            return binDepthF(floor(hueNorm(cf.xy) * gNbF + HOFF)) * gHueAmt;
+          }
+          // flat chroma of this pixel's (level × bin) cell, anti-aliased
+          // across both kinds of bin border. At uHue == 0 every bin of a
+          // level holds that level's mean, so this collapses to the old
+          // per-level uAB.
+          vec2 abFor(int lvl) {
+            int b = clamp(lvl, 0, 7) * 6;
+            vec2 a1 = mix(uAB2[b + gBinN], uAB2[b + gBinH], gWH);
+            return mix(uAB2[b], a1, gWC);
+          }
+
           // paper colour at stack position f (0=deepest, 1=front): the
           // paper set's tone, pulled toward the scene's chroma by
-          // 1-uPalette. The scene chroma is the CPU-averaged PER-LEVEL
-          // oklab a/b (uAB) — one flat chroma per sheet. Sampling the
+          // 1-uPalette. The scene chroma is the CPU-averaged PER LEVEL×BIN
+          // oklab a/b (uAB2) — one flat chroma per sheet. Sampling the
           // continuous pre-quantization field here would re-introduce
           // photographic gradients inside the faces (inv 1 repair), so the
           // only in-face modulation left downstream is the fbm grain.
+          // gFOff nudges the sheet a fraction of a rung along the ramp so a
+          // colour bin is a visibly different SHEET even in a monochrome
+          // paper set; gTint keeps the bin's hue direction alive inside the
+          // palette snap, so "紙の色統一" still means paper (small, even
+          // chroma) rather than "all bins collapse to one tone".
           vec3 layerColor(int lvl, float f) {
-            vec3 ramp = paperRamp(uPreset, f);
+            vec3 ramp = paperRamp(uPreset, f + gFOff);
             vec3 labR = lin2oklab(srgb2lin(ramp));
-            vec2 ab = uAB[clamp(lvl, 0, 7)] * 1.35;
-            vec3 lab = vec3(labR.x, ab);
-            return clamp(oklab2srgb(mix(lab, labR, uPalette)), 0.0, 1.0);
+            vec2 ab = abFor(lvl) * 1.35;
+            // §8-6 again: never normalize a possibly-zero vector.
+            float abL = length(ab);
+            vec2 abDir = abL > 1.0e-5 ? ab / abL : vec2(0.0, 1.0);
+            vec2 abP = mix(labR.yz,
+              abDir * max(length(labR.yz), 0.058), gTint);
+            return clamp(oklab2srgb(
+              mix(vec3(labR.x, ab), vec3(labR.x, abP), uPalette)), 0.0, 1.0);
           }
 
           // pseudo-sdf band relief: rim = thin bright cut edge on this
@@ -1131,6 +1251,113 @@
             float lgt = smoothstep(-0.15, 0.45, dot(gradF / gpx, LDIR));
             float lgtM = smoothstep(-0.15, 0.45, dot(gradM / gpxM, LDIR));
 
+            // ---- chroma bins of the SAME quantization field --------------
+            // The tone stack alone melts a red coat and an equally bright
+            // green wall into one sheet. Quantize the smoothed oklab hue of
+            // the same field into fixed spokes (1 achromatic bin + uNB hue
+            // bins) and treat a bin change as a second kind of cut. Every
+            // decision below is measured in the SAME units as the tone cuts
+            // (±1.5 px tap gradients → pixel distances), so the AA, the
+            // minimum band-width floor and the one-sided light gate are the
+            // same machinery, not a parallel path (CRAFT §A9).
+            float minPx = 0.010 * uResolution.x;
+            gHueAmt = smoothstep(0.0, 0.04, uHue);
+            gNbF = float(uNB);
+            vec3 chC = chromaAt(vUv);
+            vec3 chR = chromaAt(vUv + vec2(epx.x, 0.0));
+            vec3 chL = chromaAt(vUv - vec2(epx.x, 0.0));
+            vec3 chU = chromaAt(vUv + vec2(0.0, epx.y));
+            vec3 chD = chromaAt(vUv - vec2(0.0, epx.y));
+            vec2 gradC = vec2(chR.z - chL.z, chU.z - chD.z) / 3.0;
+            float gcpx = max(length(gradC), 1e-5);
+            // direction of strongest COLOUR change: the principal axis of
+            // the a/b structure tensor. (The hue-ANGLE gradient is not
+            // usable for this — it is pure noise wherever the frame is
+            // near-grey, which is most of it.) Taken as the eigenvector in
+            // closed form, NOT as 0.5*atan(2a12, a11-a22): on a perfectly
+            // straight vertical seam a12 is exactly 0, and atan's branch
+            // cut at y=±0 then flipped the axis 90° for whole stretches of
+            // the seam — the cut switched off in bands and printed as
+            // dashes (inv 2). The eigenvector form is exact there.
+            vec2 dabx = chR.xy - chL.xy;
+            vec2 daby = chU.xy - chD.xy;
+            float a11 = dot(dabx, dabx);
+            float a22 = dot(daby, daby);
+            float a12 = dot(dabx, daby);
+            float dEv = a11 - a22;
+            float rEv = sqrt(dEv * dEv + 4.0 * a12 * a12);
+            vec2 evV = dEv >= 0.0 ? vec2(dEv + rEv, 2.0 * a12)
+                                  : vec2(2.0 * a12, rEv - dEv);
+            // §8-6: normalize(≈0) is NaN — and a NaN uv silently clamps to a
+            // corner texel, so whole flat regions were sampling the colour
+            // of the frame's bottom-left corner and printing it as a patch
+            // of foreign paper. An epsilon added INSIDE normalize does not
+            // help: its square underflows. Guard on the length instead.
+            float evL = length(evV);
+            vec2 nAB = evL > 1.0e-12 ? evV / evL : vec2(1.0, 0.0);
+            float dCpx = (chC.z - uCThr) / gcpx;     // px to the grey radius
+            // The two sheets that meet here are read ONE PAPER WIDTH out on
+            // either side along that axis — not from the local bin and its
+            // neighbour. That single choice enforces the minimum paper
+            // width for free: a hue bin narrower than ~1.6 paper widths is
+            // never sampled, so it folds into whichever neighbouring sheet
+            // the pixel is closer to instead of printing as a sliver
+            // (inv 2). Where two strong opposite hues meet, the hue sweeps
+            // through the in-between bins in a few pixels — this reads it
+            // as ONE cut between the two real sheets, not three.
+            // …but only reach out where there IS a colour edge. In a flat
+            // sheet the structure tensor is degenerate and its axis is
+            // arbitrary, so a fixed reach let the two samples land in
+            // different bins for no reason and stamped isolated rectangular
+            // patches of a foreign paper into the middle of a sheet (inv 2
+            // — island crumbs). Fading the reach to zero collapses both
+            // samples onto this pixel, i.e. onto its own bin.
+            float edgeStr = smoothstep(0.006, 0.020, sqrt(max(a11, a22)));
+            vec2 stepH = nAB * (minPx * 0.8 * edgeStr) / uResolution;
+            vec3 chHp = chromaAt(vUv + stepH);
+            vec3 chHm = chromaAt(vUv - stepH);
+            float kP = floor(hueNorm(chHp.xy) * gNbF + HOFF);
+            float kM = floor(hueNorm(chHm.xy) * gNbF + HOFF);
+            gBinH = 1 + int(mod(kP + gNbF * 8.0, gNbF));   // +nAB side
+            gBinN = 1 + int(mod(kM + gNbF * 8.0, gNbF));   // −nAB side
+            float depH = binDepthF(kP);
+            float depN = binDepthF(kM);
+            // WHERE the cut sits is measured on a monotone coordinate, not
+            // on the distance to the nearest spoke: a spoke distance is a
+            // sawtooth, so a transition that sweeps past several spokes made
+            // the sheet colour flip back and forth and shed a 1 px thread
+            // (inv 2). Project the local oklab a/b onto the axis joining the
+            // two side samples — a linear functional of a smoothly blurred
+            // field, hence monotone across the whole transition and free of
+            // the hue-angle wrap. tH is ±0.5 at the two sides, 0 on the cut;
+            // dividing by its own tap gradient turns it into PIXELS, the
+            // same unit (and the same AA) as every tone cut.
+            vec2 axH = chHp.xy - chHm.xy;
+            float axl = max(dot(axH, axH), 1.0e-9);
+            float tH = dot(chC.xy - 0.5 * (chHp.xy + chHm.xy), axH) / axl;
+            vec2 gradT = vec2(dot(chR.xy - chL.xy, axH),
+                              dot(chU.xy - chD.xy, axH)) / (3.0 * axl);
+            float gtpx = max(length(gradT), 1.0e-6);
+            float dTpx = tH / gtpx;
+            gWH = smoothstep(-1.2, 1.2, dTpx);
+            // The grey↔colour border gets the same one-paper-width test.
+            // Without it the chroma dip where two near-opposite hues cancel
+            // printed a ~6 px GREY sliver between the two coloured sheets —
+            // a strip no scissors could cut (inv 2). If the low-chroma side
+            // is not still grey a paper width out, this is not a real grey
+            // border and the pixel stays coloured.
+            vec2 nC = gradC / gcpx;
+            vec2 stepC = nC * (minPx * 1.0) / uResolution;
+            float chCp = chromaAt(vUv + stepC).z;
+            float chCm = chromaAt(vUv - stepC).z;
+            float realGrey = smoothstep(uCThr * 1.00, uCThr * 0.72, chCm);
+            gWC = mix(1.0, smoothstep(-1.2, 1.2, dCpx), realGrey) * gHueAmt;
+            float depthPx = mix(0.0, mix(depN, depH, gWH), gWC) * gHueAmt;
+            gFOff = depthPx * 0.30 / float(uN);
+            // how much of the bin's own hue survives the palette snap grows
+            // with the slider (the sepia specimen box sits low on purpose)
+            gTint = gWC * smoothstep(0.0, 0.60, uHue) * 0.60;
+
             // ---- main paper stack ----
             // Sequential tone accumulation with symmetric fwidth-scale AA at
             // EVERY cut (the old one-sided crossfade left a half-amplitude
@@ -1140,7 +1367,6 @@
             // paper — its threshold dies ("alive"→0) and the strip folds
             // into the sheet below, cascading when thresholds are crowded
             // (steep edges: knob ring, window bars, cords; inv 2).
-            float minPx = 0.010 * uResolution.x;
             float aaF = max(1.1 * gpx, 6.0e-4);
             int lvl = 0;
             float Tdn = -1.0;
@@ -1166,6 +1392,76 @@
             bandRelief(F, Fo, Tdn, Tup, rimW, gpx, aaF, rim, shd);
             rim *= reliefScale * lgt;
             shd *= reliefScale;
+
+            // ---- chroma cuts (subordinate to the tone cuts) --------------
+            // Same rimEnv envelope, same one-sided dot(∇, LDIR) light gate,
+            // same minimum band-width floor, same reliefScale mute — only
+            // 0.62× the amplitude, so the tone stack stays the主 and the
+            // colour cut reads as a second, quieter scissor line.
+            // CRAFT §A9: where a tone cut is already within ~1 paper width
+            // (or its rim is already lit), the chroma band is faded out —
+            // two bands on one edge read as an echo ring, not as paper.
+            float rimC = 0.0;
+            float shdC = 0.0;
+            if (uHue > 0.0) {
+              // Both tests for the hue cut use the same one-paper-width side
+              // samples as the colours above — never the seam itself:
+              //  · chroma — BOTH sides must be decisively coloured, so a
+              //    faint colour cast can never shatter a sheet (order §4).
+              //    Sampled at the sides because two near-opposite hues
+              //    cancel to near-zero chroma exactly ON their seam.
+              //  · width — the two sides' bin DEPTHS must actually differ,
+              //    i.e. there really are two sheets here.
+              float chGate = smoothstep(uCThr * 1.10, uCThr * 1.90,
+                min(chHp.z, chHm.z));
+              float aliveH = smoothstep(0.18, 0.55, abs(depH - depN));
+              // …and chroma side: one paper width along ∇C the patch must
+              // still be coloured, and grey on the other side (the samples
+              // that already decided gWC). A 0.3 % colour fringe cannot be
+              // cut from paper.
+              float aliveC =
+                smoothstep(0.10 * uCThr, 0.55 * uCThr, chCp - uCThr) *
+                smoothstep(0.10 * uCThr, 0.55 * uCThr, uCThr - chCm);
+              // near-binary: a HALF-engaged cut is a continuous wash, not a
+              // scissor line, and its broken remains are exactly the dashed
+              // debris the island floor exists to forbid (inv 2). Saturate
+              // both width gates before they reach the relief.
+              float liveH = smoothstep(0.30, 0.62, aliveH * chGate);
+              float liveC = smoothstep(0.30, 0.62, aliveC);
+              // which side of each cut is the FRONT sheet (warm forward)
+              float sideH = smoothstep(-0.12, 0.12, depH - depN);
+              float sideC = smoothstep(-0.12, 0.12, mix(depN, depH, gWH));
+              float fH = mix(1.0 - sideH, sideH, step(0.0, dTpx));
+              float fM = mix(1.0 - sideC, sideC, step(0.0, dCpx));
+              float lgtH = smoothstep(-0.15, 0.45,
+                dot((gradT / gtpx) * (2.0 * sideH - 1.0), LDIR));
+              float lgtC = smoothstep(-0.15, 0.45,
+                dot(nC * (2.0 * sideC - 1.0), LDIR));
+              float rimH = rimEnv(mix(-abs(dTpx), abs(dTpx), fH), rimW) *
+                lgtH * liveH;
+              float rimM = rimEnv(mix(-abs(dCpx), abs(dCpx), fM), rimW) *
+                lgtC * liveC;
+              // cast shadow: the bin-depth field probed TOWARD the light in
+              // three steps (the same pixel reach as the tone shadow; the
+              // three taps are the penumbra of a piecewise-constant field)
+              float dOff = (depthAt(vUv - shOff) +
+                depthAt(vUv - shOff * 0.66) + depthAt(vUv - shOff * 0.33)) / 3.0;
+              // CRAFT §A9 separation. Measured on the tone relief ITSELF —
+              // rim and shd already are the tone cut's band, and both are
+              // smooth fields. (A "pixels to the nearest threshold" test,
+              // (F-T)/gpx, looks more direct but divides by a gradient that
+              // is ~0 inside a flat sheet: it flickered along the seam and
+              // printed the chroma shadow as dashes. Same class of failure
+              // as the fwidth-based decisions this shader already avoids.)
+              float chSep = (1.0 - 0.85 * clamp(rim, 0.0, 1.0)) *
+                (1.0 - 0.60 * clamp(shd, 0.0, 1.0)) *
+                reliefScale * gHueAmt * flat0;
+              rimC = max(rimH, rimM) * chSep;
+              // the cast shadow needs the same width gates as the rim —
+              // ungated it printed dashes wherever the depth field flickered
+              shdC = smoothstep(0.10, 0.65, dOff - depthPx) *
+                max(liveH, liveC) * chSep;
+            }
 
             // ---- local subdivision (invariant 6): where the heavy field
             // erased local structure, split the band ONCE at its midpoint
@@ -1274,6 +1570,11 @@
             float shdAmp = (0.20 + 0.34 * relW) * flat0;
             col *= 1.0 - shd * shdAmp;
             col *= 1.0 - shdS * shdAmp * 0.5;
+            // the colour cut's own thickness — deliberately 0.62× the tone
+            // cut's, so the depth story stays led by light and dark
+            col = mix(col, col * 1.18 + edgeC * 0.10,
+              rimC * (0.30 + 0.62 * relW) * eb * 0.62);
+            col *= 1.0 - shdC * shdAmp * 0.62;
 
             // ---- dark floor (invariant 6): the darkest few percent of the
             // FINE field survive as the deepest ink paper — but ONLY as
@@ -1323,13 +1624,17 @@
               dbg = mix(dbg, vec3(1.0, 0.55, 0.15), rim);
               dbg = mix(dbg, vec3(0.20, 0.42, 1.0), shd * 0.85);
               dbg = mix(dbg, vec3(0.25, 0.85, 0.35), max(rimS, shdS) * 0.7);
+              // chroma cuts = magenta (rim) / violet (cast shadow)
+              dbg = mix(dbg, vec3(0.95, 0.20, 0.80), rimC * 0.9);
+              dbg = mix(dbg, vec3(0.55, 0.15, 0.85), shdC * 0.75);
               fragColor = vec4(dbg, 1.0);
               return;
             }
 
             // ---- paper grain (fbm, per-layer phase — one paper set, many
             // sheets; invariant 4). Seeded by pixel cell + layer only.
-            float ph = float(lvl) * 17.31;
+            float ph = float(lvl) * 17.31 +
+              float(gWC > 0.5 ? gBinH : 0) * 7.13;
             col *= 1.0 + (fbm(px * 0.011 + ph) - 0.5) * (0.045 + 0.095 * uGrain);
             col *= 1.0 + (fbm(px * 0.15 + ph * 1.7) - 0.5) * (0.018 + 0.065 * uGrain);
             col *= 1.0 - 0.05 * uGrain * step(0.9945, hash12(floor(px * 0.7) + ph));
@@ -1378,6 +1683,7 @@
           struct: createProgram(structFS),
           blur: createProgram(blurFS),
           stats: createProgram(statsFS),
+          chroma: createProgram(chromaFS),
           composite: createProgram(compositeFS),
         };
 
@@ -1391,10 +1697,12 @@
           ]),
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
           stats: getLocations(programs.stats, ["uBand", "uStruct"]),
+          chroma: getLocations(programs.chroma, ["uBand"]),
           composite: getLocations(programs.composite, [
-            "uStruct", "uBand", "uBandM", "uResolution", "uAspect",
-            "uRelief", "uPalette", "uDetail", "uGrain",
-            "uPreset", "uInvert", "uDebug", "uTh[0]", "uN", "uDark", "uAB[0]",
+            "uStruct", "uBand", "uBandM", "uChroma", "uResolution", "uAspect",
+            "uRelief", "uPalette", "uHue", "uDetail", "uGrain",
+            "uPreset", "uInvert", "uDebug", "uTh[0]", "uN", "uDark",
+            "uCThr", "uNB", "uAB2[0]",
           ]),
         };
 
@@ -1455,6 +1763,7 @@
             bandTmp: createTarget(bandW, bandH, true),
             bandM: createTarget(bandW, bandH, true),
             bandT: createTarget(bandW, bandH, true),
+            chroma: createTarget(bandW, bandH, true),
             stats: createTarget(STATS_RES, STATS_RES, false),
           };
           needsReset = true;
@@ -1467,6 +1776,7 @@
           clearTarget(targets.bandTmp, 0.5, 0.5, 0.5, 0.5);
           clearTarget(targets.bandM, 0.5, 0.5, 0.5, 0.5);
           clearTarget(targets.bandT, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.chroma, 0.5, 0.5, 0, 1);
           clearTarget(targets.stats, 0.5, 0.5, 0, 1);
         }
 
@@ -1538,10 +1848,16 @@
         ------------------------------------------------------------------ */
 
         const BINS = 64;
+        const CMAX = 0.4;          // oklab chroma histogram range
         const statsBuf = new Uint8Array(STATS_RES * STATS_RES * 4);
         const histL = new Float32Array(BINS);
         const histFine = new Float32Array(BINS);
-        const abAcc = new Float32Array(8 * 3);   // per-level Σa, Σb, count
+        const histC = new Float32Array(BINS);
+        const abAcc = new Float32Array(8 * 3);        // per-level Σa, Σb, n
+        const ab2Acc = new Float32Array(48 * 3);      // per level×bin
+        const abBAcc = new Float32Array(6 * 3);       // per bin, all levels
+        const TAU = Math.PI * 2;
+        const HOFF = 0.17;         // spoke rotation — must match the shader
         const DEAD = 0.006;        // hysteresis dead zone (invariant 5)
         const MIN_GAP = 0.065;     // min threshold separation — adjacent
                                    // levels closer than this in luminance
@@ -1551,12 +1867,20 @@
           th: new Float32Array(7),
           n: 6,
           dark: 0.10,
-          ab: new Float32Array(16),   // per-level flat oklab chroma (a,b)×8
+          cthr: 0.05,                  // achromatic radius (order §4)
+          nb: 4,                       // chromatic bin count
+          ab2: new Float32Array(96),   // flat oklab chroma per level×bin
           inv: -1,
           seeded: false,
         };
         function layerCount() {
           return Math.min(8, 4 + Math.round(state.layers * 4));
+        }
+        // 1 achromatic bin + 3..5 hue bins = 4..6 sheets of colour per tone
+        // level (order §2). The count is a pure function of the slider, so
+        // CPU and shader always agree on the bin index.
+        function chromaBins() {
+          return Math.max(3, Math.min(5, 3 + Math.round(state.hue * 2)));
         }
         function presetInvert() {
           // night box: the DARK papers are the front layers
@@ -1597,6 +1921,7 @@
           const inv = presetInvert();
           histL.fill(0);
           histFine.fill(0);
+          histC.fill(0);
           const count = STATS_RES * STATS_RES;
           for (let i = 0; i < count; i++) {
             const o = i * 4;
@@ -1604,14 +1929,20 @@
             if (inv === 1) v = 1 - v;
             histL[Math.min(BINS - 1, (v * BINS) | 0)]++;
             histFine[Math.min(BINS - 1, ((statsBuf[o + 1] / 255) * BINS) | 0)]++;
+            const ca = (statsBuf[o + 2] / 255 - 0.5) / 1.25;
+            const cb = (statsBuf[o + 3] / 255 - 0.5) / 1.25;
+            histC[Math.min(BINS - 1, ((Math.hypot(ca, cb) / CMAX) * BINS) | 0)]++;
           }
 
           const n = layerCount();
           // FREEZE snaps instead of easing: a frozen scene has constant
           // quantiles, so snapping makes the still frame deterministic and
           // immediately flicker-free (the ease is for live footage only).
-          const snap = FREEZE || n !== TH.n || inv !== TH.inv || !TH.seeded;
+          const nb = chromaBins();
+          const snap =
+            FREEZE || n !== TH.n || inv !== TH.inv || nb !== TH.nb || !TH.seeded;
           TH.n = n;
+          TH.nb = nb;
           TH.inv = inv;
           const tau = 0.5 + 2.0 * state.calm;
           const k = 1 - Math.exp(-Math.max(dtStat, 1e-3) / tau);
@@ -1651,31 +1982,111 @@
             const dTarget = Math.min(Math.max(dq, 0.02), 0.45);
             TH.dark = snap ? dTarget : smoothScalar(TH.dark, dTarget, k);
           }
-          // per-level average oklab chroma (packed into stats B/A by the
+          // achromatic radius (order §4): the colour split must not fire on
+          // faint colour casts, so the grey/coloured boundary is a QUANTILE
+          // of the scene's own chroma — raising 色の切り分け lowers the
+          // quantile (more of the frame counts as coloured). Smoothed with
+          // the same dead-zone hysteresis + EMA as every other threshold, so
+          // bins never boil on a still scene (invariant 5).
+          // The FLOOR matters more than the quantile: a beige wall, a wooden
+          // frame or dark hair carry an oklab chroma of 0.020-0.031 — those
+          // are tints, not colours, and slicing them by hue shattered the
+          // wall into dashed debris (inv 2). The floor sits above that band
+          // (0.058 → 0.028 as 色の切り分け rises); the quantile only raises
+          // it further in an unusually saturated scene.
+          const cq = quantileOf(histC, count, 0.86 - 0.34 * state.hue);
+          if (cq !== null) {
+            const cFloor = 0.058 - 0.030 * state.hue;
+            const cTarget = Math.min(Math.max(cq * CMAX, cFloor), 0.24);
+            TH.cthr = snap ? cTarget : smoothScalar(TH.cthr, cTarget, k);
+          }
+          // per LEVEL×BIN average oklab chroma (packed into stats B/A by the
           // GPU): ONE flat chroma per paper sheet — the composite never
           // touches the continuous pre-quantization chroma again (inv 1).
+          // With 色の切り分け at 0 every pixel lands in bin 0 and every bin
+          // of a level is filled with that level's mean, so the shader's
+          // uAB2 lookup degenerates exactly to the old per-level uAB.
+          const useHue = state.hue > 0.001;
+          const hs = Math.min(1, Math.max(0, state.hue / 0.6));
+          const hueStrength = hs * hs * (3 - 2 * hs);   // smoothstep(0,0.6)
           abAcc.fill(0);
+          ab2Acc.fill(0);
+          abBAcc.fill(0);
           for (let i = 0; i < count; i++) {
             const o = i * 4;
             let v = statsBuf[o] / 255;
             if (inv === 1) v = 1 - v;
             let lvl = 0;
             for (let j = 0; j < n - 1; j++) if (v > TH.th[j]) lvl = j + 1;
-            abAcc[lvl * 3] += statsBuf[o + 2] / 255 - 0.5;
-            abAcc[lvl * 3 + 1] += statsBuf[o + 3] / 255 - 0.5;
+            // accumulate the RAW packed offsets and divide by (n × 1.25) at
+            // the end — the exact expression the per-level average used
+            // before the bins existed, so 色の切り分け=0 reproduces the
+            // previous build bit for bit rather than ±1 LSB off
+            const ra = statsBuf[o + 2] / 255 - 0.5;
+            const rb = statsBuf[o + 3] / 255 - 0.5;
+            abAcc[lvl * 3] += ra;
+            abAcc[lvl * 3 + 1] += rb;
             abAcc[lvl * 3 + 2] += 1;
+            let bin = 0;
+            if (useHue && Math.hypot(ra, rb) / 1.25 >= TH.cthr) {
+              const hn = Math.atan2(rb, ra) / TAU + 0.5;
+              const kk = Math.floor(hn * nb + HOFF);
+              bin = 1 + (((kk % nb) + nb) % nb);
+            }
+            const ci = (lvl * 6 + bin) * 3;
+            ab2Acc[ci] += ra;
+            ab2Acc[ci + 1] += rb;
+            ab2Acc[ci + 2] += 1;
+            abBAcc[bin * 3] += ra;
+            abBAcc[bin * 3 + 1] += rb;
+            abBAcc[bin * 3 + 2] += 1;
           }
           for (let l = 0; l < 8; l++) {
             const cnt = abAcc[l * 3 + 2];
-            if (cnt < 16) continue;   // empty level: keep the previous tint
-            const ta = abAcc[l * 3] / (cnt * 1.25);
-            const tb = abAcc[l * 3 + 1] / (cnt * 1.25);
-            if (snap) {
-              TH.ab[l * 2] = ta;
-              TH.ab[l * 2 + 1] = tb;
-            } else {
-              TH.ab[l * 2] += (ta - TH.ab[l * 2]) * k;
-              TH.ab[l * 2 + 1] += (tb - TH.ab[l * 2 + 1]) * k;
+            const has = cnt >= 16;
+            const la = has ? abAcc[l * 3] / (cnt * 1.25) : 0;
+            const lb = has ? abAcc[l * 3 + 1] / (cnt * 1.25) : 0;
+            for (let b = 0; b < 6; b++) {
+              const ci = (l * 6 + b) * 3;
+              const oi = (l * 6 + b) * 2;
+              const c2 = ab2Acc[ci + 2];
+              const cb2 = abBAcc[b * 3 + 2];
+              let ta;
+              let tb;
+              if (c2 >= 16) {
+                ta = ab2Acc[ci] / (c2 * 1.25);
+                tb = ab2Acc[ci + 1] / (c2 * 1.25);
+              } else if (cb2 >= 16) {
+                // Too few samples for its own sheet — fall back to THIS
+                // BIN's mean over every level, never to the level's mean.
+                // The level mean mixes all the hues of that tone band, so a
+                // small pocket that slipped into a neighbouring level got
+                // stamped with a foreign colour: an isolated warm patch in
+                // the middle of a cool sheet (inv 2 — island crumbs).
+                ta = abBAcc[b * 3] / (cb2 * 1.25);
+                tb = abBAcc[b * 3 + 1] / (cb2 * 1.25);
+              } else if (has) {
+                ta = la;
+                tb = lb;
+              } else {
+                continue;   // empty level: keep the previous tint
+              }
+              // 色の切り分け also decides HOW FAR a bin's colour may depart
+              // from its level's mean: at 0 it cannot depart at all (the
+              // previous build), at 1 each bin is fully its own colour. The
+              // sepia specimen box keeps this low, so its sheets stay a
+              // single-hue family (order §6).
+              if (has) {
+                ta = la + (ta - la) * hueStrength;
+                tb = lb + (tb - lb) * hueStrength;
+              }
+              if (snap) {
+                TH.ab2[oi] = ta;
+                TH.ab2[oi + 1] = tb;
+              } else {
+                TH.ab2[oi] += (ta - TH.ab2[oi]) * k;
+                TH.ab2[oi + 1] += (tb - TH.ab2[oi + 1]) * k;
+              }
             }
           }
           TH.seeded = true;
@@ -1723,7 +2134,8 @@
           };
           window.__thDbg = {
             th: Array.from(TH.th.slice(0, Math.max(n - 1, 0))),
-            n, dark: TH.dark, inv,
+            n, dark: TH.dark, inv, nb, cthr: TH.cthr,
+            ab2: Array.from(TH.ab2),
           };
         }
 
@@ -1806,6 +2218,12 @@
           blurPass(targets.bandM, targets.bandTmp, targets.bandT,
             2.0 + 4.5 * state.smooth);
 
+          // P2b — chroma field of the quantization field (cheap taps in P3)
+          renderPass(targets.chroma, programs.chroma, () => {
+            bindTexture(0, targets.bandT.tex);
+            gl.uniform1i(locations.chroma.uBand, 0);
+          });
+
           // P2 — stats source (read back on a slow CPU cadence)
           renderPass(targets.stats, programs.stats, () => {
             const u = locations.stats;
@@ -1822,13 +2240,16 @@
               bindTexture(0, structCur.tex);
               bindTexture(1, targets.bandT.tex);
               bindTexture(2, targets.bandM.tex);
+              bindTexture(3, targets.chroma.tex);
               gl.uniform1i(u.uStruct, 0);
               gl.uniform1i(u.uBand, 1);
               gl.uniform1i(u.uBandM, 2);
+              gl.uniform1i(u.uChroma, 3);
               gl.uniform2f(u.uResolution, canvas.width, canvas.height);
               gl.uniform1f(u.uAspect, aspect);
               gl.uniform1f(u.uRelief, state.relief);
               gl.uniform1f(u.uPalette, state.palette);
+              gl.uniform1f(u.uHue, state.hue);
               gl.uniform1f(u.uDetail, state.detail);
               gl.uniform1f(u.uGrain, state.grain);
               gl.uniform1i(u.uPreset, state.preset);
@@ -1837,7 +2258,9 @@
               gl.uniform1fv(u["uTh[0]"], TH.th);
               gl.uniform1i(u.uN, TH.n);
               gl.uniform1f(u.uDark, TH.dark);
-              gl.uniform2fv(u["uAB[0]"], TH.ab);
+              gl.uniform1f(u.uCThr, TH.cthr);
+              gl.uniform1i(u.uNB, TH.nb);
+              gl.uniform2fv(u["uAB2[0]"], TH.ab2);
             });
           }
 
