@@ -1,0 +1,96 @@
+{
+  "artifact": {
+    "file": "fable5_kirie-sekai.html",
+    "screenshots": [
+      "loop/state/kirie-sekai/shots/small_final.png",
+      "loop/state/kirie-sekai/shots/small_night.png",
+      "loop/state/kirie-sekai/shots/final.png",
+      "loop/state/kirie-sekai/shots/final_day.png",
+      "loop/state/kirie-sekai/shots/final_night.png",
+      "loop/state/kirie-sekai/shots/final_sepia.png",
+      "loop/state/kirie-sekai/shots/final_warm.png",
+      "loop/state/kirie-sekai/shots/crop_day_person.png",
+      "loop/state/kirie-sekai/shots/crop_day_window.png",
+      "loop/state/kirie-sekai/shots/crop_night_center.png",
+      "loop/state/kirie-sekai/shots/zoom_head.png",
+      "loop/state/kirie-sekai/shots/zoom_wall.png",
+      "loop/state/kirie-sekai/shots/final_d1.png",
+      "loop/state/kirie-sekai/shots/final_d2.png",
+      "loop/state/kirie-sekai/shots/final_d3.png",
+      "loop/state/kirie-sekai/shots/final_d4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "多層の紙を重ねた切り絵風の室内ポートレートに見える — 窓とペンダントライトのある部屋におかっぱ頭の人物がおり、各色面の縁に厚みのハイライトと落ち影が読めるレイヤードペーパーの箱庭。ポスタライズした写真ではなく紙の積層として読めるため、テーマ『切り紙の世界』と一致する。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "final_d1(平滑輝度場)→final_d2(フラット量子化のみ)→final(切り口ハイライト+落ち影付き)の系が確認でき、day/night/sepia とも約6〜8トーンの平坦な面で構成される(final_d4 の紙セット標本と本編の面色が一致)。crop_day_person では境界の細いハイライトと下層への短い柔らかい落ち影が紙の重なりとして読める。減点根拠: final.png のドアノブ(255,555)-(355,650) 等倍拡大で、クリーム円の内部に滑らかな放射グラデーションと元映像由来の細い円輪郭線が残存し、final_night / final_sepia の窓下段のガラス面には光沢ストリーク状の連続階調が残る — 全面が『ほぼ平坦』とは言い切れない局所が複数ある。",
+      "reject_reasons": [
+        "ノブのクリーム円内部に連続階調(放射グラデーション)が残存",
+        "元映像のハイコントラスト細線(ノブの細円輪郭)が量子化を突き抜けて写真の名残として見える",
+        "夜・セピアの窓下段に光沢ストリークの連続階調"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 2,
+      "evidence": "final.png (520,140)-(600,200) の壁ベージュ/セージ境界を8倍拡大すると、AAのない1pxのハード階段(鋸歯)が連続しており、ハサミ曲線として成立していない。zoom_wall / final.png (255,555)-(355,650) のドアノブ周囲では、中間トーンのベージュ円環が矩形階段状の飛び地粒(上のT字片・左右のタブ片・下の欠片)に千切れている。crop_night_center 左端 (0,0)-(120,320) には人物輪郭に沿う糸状のラベンダー色ストリップが鋸歯エッジ付きで走り、final.png (420,430)-(620,560) の肩と窓の接合部には浮遊する暗色の小さなちぎれ小片が2つある。等倍(crop_night_center・final.png はピクセル倍化なしを差分統計で確認済み)での鋸歯・飛び地・糸ストリップが複数箇所で実在する。",
+      "reject_reasons": [
+        "量子化境界に AA のない 1px 階段が全プリセットの高コントラスト境界に存在",
+        "ノブ周囲の中間トーン帯が最小紙片フロアを素通りして矩形状の飛び地粒に分解",
+        "夜プリセットの人物輪郭沿いに糸状ストリップ",
+        "肩・窓接合部に浮遊する暗色ちぎれ小片"
+      ],
+      "fix_instructions": [
+        "因果診断: 量子化しきい値の比較がスクリーン解像度でハードな step() のまま評価されており境界に AA がない(final.png (520,140)-(600,200) の等倍で 1px 階段を確認)。処方: しきい値比較を fwidth ベースの smoothstep に置換し、境界の AA 幅をスクリーン空間 1.0〜1.5px に統一する(全プリセット・全境界。擬似 sdf 帯のエッジも同じ幅で丸める)。",
+        "因果診断: ドアノブ周囲の中間トーン円環(細い帯)が最小帯幅フロアを素通りし、矩形階段状の飛び地粒に割れている(zoom_wall / final.png 等倍で確認)。処方: fwidth 比較の最小帯幅フロアを画面幅比 ~1.0% 相当へ引き上げ、フロア未満の島・帯を隣接下層トーンへ吸収する。あわせて元映像のハイコントラスト細線(ノブの細い円輪郭)が量子化を突き抜けないよう、kuwahara 前の平滑半径に局所下限を設ける。",
+        "因果診断: 夜プリセットの人物輪郭沿いの糸状ライトストリップ(crop_night_center 左帯)は量子化2段の境界が近接して薄帯が生き残ったもの。処方: hysteresis の帯域を広げて薄帯を片側の段へスナップし、肩・窓接合部の浮遊小片(final.png (420,430)-(620,560))も同じ最小紙片フロアで下層へ統合する。"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 3,
+      "evidence": "落ち影の方向自体はほぼ一貫している(final.png: 窓枠の下・壁バンド境界の下・ノブの右下・頭部の右下に影が落ち、上=光の秩序)。しかし切り口ハイライトが方向を持たない全周リングになっている: crop_day_window では窓の白パネルの上辺にも下辺にも明るいリムが回り込み、final.png のノブのクリーム円は影側であるはずの最下端が最も明るく光る。単一光源ベクトルなら影側の縁は光らないはずで、これは紙の厚みでなくベベル/ゲルコーティングの読みを作る。さらに頭部・窓枠・コードの全周に太い暗色縁取り(edge darkening)が回っており(final.png / zoom_head)、brief の『edge darkening は控えめ』を超えて輪郭線画の印象を与える。final_d3 の境界帯ビューでもパネル周囲はオレンジ帯が全周リング状。",
+      "reject_reasons": [
+        "切り口ハイライトが光源方向と無関係の全周リング(窓パネル・ノブ)でベベル読みを誘発",
+        "edge darkening が強く全周の黒縁取りになり、落ち影による奥行きの手掛かりを上書きしている"
+      ],
+      "fix_instructions": [
+        "因果診断: 切り口ハイライトが擬似 sdf 帯の全周に一様に乗っており、光源ベクトルによる片側ゲートがない(crop_day_window の窓パネルが全辺で光る/final.png のノブ円は影側の最下端が最も明るい)。処方: ハイライト強度に max(0, dot(normalize(sdf勾配), uLightDir)) の片側ゲートを掛け、uLightDir は左上の単一ベクトルで全画面・全プリセット統一。影側の縁はオフセット落ち影のみにする。",
+        "因果診断: edge darkening のゲインが強く、頭部・窓枠・コードの全周黒縁が輪郭線画/ステンドグラスの読みを作っている(final.png / zoom_head)。処方: edge darkening を約50%減じ、層間の奥行き表現は方向付き落ち影の深さに寄せる(brief inv3 の『edge darkening は控えめ』)。"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "final_d4 の標本ビューに各プリセットの紙セット階段(約8トーン+最暗/最明)が表示され、本編 final_day / final_night / final_sepia の面色がその階段の色と一致する(oklab スナップが機能している証拠)。day=ティール×ベージュ、night=ネイビー/ラベンダー×アンバー、sepia=茶系単色と、いずれも『同じ紙のセットから切った』統一感があり、実写色がそのまま段々になったポスタライズには見えない。紙繊維のグレインも面ごとに乗っている(zoom_wall の平坦面)。減点根拠: day プリセットの口の紙片がティール(final.png (560,290)-(700,440) 拡大)で、肌まわりの紙セットから浮いた選色に見え、セット内の色運用として最適とは言えない。",
+      "reject_reasons": [
+        "day プリセットの口のトーン選択が肌の紙セットから浮く"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 5,
+      "evidence": "V1 運動応答チェック pass(unfrozen mean|Δ|=8.94/255 で動く合成シーンに量子化境界が追従、freeze 時 flicker Δ=0.000 で完全静止)。静止画側でも沸き立ちを示唆する痕跡(境界の多重ゴースト・グレインの方向むら)は crop_day_person / zoom_wall に見当たらず、グレインは cell-hash の静的パターンとして面に固着している。静止画から時間性の減点はしない(手順の規律に従う)。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "3プリセットすべての等倍拡大で目・眉・口の3点を個別確認した: day(final.png (560,290)-(700,440)): 眉=2本の暗色ストローク、目=2つの暗色楕円片、口=小さなティール楕円片。night(final_night (450,230)-(580,380)): 眉・目とも明瞭な暗色紙片、口=グレー楕円片。sepia(final_sepia 同域): 眉・目=暗褐色片、口=濃茶の小楕円。人物輪郭も全プリセットで読める(small_final / small_night でも顔と認識可能)。減点根拠: 口は3プリセットとも縁の切り口ハイライト・落ち影を持たないソフトエッジの楕円で、『紙片』というよりエアブラシの点に見える。day の口はティール選色のせいでコントラストが低く、縮小版 small_final では口がほぼ消える。",
+      "reject_reasons": [
+        "口の紙片に切り口の縁表現がなくエアブラシ点に見える",
+        "day プリセットの口は縮小表示でほぼ判読不能"
+      ]
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 2
+  },
+  "verdict": "fail",
+  "summary": "ゲシュタルトは成立(第一印象=切り絵の箱庭でテーマと一致、ポスタライズ読みは反証済み)し、量子化場→紙セットスナップ→切り口/落ち影の系(d1/d2/d4)と時間安定(V1 pass)は堅い。fail の主因は等倍品質: (1) 量子化境界に AA のない 1px 鋸歯が全プリセットで残り、ノブ周囲では中間トーン帯が矩形状の飛び地粒に千切れ、夜プリセットに糸状ストリップがある(inv2=2, artifact_free=2)。(2) 切り口ハイライトが光源片側ゲートを持たない全周リングで、影側の縁まで光ってベベル/ゲル読みを作り、強い edge darkening が輪郭線画の印象を足す(inv3=3)。処方は fwidth ベースの境界 AA 統一・最小帯幅フロアの引き上げ・ハイライトの光源片側ゲート・edge darkening 半減。なお鋸歯判定は、crop_night_center / final.png がピクセル倍化なしの等倍であることを差分統計で確認した上で行った(zoom_head は2倍拡大画像だったため一次証拠から除外)。"
+}

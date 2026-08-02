@@ -1,0 +1,87 @@
+{
+  "artifact": {
+    "file": "fable5_kirie-sekai.html",
+    "screenshots": [
+      "loop/state/kirie-sekai/shots/small_final.png",
+      "loop/state/kirie-sekai/shots/small_night.png",
+      "loop/state/kirie-sekai/shots/final.png",
+      "loop/state/kirie-sekai/shots/final_warm.png",
+      "loop/state/kirie-sekai/shots/final_day.png",
+      "loop/state/kirie-sekai/shots/final_night.png",
+      "loop/state/kirie-sekai/shots/final_sepia.png",
+      "loop/state/kirie-sekai/shots/crop_day_person.png",
+      "loop/state/kirie-sekai/shots/crop_day_window.png",
+      "loop/state/kirie-sekai/shots/crop_night_center.png",
+      "loop/state/kirie-sekai/shots/zoom_head.png",
+      "loop/state/kirie-sekai/shots/zoom_wall.png",
+      "loop/state/kirie-sekai/shots/final_d1.png",
+      "loop/state/kirie-sekai/shots/final_d2.png",
+      "loop/state/kirie-sekai/shots/final_d3.png",
+      "loop/state/kirie-sekai/shots/final_d4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "brief 読了前の small_final.png: 多層の切り紙(ペーパーカット)で作った室内情景に見える — 黒髪ボブの人物が窓とペンダントランプのある部屋にいて、ティール/タンの限定紙トーンの層が縁のハイライトと落ち影で積み重なっている。ポスタライズフィルタではなく紙工作のシャドーボックスとして読めた。テーマ『切り紙の世界(画面全体の多層ペーパーカット)』と一致。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 4,
+      "evidence": "final_d1(kuwahara平滑輝度場は滑らか)→final_d2(量子化のみ: 全画面が約7〜8段のフラット紙面)→final_d3(境界帯がハイライト/シャドー2色で全境界に付随)の3段が機構の実在を示す。crop_day_person: 各テール層の上縁に細い切り口ハイライト、下層への短い落ち影が紙の重なりとして読める。面内平坦性を数値確認: final_day 机帯 p2-p98=2/255・セーター=2・壁=8、final_night 壁=4(グレイン振幅内)。前回(review2)指摘の机グラデ・セーター縦縞は解消。残る減点: final_night の頬内部に p2-p98=19/255 の弱い縦スジ状変調がグレイン床を超えて残存、また final.png の窓枠まわりは明帯・暗帯が3〜4重に同心で並び、紙の厚みというよりエンボス/グロー調に見える箇所がある。",
+      "reject_reasons": [
+        "『ポスタライズ偽装』疑い → d1/d2/d3 の分解で量子化場+境界帯の実装を確認し反証",
+        "『面内に写真階調残存』疑い → 机・セーター・壁は範囲2〜8/255で反証。夜の頬のみ19/255の微弱スジが残り満点は不可",
+        "窓枠の多重同心バンドがエンボス調に読める(紙の物質感を局所的に弱める)"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 4,
+      "evidence": "等倍の crop_day_person / crop_day_window / crop_night_center では全境界がアンチエイリアスされた大きな滑らかカーブで、1〜2pxの鋸歯・糸状ストリップは無し。zoom_head / zoom_wall に見える階段状ブロックはピクセル解析で2x2ブロック一致率100%=ニアレストネイバー2倍拡大の産物であり、ネイティブ解像度の鋸歯ではないと確認(等倍crop側が一次証拠)。final_d2 でも飛び地の粒はほぼ無く、顔の目・口など意図された小紙片のみ。減点: zoom_wall の壁スイッチ円の周囲に、腰壁帯が輪の隙間から覗く小さな楔形の切れ端が4つ散らばり(ネイティブ約10px)、最小紙片サイズ付近の視覚ノイズになっている。また final.png のランプコード周囲の暗ハロー帯は最小帯幅ぎりぎりの細さ。",
+      "reject_reasons": [
+        "『zoom_* の鋸歯』疑い → 2x NN拡大アーティファクトと数値で反証(2x2一致率1.0)",
+        "壁スイッチ円周囲の4つの小楔形断片が『ちぎれ粒』に近い(層構造としては整合するが視覚的に散らかる)"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 4,
+      "evidence": "final_d3: 境界帯のハイライト側(橙)とシャドー側(青)の向きが全画面で同一方向(光=左上、影=右下)に揃っており、方向の反転箇所は発見できず。final_d4 の標本列(同心楕円スタック5種)も影が常に下側。深度秩序は『暗=手前』で一貫: 人物・机(最暗)が最前、タン壁が中景、窓の空(最明)が最奥。zoom_wall: タン帯→明テール帯→紺への各段で上の層が下の層に影を落とす関係が固定。減点: 髪や窓桟の輪郭は edge darkening が両側均等に付く箇所があり(final.png 頭部の全周暗リム)、片側性の落ち影という紙の手掛かりを局所的に薄めている。",
+      "reject_reasons": [
+        "『影方向が場所ごとにばらつく』疑い → d3 の帯配色とd4標本で反証、反例なし",
+        "頭部輪郭など一部で全周均一の縁取りになり、方向性のある落ち影の読みが弱まる"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 5,
+      "evidence": "final_d4 上段に3プリセットの紙セット(day: ティール/タン約8段、night: 橙〜紫紺、sepia: 褐色階段)+最暗/最明の紙が標本として提示され、final_day / final_night / final_sepia の本番画がそれぞれのセットの色だけで構成されている。final_day の顔(肌ベージュ)と壁(タン)、服(ティール)が同一セット内でまとまり、実写色の段々(ポスタライズ)には見えない。平均色でも day≈(129,135,117) / night≈(123,96,86) / sepia≈(129,106,80) と設計どおり分離。fbm紙グレインは zoom_wall・d4 下段の大面で確認。final_warm.png は final.png と平均色がほぼ同一(129.6,135.8,117.7)でランプ点灯状態の差分でありパレット逸脱ではない。",
+      "reject_reasons": [
+        "『実写色ポスタライズ』疑い → d4 の設計パレットと3プリセットの完全な色分離で反証"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 5,
+      "evidence": "V1 運動応答チェック pass: 動く合成シーンで unfrozen mean|Δ|=8.94/255(境界が追従)、静止時 flicker(freeze)Δ=0.000(完全静止=沸き立ちゼロ)。静止画からの追加減点はルール上行わない。グレインも cell-hash(時間非依存)であることが d4 の均質な紙面と V1 のΔ=0.000 に整合。",
+      "reject_reasons": [
+        "『境界の沸き立ち』疑い → V1 freeze Δ=0.000 で反証"
+      ]
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "3プリセット全部の顔を等倍から3倍拡大して個別確認(scratchpad face_final_day/night/sepia): 眉=細い最暗アーチ2本、目=最暗の楕円紙片2枚、口=鼻下の水平楕円紙片が day(ミッドティール)/ night(暗モーヴ)/ sepia(暗タン)の全てで独立した紙片として存在。review2 で指摘された『口の消失』は解消済み。人物輪郭も small_final.png の縮小でボブヘアの人物として即読める。減点: day と sepia の口は肌トーンとのコントラストが低く、縮小版では口がほぼ消えて見える(等倍では読める)。鼻の白ハイライト紙片は依然大きめで頬から顎まで流れるアメーバ形だが、ref_4 の顔面パッチの範囲内。",
+      "reject_reasons": [
+        "『口が紙片として消失(前回不合格点)』疑い → 3プリセットの等倍顔クロップで口紙片の存在を確認し反証",
+        "day/sepia の口は低コントラストで縮小表示では読み取り困難(等倍では可読のため4点止まり)"
+      ]
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 4
+  },
+  "verdict": "pass",
+  "summary": "第一印象(brief前)は『多層切り紙のシャドーボックス室内』でテーマと一致し、ゲシュタルト失敗なし。d1〜d4 の分解で kuwahara+quantile 量子化・境界帯・設計パレットが後処理偽装でなく機構として実在することを確認。前回不合格の2点(口の消失/面内の連続階調)は、3プリセット顔クロップでの口紙片の存在と、机2・セーター2・壁4〜8/255 の面内平坦度で解消を確認した。V1 は freeze Δ=0.000 / 追従 8.94 で時間安定も pass。残る弱点は (a) 窓枠まわりの多重同心バンドのエンボス調、(b) 壁スイッチ円周囲の小楔形断片4つ、(c) 夜の頬の微弱な縦スジ(19/255)、(d) day/sepia の口の低コントラスト、(e) 頭部輪郭の全周均一な縁取りによる落ち影方向性の局所的希薄化 — いずれも様式を壊す水準ではなく全項目4以上で pass。"
+}

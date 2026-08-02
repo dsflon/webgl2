@@ -15,12 +15,15 @@
        量子化場を quantile しきい値(CPU 統計 ~200ms 毎 readback → ema+hysteresis)で
        4〜8 段に量子化。境界近傍の擬似 sdf 帯((F-T)/fwidth(F))で切り口ハイライト+
        単一光源方向オフセットの落ち影。面内部は平坦。
-    2. ハサミの滑らかさ(マーク) — 量子化場の低周波性が境界曲率を保証。擬似 sdf の
-       最小帯幅フロア(画面幅比 ~0.9% 未満の帯は下の層へ統合し rim/影も抑制)。
-       暗部フロアの紙片は min-tap 膨張で幅 ≥1% に太らせる(糸の禁止)。乱数は cell-hash のみ。
-    3. 奥行きの秩序(知覚/場) — 量子化レベル⇔前後関係を固定対応。「明=手前/暗=手前」は
-       プリセットで反転し、量子化場そのものを F=1-L に反転することで rim の付く側・
-       落ち影の向きが自動的に一貫して反転する(光源は常に左上)。
+    2. ハサミの滑らかさ(マーク) — 量子化場の低周波性が境界曲率を保証。全ての量子化
+       境界は帯テクスチャのタップ勾配(fwidth の 2×2 クアッド量子化を使わない)による
+       対称 1〜1.5px AA。最小帯幅フロア(画面幅比 ~1.0% 未満の帯はしきい値を滑らかに
+       殺して下の層へ統合=飛び地粒の禁止)。暗部フロアの紙片は min-tap 膨張で
+       幅 ≥1% に太らせる(糸の禁止)。乱数は cell-hash のみ。
+    3. 奥行きの秩序(知覚/場) — 量子化レベル⇔前後関係を固定対応。切り口ハイライトは
+       dot(∇F, 光源ベクトル) の片側ゲートで光源向きの縁だけが光る(影側は落ち影のみ)。
+       「明=手前/暗=手前」はプリセットで反転し、量子化場そのものを F=1-L に反転する
+       ことで rim の付く側・ゲート・落ち影の向きが自動的に一貫して反転する(光源は常に左上)。
     5. 時間安定(時間) — 平滑輝度は ping-pong の時間 ema、しきい値は CPU 側
        hysteresis(不感帯)+ema。乱数シードに時間を混ぜない。静止入力で完全静止。
     4. 限定パレット(色) — 各層の色を oklab で紙セット(プリセット3種の紙トーン階段)へ
@@ -44,11 +47,11 @@
                 hysteresis+ema → uniform しきい値配列
                 +レベル別平均クロマ(uAB: 紙1枚=1色の平坦クロマ。量子化前の
                 連続クロマを合成段で再混入しない — 面内変調は紙グレインのみ)
-    [P3 comp  ] 量子化(4〜8層, プリセットで F 反転)+最小帯幅フロア(画面幅比
-                ~0.9%未満の帯は下層へ統合・rim/影も抑制)+擬似 sdf 帯の
-                切り口/落ち影+暗部フロア(小面・太らせ≥1%のみ)+口スケールの
-                shade 紙片+局所細分+oklab 紙パレット+fbm 紙グレイン
-                → canvas(DPR≤2)。ビネットなし
+    [P3 comp  ] 量子化(4〜8層, プリセットで F 反転。全境界タップ勾配ベースの対称
+                1〜1.5px AA)+最小帯幅フロア(画面幅比 ~1.0%未満の帯は下層へ統合・
+                rim/影も抑制)+擬似 sdf 帯の切り口(光源内積の片側ゲート)/落ち影+
+                暗部フロア(小面・太らせ≥1%のみ)+口スケールの shade 紙片+局所細分+
+                oklab 紙パレット+fbm 紙グレイン → canvas(DPR≤2)。ビネットなし
 
   実行方法:
     python3 -m http.server 8888 → http://localhost:8888/fable5_kirie-sekai.html を開き
@@ -957,14 +960,13 @@
           // relation and the tone order flip together, consistently (§8-16).
           float orientF(float L) { return uInvert == 1 ? 1.0 - L : L; }
 
-          void levelOf(float F, out int lvl, out float Tdn, out float Tup) {
-            lvl = 0;
-            for (int i = 0; i < 7; i++) {
-              if (i >= uN - 1) break;
-              if (F > uTh[i]) lvl = i + 1;
-            }
-            Tdn = lvl > 0 ? uTh[lvl - 1] : -1.0;
-            Tup = lvl < uN - 1 ? uTh[lvl] : 2.0;
+          // cut-edge highlight envelope in PIXEL distance d from the cut:
+          // exp falloff on the paper side plus a ~1 px AA tail just below
+          // the cut, so the rim line never starts as a hard 1 px step
+          // (inv 2 repair — every quantization border gets fwidth-scale AA).
+          float rimEnv(float d, float rimW) {
+            return exp(-max(d, 0.0) / max(rimW, 0.5)) *
+              smoothstep(-0.9, 0.9, d);
           }
 
           // paper colour at stack position f (0=deepest, 1=front): the
@@ -983,18 +985,24 @@
           }
 
           // pseudo-sdf band relief: rim = thin bright cut edge on this
-          // layer's own lower margin; shd = soft cast shadow where the
+          // layer's own lower margin (plus the AA tail of the sheet above
+          // spilling ≤1 px below its cut); shd = soft cast shadow where the
           // light-offset sample belongs to a MORE FRONTAL layer. The shadow
           // penumbra is measured in PIXELS (~3 px), not in luminance — a
           // luminance-wide smoothstep turns shallow gradients into airbrush
-          // streaks (predecessor repair).
+          // streaks (predecessor repair). Distances use the smooth TAP-BASED
+          // gradient gpx — fwidth is quantized per 2×2 quad and shredded
+          // thin rings into rectangular crumbs (inv 2 repair). The shadow is
+          // faded out just below the cut so it never ends as a hard
+          // half-step on the cut line itself.
           void bandRelief(float F, float Foff, float Tdn, float Tup,
-                          float rimW, out float rim, out float shd) {
-            float dLow = (F - Tdn) / max(fwidth(F), 1e-4);
-            rim = Tdn < -0.5 ? 0.0
-              : exp(-max(dLow, 0.0) / max(rimW, 0.5)) * step(0.0, dLow);
-            float shW = min(0.035, max(fwidth(F), 1e-4) * 3.0);
-            shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + shW, Foff);
+                          float rimW, float gpx, float aaF,
+                          out float rim, out float shd) {
+            rim = Tdn < -0.5 ? 0.0 : rimEnv((F - Tdn) / gpx, rimW);
+            if (Tup < 1.5) rim += rimEnv((F - Tup) / gpx, rimW);
+            float shW = min(0.035, gpx * 3.0);
+            shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + shW, Foff) *
+              (1.0 - smoothstep(Tup - 2.0 * aaF, Tup, F));
           }
 
           // uDebug==4 middle band: cut/shadow stages on a synthetic 4-layer
@@ -1015,8 +1023,14 @@
             float dLow = (Fd - Tdn) / max(fwidth(Fd), 1e-4);
             float rim = Tdn < -0.5 ? 0.0 : exp(-max(dLow, 0.0) / 1.5);
             float shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + 0.05, FdO);
+            // same one-sided light gate as the real stack: ∇Fd of the
+            // radial demo field is ±(q-center), so only the light-facing
+            // arc of each cut carries the highlight (invariant 3).
+            vec2 nd = normalize(q - vec2(0.5) + 1e-5) *
+              (uInvert == 1 ? 1.0 : -1.0);
+            float lg = smoothstep(-0.15, 0.45, dot(nd, LDIR));
             c = mix(c, c * 1.25 + paperEdgeP(uPreset) * 0.12,
-              rim * (0.25 + 0.75 * rel));
+              rim * (0.25 + 0.75 * rel) * lg);
             c *= 1.0 - shd * (0.08 + 0.30 * rel);
             return c;
           }
@@ -1084,38 +1098,71 @@
             float Fo = orientF(lumaf(texture(uBand, vUv - shOff).rgb));
             float FmO = orientF(lumaf(texture(uBandM, vUv - shOff).rgb));
 
+            // ---- smooth screen-space gradients of the two fields ----
+            // Central differences on the (heavily low-passed) band textures,
+            // ±1.5 px. fwidth is constant per 2×2 quad, so every decision
+            // built on it flickered at quad granularity and broke thin
+            // rings into rectangular crumbs (inv 2 repair); the tap-based
+            // gradient is smooth AND gives the cut's facing direction for
+            // the one-sided light gate (inv 3 repair). orientF is linear,
+            // so the preset flip is a sign on the gradient — the lit side
+            // flips together with rim/shadow/tone order (§8-16).
+            vec2 epx = vec2(1.5) / uResolution;
+            float osgn = uInvert == 1 ? -1.0 : 1.0;
+            vec2 gradF = osgn * vec2(
+              lumaf(texture(uBand, vUv + vec2(epx.x, 0.0)).rgb) -
+                lumaf(texture(uBand, vUv - vec2(epx.x, 0.0)).rgb),
+              lumaf(texture(uBand, vUv + vec2(0.0, epx.y)).rgb) -
+                lumaf(texture(uBand, vUv - vec2(0.0, epx.y)).rgb)) / 3.0;
+            vec2 gradM = osgn * vec2(
+              lumaf(texture(uBandM, vUv + vec2(epx.x, 0.0)).rgb) -
+                lumaf(texture(uBandM, vUv - vec2(epx.x, 0.0)).rgb),
+              lumaf(texture(uBandM, vUv + vec2(0.0, epx.y)).rgb) -
+                lumaf(texture(uBandM, vUv - vec2(0.0, epx.y)).rgb)) / 3.0;
+            float gpx = max(length(gradF), 1e-5);
+            float gpxM = max(length(gradM), 1e-5);
+            // one-sided light gate (invariant 3): a cut edge is a tiny wall
+            // facing -∇F; it catches the single upper-left light only when
+            // that wall faces the light — dot(∇F, LDIR) > 0 (∇F points into
+            // the fronting sheet; the shadow probe direction is the same
+            // convention). The shadowed side keeps only the cast shadow.
+            float lgt = smoothstep(-0.15, 0.45, dot(gradF / gpx, LDIR));
+            float lgtM = smoothstep(-0.15, 0.45, dot(gradM / gpxM, LDIR));
+
             // ---- main paper stack ----
-            float fwF = max(fwidth(F), 1e-4);
-            int lvl; float Tdn; float Tup;
-            levelOf(F, lvl, Tdn, Tup);
-            // minimum paper BAND WIDTH floor, measured as the pseudo-sdf
-            // width of the band itself ((Tup-Tdn)/|∇F|): any strip narrower
-            // than ~0.9% of the screen width cannot be cut from paper —
-            // fold it into the band below, repeatedly if the thresholds are
-            // crowded (steep edges: window bars, cords, nested rings; inv 2).
-            float minPx = 0.009 * uResolution.x;
-            for (int k = 0; k < 3; k++) {
-              if (lvl > 0 && Tdn > -0.5 && Tup < 1.5 &&
-                  (min(Tup, 1.0) - Tdn) < fwF * minPx) {
-                lvl -= 1;
-                Tdn = lvl > 0 ? uTh[lvl - 1] : -1.0;
-              } else { break; }
+            // Sequential tone accumulation with symmetric fwidth-scale AA at
+            // EVERY cut (the old one-sided crossfade left a half-amplitude
+            // hard step on the upper side of each boundary — the c_wall
+            // staircase), and a smooth minimum BAND WIDTH floor: a strip
+            // narrower than ~1.0% of the screen width cannot be cut from
+            // paper — its threshold dies ("alive"→0) and the strip folds
+            // into the sheet below, cascading when thresholds are crowded
+            // (steep edges: knob ring, window bars, cords; inv 2).
+            float minPx = 0.010 * uResolution.x;
+            float aaF = max(1.1 * gpx, 6.0e-4);
+            int lvl = 0;
+            float Tdn = -1.0;
+            float Tup = 2.0;
+            vec3 col = layerColor(0, 0.5 / float(uN));
+            for (int i = 0; i < 7; i++) {
+              if (i >= uN - 1) break;
+              float gapUp = ((i + 1 < uN - 1) ? uTh[i + 1] : 1.0) - uTh[i];
+              float alive = smoothstep(minPx * 0.88, minPx * 1.02, gapUp / gpx);
+              col = mix(col, layerColor(i + 1, (float(i) + 1.5) / float(uN)),
+                alive * smoothstep(uTh[i] - aaF, uTh[i] + aaF, F));
+              if (alive >= 0.5) {
+                if (F > uTh[i]) { lvl = i + 1; Tdn = uTh[i]; }
+                else if (Tup > 1.5) { Tup = uTh[i]; }
+              }
             }
             // band width in px after folding; where the layer spacing is
             // still narrower than the cut-edge scale, mute rim + shadow
             // (no ring pile-ups at high-contrast borders).
-            float widthPx = (min(Tup, 1.0) - max(Tdn, 0.0)) / fwF;
+            float widthPx = (min(Tup, 1.0) - max(Tdn, 0.0)) / gpx;
             float reliefScale = smoothstep(minPx * 0.5, minPx * 1.2, widthPx);
-            vec3 col = layerColor(lvl, (float(lvl) + 0.5) / float(uN));
-            // ≥1.5 px AA crossfade at the cut line (clean cut, no dither)
-            if (Tup < 1.5) {
-              vec3 colUp = layerColor(lvl + 1, (float(lvl) + 1.5) / float(uN));
-              col = mix(col, colUp,
-                smoothstep(Tup - fwF * 1.5, Tup + fwF * 1.5, F));
-            }
             float rim; float shd;
-            bandRelief(F, Fo, Tdn, Tup, rimW, rim, shd);
-            rim *= reliefScale;
+            bandRelief(F, Fo, Tdn, Tup, rimW, gpx, aaF, rim, shd);
+            rim *= reliefScale * lgt;
             shd *= reliefScale;
 
             // ---- local subdivision (invariant 6): where the heavy field
@@ -1123,7 +1170,7 @@
             // on the medium field — a subordinate half-step paper layer
             // with its own weak rim/shadow. Gated by detail + local
             // contrast, and only inside bands wide enough for real paper.
-            float fwM = max(fwidth(Fm), 1e-4);
+            float aaM = max(1.1 * gpxM, 6.0e-4);
             float contrastW = smoothstep(0.035, 0.065, abs(Fm - F));
             // abs(Fm-F) is also large next to every BIG edge (two blur radii
             // disagree there) — without an interior gate the subdivision
@@ -1134,9 +1181,25 @@
             float insideW = smoothstep(0.13, 0.22, bandRel);
             // the gate saturates fast (near-binary): a HALF-engaged
             // subdivision is a continuous tone wash, not a paper cut (inv 1)
+            // SCREEN-SPACE clearance: the sub-cut must sit ≥ ~1 paper floor
+            // away from every real cut. F-space width metrics blow up at
+            // gradient critical points (the trough under the knob has
+            // ∇F≈0 between two cuts 10 px apart), where a half-engaged
+            // gate shed broken dark dash debris (inv 2 — island floor) —
+            // so test the actual neighbourhood: if a sample ±minPx away
+            // leaves this band, subdivision stays off.
+            vec2 ecl = minPx * 1.8 / uResolution;
+            float Fc1 = orientF(lumaf(texture(uBand, vUv + vec2(ecl.x, 0.0)).rgb));
+            float Fc2 = orientF(lumaf(texture(uBand, vUv - vec2(ecl.x, 0.0)).rgb));
+            float Fc3 = orientF(lumaf(texture(uBand, vUv + vec2(0.0, ecl.y)).rgb));
+            float Fc4 = orientF(lumaf(texture(uBand, vUv - vec2(0.0, ecl.y)).rgb));
+            float Fcmin = min(min(Fc1, Fc2), min(Fc3, Fc4));
+            float Fcmax = max(max(Fc1, Fc2), max(Fc3, Fc4));
+            float clearW = smoothstep(0.006, 0.030, Fcmin - max(Tdn, 0.0)) *
+              smoothstep(0.006, 0.030, min(Tup, 1.0) - Fcmax);
             float subGate = smoothstep(0.30, 0.55,
-              smoothstep(0.08, 0.48, uDetail) * contrastW * insideW *
-                step(10.0, widthPx)) * flat0;
+              smoothstep(0.08, 0.48, uDetail) * contrastW * insideW * clearW *
+                smoothstep(minPx * 1.3, minPx * 1.8, widthPx)) * flat0;
             float midT = 0.5 * (max(Tdn, 0.0) + min(Tup, 1.0));
             // the split line sits toward the BRIGHT-paper side of the band
             // (one-step-raised bright snap): the white sheet only appears
@@ -1144,17 +1207,21 @@
             // highlight to a small piece (inv 6 repair).
             float hiT = mix(midT,
               uInvert == 1 ? max(Tdn, 0.0) : min(Tup, 1.0), 0.40);
-            float subHi = smoothstep(hiT - fwM * 1.5, hiT + fwM * 1.5, Fm);
+            float subHi = smoothstep(hiT - aaM, hiT + aaM, Fm);
             float fLo = float(lvl) + (uInvert == 1 ? 0.30 : 0.22);
             float fHi = float(lvl) + (uInvert == 1 ? 0.78 : 0.70);
             vec3 subCol = mix(
               layerColor(lvl, fLo / float(uN)),
               layerColor(lvl, fHi / float(uN)), subHi);
             col = mix(col, subCol, subGate * 0.9);
-            float dSub = (Fm - hiT) / fwM;
-            float rimS = exp(-max(dSub, 0.0) / max(rimW, 0.5)) * subGate;
+            // sub-cut rim: same AA envelope + one-sided light gate as the
+            // main cuts (the old exp(-max(d,0)) was 1 across the WHOLE
+            // lower half — an ungated wash, and the split line itself was
+            // a hard step; inv 2 + inv 3 repair, uniform treatment).
+            float dSub = (Fm - hiT) / gpxM;
+            float rimS = rimEnv(dSub, rimW) * subGate * lgtM;
             float shdS = (1.0 - subHi) *
-              smoothstep(hiT, hiT + min(0.035, fwM * 3.0), FmO) * subGate;
+              smoothstep(hiT, hiT + min(0.035, gpxM * 3.0), FmO) * subGate;
 
             // ---- mouth-scale shade piece (invariant 6 repair): a mid-tone
             // small面 that is one step darker than its surroundings at the
@@ -1170,7 +1237,25 @@
             // 0.2-0.6% thread (cord, bars) dilutes away (ratio→~0.3)
             float shadeThin = smoothstep(0.40, 0.55,
               dLoc / max(L - fineL, 0.03));
-            float shadeGate = smoothstep(0.040, 0.065, dLoc) * shadeThin *
+            // coherence floor (inv 2 — island floor): the dip must hold
+            // over a ±4 px neighbourhood, not just at one pixel. A mouth
+            // pocket (~1.5-3% of the screen) keeps its dip everywhere in
+            // that window; the 1-2 px dLoc maxima in the trough crescents
+            // around small bright motifs (knob) collapse to isolated specks
+            // and are rejected. (A cut-clearance gate here would kill the
+            // mouth — the chin cut is closer than one paper floor.)
+            vec2 esh = vec2(4.0) / uResolution;
+            float dLocC = dLoc;
+            for (int t = 0; t < 4; t++) {
+              vec2 o = t == 0 ? vec2(esh.x, 0.0) : t == 1 ? vec2(-esh.x, 0.0)
+                : t == 2 ? vec2(0.0, esh.y) : vec2(0.0, -esh.y);
+              // dLoc equals (heavy - medium) RAW luminance in BOTH presets
+              // (the orientF signs cancel), so the taps skip orientF.
+              float Ft = lumaf(texture(uBand, vUv + o).rgb);
+              float Fmt = lumaf(texture(uBandM, vUv + o).rgb);
+              dLocC = min(dLocC, Ft - Fmt);
+            }
+            float shadeGate = smoothstep(0.040, 0.065, dLocC) * shadeThin *
               smoothstep(0.14, 0.26, bandRel) *
               smoothstep(0.10, 0.50, uDetail) * flat0;
             float dirD = uInvert == 1 ? 1.0 : -1.0;
@@ -1218,11 +1303,16 @@
             inkL = min(inkL, texture(uStruct, vUv + dpx * vec2(-0.71, 0.71)).a);
             float wIn = max(fwidth(inkL), 1e-4);
             float smallD = smoothstep(0.06, 0.14, btFine - inkL);
-            float dFloor = smoothstep(uDark + wIn * 1.5, uDark - wIn * 1.5, inkL)
-              * dGate * smallD;
+            // one-sided onset: a piece must be DECISIVELY darker than the
+            // ink quantile to print. Pixels hovering at the threshold
+            // (borderline sill-shadow arcs near bright motifs) used to get
+            // ~50% ink and shed 1 px dark dash debris (inv 2 — island
+            // floor); eyes/brows sit well below uDark and keep full ink.
+            float dFloor = smoothstep(uDark - 0.004,
+              uDark - max(0.022, wIn * 1.5), inkL) * dGate * smallD;
             vec3 ink = inkColorP(uPreset);
             col = mix(col, ink, dFloor * 0.92);
-            float dIf = (inkL - uDark) / wIn;
+            float dIf = (inkL - (uDark - 0.013)) / wIn;
             col = mix(col, ink * 1.9 + vec3(0.09),
               exp(-abs(dIf) / 1.4) * dFloor * 0.28);
 
