@@ -62,6 +62,11 @@ attempt = state.mjs attempt <slug> <stage>   # exceeded=true なら即 needs-rev
 
 ### S0 brief(様式解析)
 
+> **既存作品を参照に使う場合は works.json 掲載作だけ**(DESIGN §3.1)。リポジトリには
+> 試作・没・旧版の HTML が同居しており、それらは公開に至らなかったもの = 参考にしない。
+> refs/ に既存作品のレンダを入れる場合も、Maker/Checker に参照実装を渡す場合も同じ。
+> 例外は `fable5_papercraft-cam.html` の**規約定型のみ**(作品表現は不可)。
+
 - 生成: テーマから `loop/state/<slug>/brief.json` を作る。中身は
   `loop/schemas/invariants.schema.json` のとおり(references / signals / vocabulary /
   invariants 5±2 / priority)。vocabulary は制作規約 §5 の正式名称から選ぶ。
