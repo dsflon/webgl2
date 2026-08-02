@@ -1,0 +1,45 @@
+{
+  "slug": "kirie-sekai",
+  "theme": "切り紙の世界 — kirie-portrait の発展。MediaPipe を使わず、カメラに映った世界全体(人も物も背景も)を多層ペーパーカットに。画面全体を輝度の分位点で4〜8枚の紙のレイヤーに切り分け、各層に切り口の厚みと落ち影。レイヤードペーパーアートの風景箱のような画",
+  "status": "submitted",
+  "attempts": {
+    "brief": 1,
+    "order": 1,
+    "implement": 1,
+    "runtime": 1,
+    "aesthetic": 3
+  },
+  "last_error": [
+    {
+      "path": "invariants[3]",
+      "rule": "aesthetic",
+      "severity": "error",
+      "message": "[E/F両者] 夜プリセットのノブで切り口ハイライトが下側(光源と逆)に付き、同フレームの落ち影(下側)と光源が矛盾して見える。Makerは『暗=手前の穴読みでは物理的に正しい』と設計したが、両Checkerとも『フレーム内の光源分裂』と判定。加えて頭部・窓枠の全周近黒リム(幅~8px, lum21)がインク輪郭読みを誘発(ref_1に黒輪郭は無い)",
+      "hint": "[E] 単一光源ベクトルを全プリセット共有し、edge darkeningを影側半周・強度1/3以下に限定。[F] 境界1本につきハイライト1+落ち影1に制限しエコー帯を禁止。※穴読みvs貼り紙読みは設計判断のため人間の裁定が必要"
+    },
+    {
+      "path": "invariants[6]",
+      "rule": "aesthetic",
+      "severity": "error",
+      "message": "[E] 口が全プリセットで『鼻の付け根の影色ダッシュ』にしか読めず唇の独立紙片が欠落(F=4と判定割れ: 口の存在は限界的)",
+      "hint": "[E] 口領域のquantile局所細分で口幅の最暗紙片を存続。※D/Fはpass圏と判定しており、口の強調は匙加減の領分"
+    },
+    {
+      "path": "invariants[1]",
+      "rule": "aesthetic",
+      "severity": "error",
+      "message": "[F] 窓枠一帯の境界帯が幅3〜7pxの多重エコーリング(縦スキャンで明暗8振動)+光沢スメアで『濡れた成形樹脂』読み。3ラウンド通して窓枠領域の指摘が残存(C:入れ子リング→D:エンボス調→F:エコーリング)",
+      "hint": "[F] 最小帯幅フロアをedge-band合成後にも適用。窓枠は高コントラスト多段領域で本エンジンの弱点 — 構造的対処は人間判断"
+    }
+  ],
+  "requires_human": false,
+  "blocked_reason": null,
+  "resume_stage": "aesthetic",
+  "cost": {
+    "loops": 7,
+    "approx_tokens": 2675000,
+    "wall_minutes": 442
+  },
+  "pr_url": null,
+  "updated_at": "2026-08-02T05:02:55.470Z"
+}

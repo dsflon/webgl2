@@ -1,0 +1,102 @@
+{
+  "artifact": {
+    "file": "fable5_kirie-sekai.html",
+    "screenshots": [
+      "loop/state/kirie-sekai/shots/small_final.png",
+      "loop/state/kirie-sekai/shots/small_night.png",
+      "loop/state/kirie-sekai/shots/final.png",
+      "loop/state/kirie-sekai/shots/final_warm.png",
+      "loop/state/kirie-sekai/shots/final_day.png",
+      "loop/state/kirie-sekai/shots/final_night.png",
+      "loop/state/kirie-sekai/shots/final_sepia.png",
+      "loop/state/kirie-sekai/shots/crop_knob_1x.png",
+      "loop/state/kirie-sekai/shots/crop_wall_1x.png",
+      "loop/state/kirie-sekai/shots/crop_night_knob_1x.png",
+      "loop/state/kirie-sekai/shots/crop_day_person.png",
+      "loop/state/kirie-sekai/shots/crop_day_window.png",
+      "loop/state/kirie-sekai/shots/crop_night_center.png",
+      "loop/state/kirie-sekai/shots/zoom_head.png",
+      "loop/state/kirie-sekai/shots/zoom_wall.png",
+      "loop/state/kirie-sekai/shots/final_d1.png",
+      "loop/state/kirie-sekai/shots/final_d2.png",
+      "loop/state/kirie-sekai/shots/final_d3.png",
+      "loop/state/kirie-sekai/shots/final_d4.png"
+    ]
+  },
+  "stance": "reject-seeking",
+  "first_impression": "小さめの縮小版では『重ねた色紙を切り抜いて作った室内のシャドーボックス — 窓辺に座るおかっぱの人物』に見える。ポスタライズ減色画像ではなく積層の物質感が先に立つが、窓まわりだけは紙というより光沢のある成形樹脂の窪みに見える。",
+  "scores": [
+    {
+      "invariant_id": 1,
+      "score": 3,
+      "evidence": "final_d2(量子化レベルのみ)で全画面が約8トーンのフラット積層になっており基盤は実在(final.png 内部パッチ実測: 壁 std=1.8 / 窓枠teal std=0.6 / シャツ std=0.5 — 面内部は平坦)。しかし crop_day_window(等倍)で窓枠一帯の境界が1本のハイライト+1本の落ち影でなく多重エコー帯になっている: final.png x=350 の縦スキャン y=25..130 で幅3〜7pxの明暗帯が8回振動(121/74/120/88/121…162/220/201)。さらに窓枠teal面の内部に縦方向の光沢スメア(ウェットな鏡面ストリーク)が走り、下段の窓ガラス内には元映像のグラデーション残渣が波状の帯として残る。この領域は『紙の厚み』でなく『濡れたゲル/型押し樹脂』に読める。",
+      "reject_reasons": [
+        "境界帯の多重リング化(切り口ハイライト+落ち影の1組を超える3〜4本のエコー帯)",
+        "窓枠面内部の光沢ストリークが『面の内部はほぼ平坦』を破る",
+        "下段窓ガラス内に写真由来の連続階調の残渣(波状の中間帯)"
+      ],
+      "fix_instructions": [
+        "症状: 窓枠の各境界に幅3〜7pxの明暗帯が3〜4本並走しエンボス/ゲルに見える(final.png x=350 縦スキャンで8振動) → 処方: 擬似 sdf 帯の生成を境界1本あたり『切り口ハイライト1本+オフセット落ち影1本』に制限し、sdf 距離が帯幅を超えたら即座に量子化フラット色へ復帰(2次・3次のエコー帯を出さない)",
+        "症状: 窓枠teal面の内部に縦の光沢スメアが残り面が濡れて見える → 処方: 切り口ハイライトの寄与を境界 sdf 距離 ≤ 帯幅でハードにクランプし、面内部への漏れをゼロにする。面内部は量子化色+fbm 紙グレインのみで構成",
+        "症状: 下段窓ガラス内に元映像のグラデーションが波状帯として残る → 処方: kuwahara 平滑半径を上げるか quantile 段数を局所的に減らし、最小帯幅フロア未満の中間帯を下の層へ統合"
+      ]
+    },
+    {
+      "invariant_id": 2,
+      "score": 3,
+      "evidence": "輪郭のアンチエイリアスは健全(crop_night_center 髪境界のピクセル実測で2〜3pxの滑らかな遷移帯、1〜2px鋸歯なし)。ちぎれ粒の散布も final_d2 目視では目立たない。しかし最小帯幅フロアが境界帯の合成結果に効いていない: crop_day_window / final.png x=350 で幅3〜7pxのリング帯が窓枠を全周し(最小紙片サイズ未満の『薄すぎる帯』が未吸収)、crop_wall_1x 上部(等倍 y≈50, x≈75〜165)に本体エッジから離れた糸状の暗いヘアラインが1本並走している。crop_knob_1x ではノブ下の灰色スマッジ内に直線の斜めシーム(等倍 x≈110〜118, y≈91〜111)があり、ハサミ曲線でない切れ目が露出。",
+      "reject_reasons": [
+        "最小帯幅未満のリング帯が窓枠全周に残存(薄すぎる帯の吸収機構が edge-band 合成後に適用されていない)",
+        "境界に並走する糸状ヘアライン(crop_wall_1x)",
+        "ノブ下スマッジ内の直線シーム(有機曲線でない)"
+      ],
+      "fix_instructions": [
+        "症状: 幅3〜7pxのリング帯・境界並走の糸状ヘアラインが等倍で見える → 処方: fwidth 比較の最小帯幅フロア(糸の禁止)を量子化直後だけでなく切り口ハイライト/落ち影を合成した最終色に対しても適用し、フロア未満の帯・糸を隣接層の色へ吸収",
+        "症状: crop_knob_1x のノブ下に直線の斜めシームと灰色スマッジ → 処方: 境界帯オフセットの不連続(層インデックス切替)で生じるシームを、擬似 sdf のスムースミン結合か層間の帯ブレンドで滑らかにし、スマッジ自体は量子化フラット色に置換"
+      ]
+    },
+    {
+      "invariant_id": 3,
+      "score": 3,
+      "evidence": "final_d3 で境界帯の青(ハイライト)が概ね上・左側、橙(影)が下・右側に付き、final_d4 の標本ディスクも影が右下で光源=左上の設計は実在。final_day のノブは上縁226/面205/下に影と正しい。しかし final_night の同じノブでは下向きエッジに最明ハイライトが付く: x=237 縦プロファイル実測で灰層の下縁が192→204(面162より+42明るい)と発光し、下からの逆光グローに見える(crop_night_knob_1x で明瞭な明るい三日月が円の下に出る)。また全プリセットで頭部・窓枠の輪郭に近黒のリムが全周(光源側も影側も)を囲み(crop_day_person / final_warm)、『上の層が下の層へ同じ方向に落とす影』でなく均一な縁取りに読める。edge darkening が控えめでない。",
+      "reject_reasons": [
+        "night プリセットで切り口ハイライトが光源と逆側(下向きエッジ)に付き、プリセット間で光源方向が矛盾",
+        "頭部・窓枠を囲む全周の近黒リム(落ち影の方向性を消す縁取り)",
+        "edge darkening 過多(4〜8px幅の近黒帯)"
+      ],
+      "fix_instructions": [
+        "症状: final_night のノブ下(x=237)で下向きエッジが204まで発光し逆光に見える(day は上縁で正しい) → 処方: 擬似 sdf 帯のハイライト側判定をプリセットのパレットに依存させず、全プリセット共通の単一光源ベクトル(左上)に固定。光源と逆を向くエッジはハイライトを0にし落ち影のみ描く",
+        "症状: 頭部・窓枠の輪郭が全周近黒リムで囲まれ縁取りに見える → 処方: edge darkening の強度を現状の半分以下に落とし、境界法線と光源ベクトルの内積でゲートして影側のみに付与(全周一様に掛けない)"
+      ]
+    },
+    {
+      "invariant_id": 4,
+      "score": 4,
+      "evidence": "final_d4 のパレット標本(昼=teal/sand、夜=茜/藍、sepia=褐色階段)と final_d2 の実出力が一致し、主要色クラスタは約8トーン+グレイン揺らぎに収まる(d2 の色クラスタ実測で >0.5% の色が14、うち近接重複を除くと8前後)。3プリセットとも実写色のポスタライズではなく設計された紙セットに読める。減点理由を探した結果: day のノブ下の灰色スマッジと窓ガラス内の残渣グラデーションがパレット外の中間色として露出するが、面積が小さく統一感自体は壊していない。",
+      "reject_reasons": [
+        "ノブ下スマッジ・窓ガラス残渣にパレット外の中間色が僅かに露出(5点は阻む)"
+      ]
+    },
+    {
+      "invariant_id": 5,
+      "score": 4,
+      "evidence": "V1 運動応答 pass(unfrozen mean|Δ|=6.276/255 で追従、freeze Δ=0.000 で完全静止=沸き立ちなし)。静止画からは境界の時間挙動をこれ以上反証できず、V1 pass の規律に従い4未満は付けない。乱数がグレインに時間混入している徴候も small_final/final 間で見当たらない。",
+      "reject_reasons": []
+    },
+    {
+      "invariant_id": 6,
+      "score": 4,
+      "evidence": "3プリセットの顔クロップ(final_day/final_night/final_sepia の 430,200-640,420 を3倍拡大)で個別確認: 眉=左右2本の暗ストローク(3プリセットとも明瞭)、目=眉下の暗いダッシュ2対(3プリセットとも明瞭)、口=鼻下の短い水平線(night で明瞭、day で可視、sepia では低コントラストだが存在)。人物輪郭・おかっぱの髪・肩も全プリセットで判読でき『自分が紙になる』鏡は成立。sepia の口の弱さが5点を阻む。",
+      "reject_reasons": [
+        "sepia プリセットの口が低コントラストで消失寸前(存在はする)"
+      ]
+    }
+  ],
+  "common": {
+    "style_holds": 4,
+    "subject_readable": 4,
+    "artifact_free": 3
+  },
+  "verdict": "fail",
+  "summary": "第一印象は『多層切り紙のシャドーボックス室内』でテーマと一致し、d1〜d4 で kuwahara+quantile 量子化・設計パレット・左上光源の機構が実在することを確認した。面内部の平坦度(壁1.8/枠0.6/シャツ0.5 std)・限定パレット・顔の判読性・V1 時間安定は合格水準。しかし等倍クロップで3件の不変量違反が反証できなかった: (1) 窓枠一帯で境界帯が幅3〜7pxの多重エコーリング化し(x=350 縦スキャンで8振動)面内に光沢スメアが走り、紙でなく濡れたゲル/型押し樹脂に読める(inv1=3)。(2) 最小帯幅フロア未満のリング帯と境界並走の糸状ヘアライン、ノブ下の直線シームが未吸収(inv2=3)。(3) final_night のノブ下で切り口ハイライトが光源と逆の下向きエッジに付き(204 vs 面162)逆光グローに見え、全プリセットで頭部・窓枠に全周近黒リム=過剰 edge darkening が方向性を消している(inv3=3)。優先度上位の1・2・3が揃って3のため fail。修正は『帯を境界1本につきハイライト1+落ち影1に制限』『帯幅フロアを合成後にも適用』『ハイライト側を全プリセット共通の光源ベクトルでゲート』の3点に集約される。"
+}
