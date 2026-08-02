@@ -1,0 +1,7 @@
+{"at":"2026-08-02T01:02:17.672Z","event":"init","status":"created"}
+{"at":"2026-08-02T01:04:54.182Z","event":"attempt:brief#1","status":"created"}
+{"at":"2026-08-02T01:05:00.522Z","event":"status:briefed","status":"briefed"}
+{"at":"2026-08-02T01:05:00.654Z","event":"attempt:order#1","status":"briefed"}
+{"at":"2026-08-02T01:07:02.409Z","event":"status:ordered","status":"ordered"}
+{"at":"2026-08-02T01:07:02.552Z","event":"cost","status":"ordered"}
+{"at":"2026-08-02T01:07:02.675Z","event":"attempt:implement#1","status":"ordered"}
