@@ -1,23 +1,23 @@
 {
   "slug": "kirie-sekai",
   "theme": "切り紙の世界 — kirie-portrait の発展。MediaPipe を使わず、カメラに映った世界全体(人も物も背景も)を多層ペーパーカットに。画面全体を輝度の分位点で4〜8枚の紙のレイヤーに切り分け、各層に切り口の厚みと落ち影。レイヤードペーパーアートの風景箱のような画",
-  "status": "ordered",
+  "status": "runtime_ok",
   "attempts": {
     "brief": 1,
     "order": 1,
     "implement": 1,
-    "runtime": 0,
-    "aesthetic": 0
+    "runtime": 1,
+    "aesthetic": 1
   },
   "last_error": null,
   "requires_human": false,
   "blocked_reason": null,
   "resume_stage": null,
   "cost": {
-    "loops": 3,
+    "loops": 5,
     "approx_tokens": 25000,
     "wall_minutes": 12
   },
   "pr_url": null,
-  "updated_at": "2026-08-02T01:07:02.675Z"
+  "updated_at": "2026-08-02T01:53:38.425Z"
 }

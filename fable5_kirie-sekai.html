@@ -1,0 +1,1765 @@
+<!doctype html>
+<!--
+  fable5_kirie-sekai.html — WebGL2 webcam →「切り紙の世界」(全画面多層ペーパーカット)
+
+  概要:
+  カメラに映った世界全体(人も物も背景も)が、多層ペーパーカットの風景箱
+  (シャドーボックス)になる。フレーム全体の輝度を分位点しきい値で 4〜8 枚の
+  フラットな紙レイヤーに量子化し、各層は大きく滑らかなハサミ曲線の輪郭と、
+  切り口の細いハイライト・下層への短く柔らかい落ち影を持つ。検知(MediaPipe 等)は
+  一切使わない — カメラのみ。前身 fable5_kirie-portrait.html の肌積層エンジン
+  (kuwahara→quantile→擬似sdf帯)の全画面化。部位クラス・台紙・髪 LIC は持たない。
+
+  様式解析の要約(視覚的不変量。優先度 1>2>3>5>4>6):
+    1. 紙積層(マーク/物質) — kuwahara 平滑した輝度を強い等方ぼかしで低周波化した
+       量子化場を quantile しきい値(CPU 統計 ~200ms 毎 readback → ema+hysteresis)で
+       4〜8 段に量子化。境界近傍の擬似 sdf 帯((F-T)/fwidth(F))で切り口ハイライト+
+       単一光源方向オフセットの落ち影。面内部は平坦。
+    2. ハサミの滑らかさ(マーク) — 量子化場の低周波性が境界曲率を保証。fwidth 比較の
+       最小帯幅フロア(~4px 未満の帯は下の層へ統合)。乱数は cell-hash のみ。
+    3. 奥行きの秩序(知覚/場) — 量子化レベル⇔前後関係を固定対応。「明=手前/暗=手前」は
+       プリセットで反転し、量子化場そのものを F=1-L に反転することで rim の付く側・
+       落ち影の向きが自動的に一貫して反転する(光源は常に左上)。
+    5. 時間安定(時間) — 平滑輝度は ping-pong の時間 ema、しきい値は CPU 側
+       hysteresis(不感帯)+ema。乱数シードに時間を混ぜない。静止入力で完全静止。
+    4. 限定パレット(色) — 各層の色を oklab で紙セット(プリセット3種の紙トーン階段)へ
+       スナップ。紙グレインは fbm で層ごとに位相を変える。
+    6. 人物の判読性(知覚) — 検知なしで、細平滑輝度の暗部フロア(最暗の数%を
+       インク紙として保持=目・眉)+局所コントラストに応じた量子化段の局所細分
+       (中間平滑場で帯を1回半分割する従属レイヤー)。
+
+  パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
+    入力: カメラ映像 or ?fakesource=1(GLSL 合成: 窓のある室内+動く人物+振り子ランプ+雲)
+    [P0 scene ] cover-fit+mirror(実映像 or 合成)            sceneT  RGBA8 長辺≤1024
+    [P1 struct] kuwahara(sceneT)+細平滑輝度 → 時間 ema      structA/B★ ≤768 ping-pong
+                (rgb=平坦色, a=fine輝度)
+    [P1b band ] struct の分離ガウス2段: σ小→bandM(細分場)   bandM★  ≤384
+                さらに σ大→bandT(量子化場)                  bandT★  ≤384
+    [P2 stats ] R=量子化場輝度 G=fine輝度                    statsT RGBA8 128×128
+                → CPU readback ~200ms 毎 → ヒストグラム(64bin) → quantile →
+                hysteresis+ema → uniform しきい値配列
+    [P3 comp  ] 量子化(4〜8層, プリセットで F 反転)+擬似 sdf 帯の切り口/落ち影+
+                暗部フロア+局所細分+oklab 紙パレット+fbm 紙グレイン → canvas(DPR≤2)
+
+  実行方法:
+    python3 -m http.server 8888 → http://localhost:8888/fable5_kirie-sekai.html を開き
+    カメラを許可(カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    ?fakesource=1 … カメラ/権限を一切使わず、GLSL 合成シーン(窓のある室内+ゆっくり
+                    動く人物+振り子ランプ+流れる雲)で全パイプラインを駆動(検証用)
+    ?freeze=1     … 全ての時間駆動を停止し決定的な静止フレーム(合成シーンも静止)
+    ?prewarm=<秒> … 初回描画前に固定 dt で決定的に早送り(ema・しきい値の収束済み状態)
+    デバッグ表示: 0=最終 1=平滑輝度(量子化場) 2=量子化レベルのみ(切り口・影なし)
+                  3=境界帯の可視化(rim=橙/落ち影=青/細分=緑) 4=標本
+
+  スライダーの説明(写真らしさ ↔ 様式の強さ。計7本):
+    紙の枚数   量子化レイヤー数(4↔8)
+    紙の厚み   切り口ハイライトと落ち影の強さ・オフセット
+    ハサミの丸み kuwahara/ぼかし平滑半径(境界曲率と最小紙片サイズ)
+    紙の色統一 oklab パレットスナップの強さ(0=実写色寄り)
+    落ち着き   しきい値/平滑輝度 ema の時定数(安定↔追従)
+    暗部の精密 暗部小紙片の保護と局所細分(顔の判読性)
+    紙の質感   繊維グレインと紙の色ムラ
+  select は「プリセット」(昼の風景箱/夜の風景箱/セピアの標本箱)と「デバッグ表示」のみ。
+
+  依存: なし(外部 ML 不使用。カメラのみ)。WebGL2 / GLSL ES 3.00 単体。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>FABLE5 · Kirie Sekai — WebGL2 webcam full-frame layered paper-cut</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #10201f;
+        --ink: #f0e8d6;
+        --muted: rgba(240, 232, 214, 0.66);
+        --panel: rgba(14, 24, 23, 0.88);
+        --line: rgba(240, 232, 214, 0.18);
+        --accent: #e0987a;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #0e1d1c, #142a29 55%, #0e1d1c);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      video {
+        position: fixed; width: 1px; height: 1px; left: -10px; top: -10px;
+        opacity: 0; pointer-events: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(240, 232, 214, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(240, 232, 214, 0.14); }
+      #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
+      @media (pointer: coarse) { #flipCamera { display: block; } }
+      #statusChip {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 11; padding: 7px 12px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: var(--panel); font-size: 10px; letter-spacing: 0.1em;
+        pointer-events: none; transition: opacity 0.6s ease; white-space: nowrap;
+      }
+      #statusChip.hidden { opacity: 0; }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(240, 232, 214, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(240, 232, 214, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(8, 16, 15, 0.78);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
+      .overlay-card button {
+        margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(240, 232, 214, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 full-frame layered paper-cut webcam"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
+    <div id="statusChip">起動中</div>
+
+    <section id="panel" class="panel" aria-label="Kirie sekai controls"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces the camera with a synthetic GLSL scene
+        // (interior with a bright window, drifting clouds, a swinging
+        // pendant lamp and a slowly swaying person bust). The camera and
+        // getUserMedia are never touched; the whole paper pipeline
+        // (quantile stack / relief / palette) runs fully offline.
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: the scene motion and every EMA stop
+        // (deterministic still frame). Seeds never used time to begin with.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?prewarm=<sec> deterministically fast-forwards the sim (fixed dt)
+        // BEFORE the first presented frame, so EMA / quantile thresholds
+        // start converged. Chunked with a true GPU sync (1×1 readPixels) —
+        // swiftshader queues stall otherwise (CRAFT §C4).
+        const PREWARM = (() => {
+          const v = parseFloat(QUERY.get("prewarm"));
+          return Number.isFinite(v) && v > 0 ? Math.min(60, v) : 0;
+        })();
+
+        const DEBUG_MODES = [
+          "最終",
+          "平滑輝度(量子化場)",
+          "量子化レベルのみ",
+          "境界帯の可視化",
+          "標本",
+        ];
+
+        const DEFAULTS = {
+          layers: 0.5,
+          relief: 0.55,
+          smooth: 0.5,
+          palette: 0.7,
+          calm: 0.55,
+          detail: 0.6,
+          grain: 0.4,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          preset: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["layers", "紙の枚数", "量子化レイヤー数(4↔8)", 0, 1, 0.01],
+          ["relief", "紙の厚み", "切り口ハイライトと落ち影の強さ・オフセット", 0, 1, 0.01],
+          ["smooth", "ハサミの丸み", "平滑半径(境界曲率と最小紙片サイズ)", 0, 1, 0.01],
+          ["palette", "紙の色統一", "oklab パレットスナップの強さ(0=実写色寄り)", 0, 1, 0.01],
+          ["calm", "落ち着き", "しきい値/平滑輝度 ema の時定数(安定↔追従)", 0, 1, 0.01],
+          ["detail", "暗部の精密", "暗部小紙片の保護と局所細分(顔の判読性)", 0, 1, 0.01],
+          ["grain", "紙の質感", "繊維グレインと紙の色ムラ", 0, 1, 0.01],
+        ];
+
+        // Presets switch the paper set AND the depth order (bright-front /
+        // dark-front) as one consistent unit (order §6, §8-16).
+        const PRESETS = ["昼の風景箱", "夜の風景箱", "セピアの標本箱"];
+
+        // forward declaration — the stats cadence clock (updateThresholds).
+        // Preset changes rewind it so the thresholds re-snap immediately.
+        let lastStatWall = 0;
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>FABLE5 · 切り紙の世界</h1>
+          <p>
+            カメラに映る世界全体が、多層ペーパーカットの風景箱になります。
+            画面全体の明暗が 4〜8 枚のフラットな紙レイヤーに切り分けられ、
+            各層は切り口のハイライトと下の層への落ち影を持ちます。
+          </p>
+          <div class="select-row">
+            <span>プリセット</span>
+            <select id="presetSel" aria-label="プリセット">
+              ${PRESETS.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>左右反転(鏡)</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>ゆらぎを停止</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
+            <button id="hideUi" type="button">UI非表示</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 解像度 -- / 紙 --</div>
+            <span class="badge">WebGL2 · kuwahara+quantile · oklab · 検知なし</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("presetSel").addEventListener("change", (event) => {
+          state.preset = Number(event.currentTarget.value);
+          // the depth orientation may flip: re-snap the thresholds on the
+          // very next stats pass (no slow crossfade through a wrong order)
+          lastStatWall = -1e9;
+        });
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+          state.preset = 0;
+          document.getElementById("presetSel").value = "0";
+          lastStatWall = -1e9;
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        document.getElementById("hideUi").addEventListener("click", () => {
+          setPanelCollapsed(true);
+        });
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode = state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `fable5-kirie-sekai-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the struct EMA from banding in 8 bits.
+        // All fields live in [0,1], so the RGBA8 fallback runs the exact
+        // same shaders, only coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hash + value noise + fbm. Paper grain and
+        // per-layer mottle are seeded by CELL COORDINATE (+ layer phase)
+        // only — never by time (repo rule §8-9) — so the collage is
+        // deterministic and truly still under ?freeze=1.
+        const CHUNK_NOISE = `
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = p - i;
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm(vec2 p) {
+            float amp = 0.5;
+            float acc = 0.0;
+            for (int i = 0; i < 3; i++) {
+              acc += amp * vnoise(p);
+              p = p * 2.03 + 11.7;
+              amp *= 0.5;
+            }
+            return acc + 0.0625;   // recentre the 3-octave sum around 0.5
+          }
+        `;
+
+        // Shared: correct oklab transform (sRGB→linear→LMS→oklab and back).
+        // Palette snapping and layer colours are mixed in oklab so the paper
+        // tones stay perceptually even (invariant 4).
+        const CHUNK_OKLAB = `
+          vec3 srgb2lin(vec3 c) {
+            return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),
+              step(0.04045, c));
+          }
+          vec3 lin2srgb(vec3 c) {
+            c = clamp(c, 0.0, 1.0);
+            return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+              step(0.0031308, c));
+          }
+          vec3 lin2oklab(vec3 c) {
+            float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+            float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+            float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+            float l_ = pow(max(l, 0.0), 1.0 / 3.0);
+            float m_ = pow(max(m, 0.0), 1.0 / 3.0);
+            float s_ = pow(max(s, 0.0), 1.0 / 3.0);
+            return vec3(
+              0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+              1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+              0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_);
+          }
+          vec3 oklab2srgb(vec3 lab) {
+            float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+            float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+            float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+            float l = l_ * l_ * l_;
+            float m = m_ * m_ * m_;
+            float s = s_ * s_ * s_;
+            vec3 lin = vec3(
+              4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+            return lin2srgb(lin);
+          }
+        `;
+
+        // Shared: per-preset paper sets. paperRamp(pp, f) is the tone
+        // staircase from the DEEPEST layer (f=0) to the FRONT layer (f=1)
+        // in the box's own depth order — for the night preset the front
+        // layers are the dark papers (silhouette box, backlight deep).
+        // inkColorP = the extra darkest "feature ink" sheet (dark floor),
+        // paperEdgeP = the cut-edge highlight tint, edgeBoostP = per-preset
+        // rim gain (night: cut edges stand out, order §6).
+        const CHUNK_PAL = `
+          vec3 paperRamp(int pp, float f) {
+            vec3 k0; vec3 k1; vec3 k2; vec3 k3; vec3 k4; vec3 k5;
+            if (pp == 1) {
+              k0 = vec3(0.985, 0.885, 0.660); k1 = vec3(0.910, 0.640, 0.360);
+              k2 = vec3(0.680, 0.400, 0.330); k3 = vec3(0.365, 0.300, 0.400);
+              k4 = vec3(0.175, 0.200, 0.330); k5 = vec3(0.075, 0.095, 0.175);
+            } else if (pp == 2) {
+              k0 = vec3(0.180, 0.125, 0.085); k1 = vec3(0.320, 0.220, 0.140);
+              k2 = vec3(0.490, 0.360, 0.230); k3 = vec3(0.660, 0.520, 0.360);
+              k4 = vec3(0.820, 0.700, 0.530); k5 = vec3(0.930, 0.865, 0.720);
+            } else {
+              k0 = vec3(0.040, 0.195, 0.220); k1 = vec3(0.105, 0.360, 0.375);
+              k2 = vec3(0.340, 0.520, 0.470); k3 = vec3(0.720, 0.655, 0.510);
+              k4 = vec3(0.905, 0.845, 0.680); k5 = vec3(0.985, 0.945, 0.830);
+            }
+            float t = clamp(f, 0.0, 1.0) * 5.0;
+            vec3 c = mix(k0, k1, clamp(t, 0.0, 1.0));
+            c = mix(c, k2, clamp(t - 1.0, 0.0, 1.0));
+            c = mix(c, k3, clamp(t - 2.0, 0.0, 1.0));
+            c = mix(c, k4, clamp(t - 3.0, 0.0, 1.0));
+            c = mix(c, k5, clamp(t - 4.0, 0.0, 1.0));
+            return c;
+          }
+          vec3 inkColorP(int pp) {
+            if (pp == 1) return vec3(0.035, 0.045, 0.085);
+            if (pp == 2) return vec3(0.100, 0.070, 0.050);
+            return vec3(0.055, 0.075, 0.095);
+          }
+          vec3 paperEdgeP(int pp) {
+            if (pp == 1) return vec3(0.965, 0.885, 0.700);
+            if (pp == 2) return vec3(0.960, 0.910, 0.800);
+            return vec3(0.970, 0.940, 0.860);
+          }
+          float edgeBoostP(int pp) { return pp == 1 ? 1.35 : 1.0; }
+        `;
+
+        // ?fakesource=1 — a synthetic interior scene rendered in GLSL:
+        // wall + bright window (sky, sun, two drifting clouds, two hill
+        // bands, cross bars), a swinging pendant lamp, a slowly swaying
+        // person bust with readable face features, and a dark foreground
+        // sill with a fruit. Moving elements (person sway, lamp swing,
+        // cloud drift) satisfy the --motion contract; all motion is driven
+        // by uAnim only, so ?freeze=1 pins a deterministic still.
+        const CHUNK_FAKE = `
+          float sdSeg2(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+          float sdEll(vec2 p, vec2 c, vec2 r) {
+            return length((p - c) / r) - 1.0;
+          }
+          float covOf(float d) { return 1.0 - smoothstep(-0.004, 0.007, d); }
+          float figFace(vec2 q) {
+            return sdEll(q, vec2(0.5, 0.585), vec2(0.105, 0.142));
+          }
+          float figHair(vec2 q) {
+            vec2 hc = vec2(0.5, 0.635);
+            float angh = atan(q.y - hc.y, q.x - hc.x);
+            float wob = 0.5 * vnoise(vec2(angh * 2.2 + 9.0, 3.0)) - 0.25;
+            float blob = sdEll(q, hc, vec2(0.168, 0.185) * (1.0 + 0.16 * wob));
+            return max(blob, (0.485 - q.y) * 1.8);
+          }
+          float figNeck(vec2 q) {
+            return sdSeg2(q, vec2(0.5, 0.475), vec2(0.5, 0.355)) - 0.048;
+          }
+          float figCloth(vec2 q) {
+            float sh = sdSeg2(q, vec2(0.315, 0.265), vec2(0.685, 0.265)) - 0.115;
+            float tor = sdSeg2(q, vec2(0.5, 0.265), vec2(0.5, -0.05)) - 0.225;
+            return smin2(sh, tor, 0.06);
+          }
+          vec3 fakeScene(vec2 uv, float aspect, float t) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y);
+            // wall (mid tone, plaster noise) + darker wainscot
+            vec3 c = mix(vec3(0.47, 0.44, 0.39), vec3(0.60, 0.57, 0.51), uv.y);
+            c += 0.035 * (vnoise(p * 7.0) - 0.5);
+            c = mix(c, c * 0.82, smoothstep(0.305, 0.295, p.y));
+            // window (left): bright sky + sun + drifting clouds + hills
+            float wx0 = 0.045; float wx1 = 0.400;
+            float wy0 = 0.400; float wy1 = 0.930;
+            if (p.x > wx0 && p.x < wx1 && p.y > wy0 && p.y < wy1) {
+              vec2 w = vec2((p.x - wx0) / (wx1 - wx0), (p.y - wy0) / (wy1 - wy0));
+              vec3 sky = mix(vec3(0.93, 0.88, 0.72), vec3(0.56, 0.74, 0.83),
+                smoothstep(0.25, 1.0, w.y));
+              float sun = smoothstep(0.16, 0.13,
+                length((w - vec2(0.30, 0.78)) * vec2(1.0, 1.4)));
+              sky = mix(sky, vec3(1.0, 0.97, 0.86), sun);
+              for (int i = 0; i < 2; i++) {
+                float fi = float(i);
+                float cxw = fract(0.13 + fi * 0.47 + t * (0.016 + fi * 0.009));
+                vec2 cc = vec2(cxw, 0.62 + fi * 0.24);
+                float cl = smoothstep(0.115, 0.075,
+                  length((w - cc) * vec2(1.0, 3.4)));
+                sky = mix(sky, vec3(0.97, 0.95, 0.90), cl * 0.9);
+              }
+              float h1 = 0.30 + 0.10 * vnoise(vec2(w.x * 3.1, 7.0));
+              float h2 = 0.16 + 0.07 * vnoise(vec2(w.x * 4.3, 2.0));
+              sky = mix(sky, vec3(0.34, 0.46, 0.36),
+                smoothstep(h1 + 0.012, h1 - 0.012, w.y));
+              sky = mix(sky, vec3(0.22, 0.31, 0.25),
+                smoothstep(h2 + 0.012, h2 - 0.012, w.y));
+              c = sky;
+              float bars = min(abs(w.x - 0.5), abs(w.y - 0.5));
+              c = mix(vec3(0.17, 0.145, 0.12), c, smoothstep(0.012, 0.028, bars));
+            }
+            // window frame
+            vec2 wc = vec2((wx0 + wx1) * 0.5, (wy0 + wy1) * 0.5);
+            vec2 wh = vec2((wx1 - wx0) * 0.5, (wy1 - wy0) * 0.5);
+            vec2 dxy = abs(p - wc) - wh;
+            float dframe = max(dxy.x, dxy.y);
+            if (dframe > 0.0 && dframe < 0.020) c = vec3(0.235, 0.195, 0.155);
+            // pendant lamp (top right, swings — motion)
+            vec2 piv = vec2(0.865, 1.02);
+            float ang = 0.30 * sin(t * 0.85);
+            vec2 dir = vec2(sin(ang), -cos(ang));
+            vec2 bulb = piv + dir * 0.30;
+            float glow = sdEll(p, bulb - vec2(0.0, 0.045), vec2(0.040, 0.050));
+            c = mix(c, vec3(0.97, 0.88, 0.62), 1.0 - smoothstep(-0.4, 0.35, glow));
+            c = mix(c, vec3(0.99, 0.95, 0.78), 1.0 - smoothstep(-0.15, 0.05, glow));
+            float cord = sdSeg2(p, piv, bulb) - 0.004;
+            c = mix(c, vec3(0.14, 0.12, 0.10), 1.0 - smoothstep(0.0, 0.006, cord));
+            float shade = sdEll(p, bulb, vec2(0.055, 0.038));
+            c = mix(c, vec3(0.16, 0.14, 0.13), 1.0 - smoothstep(-0.05, 0.06, shade));
+            // person bust (sways slowly — motion; readable face)
+            float cx = 0.640 + 0.052 * sin(t * 0.45);
+            float cy = -0.030 + 0.022 * sin(t * 0.7 + 1.0);
+            vec2 q = p - vec2(cx - 0.5, cy);
+            float fl = sin(q.x * 46.0 + 2.2 * vnoise(q * 8.0));
+            vec3 cloth = vec3(0.42, 0.20, 0.17) *
+              (0.62 + 0.34 * (0.5 + 0.5 * fl)) * (0.75 + 0.5 * q.y);
+            c = mix(c, cloth, covOf(figCloth(q)));
+            c = mix(c, vec3(0.88, 0.63, 0.45) * 0.52, covOf(figNeck(q)));
+            vec2 hc = vec2(0.5, 0.635);
+            float hb = sin(atan(q.y - hc.y, q.x - hc.x) * 9.0 +
+              length(q - hc) * 34.0 + 4.0 * vnoise(q * 12.0));
+            vec3 hair = vec3(0.10, 0.13, 0.19) * (0.72 + 0.42 * (0.5 + 0.5 * hb));
+            c = mix(c, hair, covOf(figHair(q)));
+            vec2 n = (q - vec2(0.5, 0.585)) / vec2(0.105, 0.142);
+            float shadeF = 0.52 + 0.48 *
+              clamp(-n.x * 0.62 - n.y * 0.38 + 0.55, 0.0, 1.0);
+            shadeF *= 1.0 - 0.22 * smoothstep(0.55, 1.0, length(n));
+            vec3 face = vec3(0.88, 0.63, 0.45) * shadeF;
+            float eyeL = sdEll(q, vec2(0.458, 0.608), vec2(0.020, 0.0095));
+            float eyeR = sdEll(q, vec2(0.542, 0.608), vec2(0.020, 0.0095));
+            float brwL = sdEll(q, vec2(0.456, 0.638), vec2(0.027, 0.0068));
+            float brwR = sdEll(q, vec2(0.544, 0.638), vec2(0.027, 0.0068));
+            float mou = sdEll(q, vec2(0.5, 0.518), vec2(0.031, 0.0115));
+            float nos = sdSeg2(q, vec2(0.5, 0.575), vec2(0.5, 0.546)) - 0.0075;
+            face = mix(face, vec3(0.10, 0.09, 0.10), covOf(min(eyeL, eyeR)));
+            face = mix(face, vec3(0.13, 0.10, 0.08), covOf(min(brwL, brwR)));
+            face = mix(face, vec3(0.63, 0.26, 0.23), covOf(mou));
+            face *= 1.0 - 0.18 * covOf(nos);
+            c = mix(c, face, covOf(figFace(q)));
+            // foreground sill + fruit
+            float sillY = 0.145 + 0.012 * vnoise(vec2(p.x * 2.2, 5.0));
+            float sill = smoothstep(sillY + 0.008, sillY - 0.008, p.y);
+            vec3 sillC = vec3(0.205, 0.165, 0.135) *
+              (0.9 + 0.2 * vnoise(p * vec2(9.0, 30.0)));
+            c = mix(c, sillC, sill);
+            float fruit = sdEll(p, vec2(0.175, 0.185), vec2(0.052, 0.055));
+            vec3 fruitC = mix(vec3(0.80, 0.45, 0.13), vec3(0.95, 0.62, 0.20),
+              clamp((p.y - 0.13) * 8.0, 0.0, 1.0));
+            c = mix(c, fruitC, covOf(fruit));
+            return clamp(c, 0.0, 1.0);
+          }
+        `;
+
+        // P0 — webcam cover-fit + mirror (or the synthetic scene) into the
+        // working scene buffer. Everything downstream is screen-aligned.
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform float uAspect;
+          uniform float uAnim;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeScene(vUv, uAspect, uAnim), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.16, 0.20, 0.20),
+                vec3(0.26, 0.28, 0.26), vUv.y), 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scl = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scl + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — kuwahara smoothing + EMA (ping-pong). Four quadrant sectors
+        // of 3×3 taps; the least-variance sector mean wins → flat interiors
+        // with preserved big edges (the paper faces, invariant 1). Alpha
+        // carries a lightly-smoothed FINE luminance — the dark floor
+        // (invariant 6) reads it so eyes/brows survive the heavy blur of
+        // the quantization field.
+        const structFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uPrev;
+          uniform vec2 uTexel;
+          uniform float uAlpha;
+          uniform float uRadius;
+          uniform int uReset;
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            const vec2 SGN[4] = vec2[4](
+              vec2(1.0, 1.0), vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(-1.0, -1.0)
+            );
+            float bestVar = 1e9;
+            vec3 bestC = vec3(0.0);
+            for (int s = 0; s < 4; s++) {
+              vec3 acc = vec3(0.0);
+              float accL = 0.0;
+              float accL2 = 0.0;
+              for (int j = 0; j < 3; j++) {
+                for (int i = 0; i < 3; i++) {
+                  vec2 o = vec2(float(i), float(j)) * 0.5 * uRadius * SGN[s] * uTexel;
+                  vec3 c = texture(uScene, vUv + o).rgb;
+                  float L = lumaf(c);
+                  acc += c;
+                  accL += L;
+                  accL2 += L * L;
+                }
+              }
+              acc /= 9.0;
+              float m = accL / 9.0;
+              float v = accL2 / 9.0 - m * m;
+              if (v < bestVar) { bestVar = v; bestC = acc; }
+            }
+            // fine luminance: tight 3×3 gaussian (keeps eyes/brows/features)
+            float fine = 0.0;
+            float wsum = 0.0;
+            for (int j = -1; j <= 1; j++) {
+              for (int i = -1; i <= 1; i++) {
+                float w = (i == 0 ? 2.0 : 1.0) * (j == 0 ? 2.0 : 1.0);
+                fine += w * lumaf(texture(uScene,
+                  vUv + vec2(float(i), float(j)) * uTexel * 0.9).rgb);
+                wsum += w;
+              }
+            }
+            fine /= wsum;
+            vec4 cur = vec4(bestC, fine);
+            vec4 prev = texture(uPrev, vUv);
+            fragColor = uReset == 1 ? cur : mix(prev, cur, uAlpha);
+          }
+        `;
+
+        // P1b — separable Gaussian (generic RGBA). Used twice, in series:
+        // a medium sigma → bandM (the local-subdivision field + the flat
+        // chroma source), then a large sigma on top → bandT (the
+        // quantization field). Quantizing a strongly low-passed field makes
+        // every tone-band boundary a smooth large scissor curve
+        // (invariant 2) — no 1–2 px stair dither, no stripes.
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -8; i <= 8; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P2 — quantile statistics source, read back on the CPU at a low
+        // cadence (~200 ms — never every frame, repo rule §8-13).
+        // R = luminance of the quantization field (bandT), G = the fine
+        // luminance (struct alpha; feeds the dark-floor quantile).
+        const statsFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uBand;
+          uniform sampler2D uStruct;
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            float L = lumaf(texture(uBand, vUv).rgb);
+            float fine = texture(uStruct, vUv).a;
+            fragColor = vec4(L, fine, 0.0, 1.0);
+          }
+        `;
+
+        // P3 — the composite: the whole frame quantized into 4–8 paper
+        // layers with cut rims + cast shadows (the predecessor's stack
+        // engine, full-frame), dark-floor ink pieces, local subdivision,
+        // oklab paper palette snap and fbm paper grain.
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uStruct;   // rgb kuwahara colour (ema), a fine luminance
+          uniform sampler2D uBand;     // heavy blur — the quantization field
+          uniform sampler2D uBandM;    // medium blur — subdivision field + chroma
+          uniform vec2 uResolution;
+          uniform float uAspect;
+          uniform float uRelief;
+          uniform float uPalette;
+          uniform float uDetail;
+          uniform float uGrain;
+          uniform int uPreset;
+          uniform int uInvert;
+          uniform int uDebug;
+          uniform float uTh[7];
+          uniform int uN;
+          uniform float uDark;
+          ${CHUNK_NOISE}
+          ${CHUNK_OKLAB}
+          ${CHUNK_PAL}
+
+          // single light source, upper-left (invariant 3). The cast-shadow
+          // probe samples TOWARD the light: where a more frontal layer
+          // extends up-left of this pixel, its shadow falls here — i.e. on
+          // the lower-right side of every cut edge, frame-wide.
+          const vec2 LDIR = vec2(0.62, -0.79);
+
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          // depth orientation: F is "frontness". Bright-front presets use
+          // F = L, the dark-front (night) preset uses F = 1-L; ALL of the
+          // relief machinery lives in F space, so the rim side, the shadow
+          // relation and the tone order flip together, consistently (§8-16).
+          float orientF(float L) { return uInvert == 1 ? 1.0 - L : L; }
+
+          void levelOf(float F, out int lvl, out float Tdn, out float Tup) {
+            lvl = 0;
+            for (int i = 0; i < 7; i++) {
+              if (i >= uN - 1) break;
+              if (F > uTh[i]) lvl = i + 1;
+            }
+            Tdn = lvl > 0 ? uTh[lvl - 1] : -1.0;
+            Tup = lvl < uN - 1 ? uTh[lvl] : 2.0;
+          }
+
+          // paper colour at stack position f (0=deepest, 1=front): the
+          // paper set's tone, pulled toward the scene's chroma by
+          // 1-uPalette. The paper lightness staircase always wins, so the
+          // scene can tint the papers but never re-posterize them
+          // (invariant 4).
+          vec3 layerColor(vec3 camC, float f) {
+            vec3 ramp = paperRamp(uPreset, f);
+            vec3 labR = lin2oklab(srgb2lin(ramp));
+            vec3 lab = lin2oklab(srgb2lin(camC));
+            lab.x = labR.x;
+            lab.yz *= 1.35;
+            return clamp(oklab2srgb(mix(lab, labR, uPalette)), 0.0, 1.0);
+          }
+
+          // pseudo-sdf band relief: rim = thin bright cut edge on this
+          // layer's own lower margin; shd = soft cast shadow where the
+          // light-offset sample belongs to a MORE FRONTAL layer. The shadow
+          // penumbra is measured in PIXELS (~3 px), not in luminance — a
+          // luminance-wide smoothstep turns shallow gradients into airbrush
+          // streaks (predecessor repair).
+          void bandRelief(float F, float Foff, float Tdn, float Tup,
+                          float rimW, out float rim, out float shd) {
+            float dLow = (F - Tdn) / max(fwidth(F), 1e-4);
+            rim = Tdn < -0.5 ? 0.0
+              : exp(-max(dLow, 0.0) / max(rimW, 0.5)) * step(0.0, dLow);
+            float shW = min(0.035, max(fwidth(F), 1e-4) * 3.0);
+            shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + shW, Foff);
+          }
+
+          // uDebug==4 middle band: cut/shadow stages on a synthetic 4-layer
+          // radial stack, relief 0→1 across five columns (orientation of
+          // the current preset applied).
+          vec3 stackDemo(vec2 q, float rel) {
+            float Ld = clamp(1.08 - length(q - vec2(0.5)) * 1.55, 0.0, 1.0);
+            vec2 so = vec2(0.05, -0.06) * (0.2 + rel);
+            float Lo = clamp(1.08 - length(q - so - vec2(0.5)) * 1.55, 0.0, 1.0);
+            float Fd = uInvert == 1 ? 1.0 - Ld : Ld;
+            float FdO = uInvert == 1 ? 1.0 - Lo : Lo;
+            const float T[3] = float[3](0.30, 0.52, 0.74);
+            int lv = 0;
+            for (int i = 0; i < 3; i++) { if (Fd > T[i]) lv = i + 1; }
+            float Tdn = lv > 0 ? T[lv - 1] : -1.0;
+            float Tup = lv < 3 ? T[lv] : 2.0;
+            vec3 c = paperRamp(uPreset, (float(lv) + 0.5) / 4.0);
+            float dLow = (Fd - Tdn) / max(fwidth(Fd), 1e-4);
+            float rim = Tdn < -0.5 ? 0.0 : exp(-max(dLow, 0.0) / 1.5);
+            float shd = Tup > 1.5 ? 0.0 : smoothstep(Tup, Tup + 0.05, FdO);
+            c = mix(c, c * 1.25 + paperEdgeP(uPreset) * 0.12,
+              rim * (0.25 + 0.75 * rel));
+            c *= 1.0 - shd * (0.08 + 0.30 * rel);
+            return c;
+          }
+
+          // uDebug==4: paper-set staircases (top) / relief stages (middle) /
+          // grain + one straight cut (bottom).
+          vec3 specimen(vec2 uv) {
+            if (uv.y > 0.70) {
+              int pp = int(min(uv.x * 3.0, 2.99));
+              float lx = fract(uv.x * 3.0);
+              float ly = (uv.y - 0.70) / 0.30;
+              if (lx < 0.015 || lx > 0.985) return vec3(0.05);
+              if (ly > 0.45) return paperRamp(pp, floor(lx * 8.0) / 7.0);
+              return lx < 0.5 ? inkColorP(pp) : paperEdgeP(pp);
+            }
+            if (uv.y > 0.34) {
+              float col5 = floor(uv.x * 5.0);
+              vec2 q = vec2(fract(uv.x * 5.0), (uv.y - 0.34) / 0.36);
+              return stackDemo(q, col5 / 4.0);
+            }
+            vec2 px = uv * uResolution;
+            float cutL = uv.x - 0.5 - 0.10 * (uv.y / 0.34 - 0.5);
+            float hi = step(0.0, cutL);
+            vec3 c = paperRamp(uPreset, hi > 0.5 ? 0.72 : 0.38);
+            float ph = hi * 17.31;
+            c *= 1.0 + (fbm(px * 0.011 + ph) - 0.5) * 0.14;
+            c *= 1.0 + (fbm(px * 0.15 + ph * 1.7) - 0.5) * 0.085;
+            float dpx = cutL / max(fwidth(cutL), 1e-4);
+            c = mix(c, c * 1.25 + paperEdgeP(uPreset) * 0.12,
+              exp(-max(dpx, 0.0) / 1.8) * step(0.0, dpx) * 0.7);
+            c *= 1.0 - (1.0 - hi) * exp(-max(-dpx, 0.0) / 6.0) * 0.28;
+            return c;
+          }
+
+          void main() {
+            if (uDebug == 4) {
+              fragColor = vec4(specimen(vUv), 1.0);
+              return;
+            }
+            vec2 px = vUv * uResolution;
+
+            vec4 st = texture(uStruct, vUv);
+            vec3 camC = texture(uBandM, vUv).rgb;
+            float L = lumaf(texture(uBand, vUv).rgb);
+            float F = orientF(L);
+            float fineL = st.a;
+            float Fm = orientF(lumaf(camC));
+
+            if (uDebug == 1) {
+              fragColor = vec4(vec3(F), 1.0);
+              return;
+            }
+
+            float flat0 = uDebug == 2 ? 0.0 : 1.0;   // debug2 = levels only
+            float relW = uRelief * flat0;
+            float rimW = mix(0.8, 2.2, relW);
+            float eb = edgeBoostP(uPreset);
+
+            // light-offset samples (pixel-anchored shadow reach)
+            float shPx = mix(2.0, 16.0, relW) * max(uResolution.y, 1.0) / 900.0;
+            vec2 shOff = LDIR * shPx / uResolution;
+            float Fo = orientF(lumaf(texture(uBand, vUv - shOff).rgb));
+            float FmO = orientF(lumaf(texture(uBandM, vUv - shOff).rgb));
+
+            // ---- main paper stack ----
+            float fwF = max(fwidth(F), 1e-4);
+            int lvl; float Tdn; float Tup;
+            levelOf(F, lvl, Tdn, Tup);
+            // minimum paper width: a band under ~4 px on screen cannot be
+            // cut from paper — fold the sliver into the band below (inv. 2)
+            if (Tdn > -0.5 && Tup < 1.5 && (Tup - Tdn) < fwF * 4.0) {
+              lvl = max(lvl - 1, 0);
+              Tdn = lvl > 0 ? uTh[lvl - 1] : -1.0;
+            }
+            vec3 col = layerColor(camC, (float(lvl) + 0.5) / float(uN));
+            // ≥1.5 px AA crossfade at the cut line (clean cut, no dither)
+            if (Tup < 1.5) {
+              vec3 colUp = layerColor(camC, (float(lvl) + 1.5) / float(uN));
+              col = mix(col, colUp,
+                smoothstep(Tup - fwF * 1.5, Tup + fwF * 1.5, F));
+            }
+            float rim; float shd;
+            bandRelief(F, Fo, Tdn, Tup, rimW, rim, shd);
+
+            // ---- local subdivision (invariant 6): where the heavy field
+            // erased local structure, split the band ONCE at its midpoint
+            // on the medium field — a subordinate half-step paper layer
+            // with its own weak rim/shadow. Gated by detail + local
+            // contrast, and only inside bands wide enough for real paper.
+            float fwM = max(fwidth(Fm), 1e-4);
+            float widthPx = (min(Tup, 1.0) - max(Tdn, 0.0)) / fwF;
+            float contrastW = smoothstep(0.030, 0.105, abs(Fm - F));
+            // abs(Fm-F) is also large next to every BIG edge (two blur radii
+            // disagree there) — without an interior gate the subdivision
+            // draws a halo contour parallel to each main cut. Only allow it
+            // WELL INSIDE the band (F away from both thresholds).
+            float insideW = smoothstep(0.12, 0.30,
+              min(F - max(Tdn, 0.0), min(Tup, 1.0) - F) /
+                max(min(Tup, 1.0) - max(Tdn, 0.0), 1e-4));
+            float subGate = smoothstep(0.10, 0.65, uDetail) * contrastW *
+              insideW * step(10.0, widthPx) * flat0;
+            float midT = 0.5 * (max(Tdn, 0.0) + min(Tup, 1.0));
+            float subHi = smoothstep(midT - fwM * 1.5, midT + fwM * 1.5, Fm);
+            vec3 subCol = mix(
+              layerColor(camC, (float(lvl) + 0.22) / float(uN)),
+              layerColor(camC, (float(lvl) + 0.78) / float(uN)), subHi);
+            col = mix(col, subCol, subGate * 0.85);
+            float dSub = (Fm - midT) / fwM;
+            float rimS = exp(-max(dSub, 0.0) / max(rimW, 0.5)) * subGate;
+            float shdS = (1.0 - subHi) *
+              smoothstep(midT, midT + min(0.035, fwM * 3.0), FmO) * subGate;
+
+            // ---- cut rims + cast shadows (the paper thickness) ----
+            vec3 edgeC = paperEdgeP(uPreset);
+            col = mix(col, col * 1.22 + edgeC * 0.14,
+              rim * (0.30 + 0.62 * relW) * eb * flat0);
+            col = mix(col, col * 1.14 + edgeC * 0.07,
+              rimS * (0.16 + 0.34 * relW) * eb);
+            float shdAmp = (0.20 + 0.34 * relW) * flat0;
+            col *= 1.0 - shd * shdAmp;
+            col *= 1.0 - shdS * shdAmp * 0.5;
+
+            // ---- dark floor (invariant 6): the darkest few percent of the
+            // FINE field survive as the deepest ink paper (eyes / brows /
+            // nostrils) — one extra sheet with a thin rim, never blurred
+            // away by the heavy quantization field.
+            float dGate = smoothstep(0.05, 0.45, uDetail) * flat0;
+            float dFloor = smoothstep(uDark + 0.022, uDark - 0.022, fineL) * dGate;
+            vec3 ink = inkColorP(uPreset);
+            col = mix(col, ink, dFloor * 0.92);
+            float dIf = (fineL - uDark) / max(fwidth(fineL), 1e-4);
+            col = mix(col, ink * 1.9 + vec3(0.09),
+              exp(-abs(dIf) / 1.4) * dFloor * 0.28);
+
+            if (uDebug == 3) {
+              vec3 dbg = vec3(0.18 + 0.6 * float(lvl) / float(max(uN - 1, 1)));
+              dbg = mix(dbg, vec3(1.0, 0.55, 0.15), rim);
+              dbg = mix(dbg, vec3(0.20, 0.42, 1.0), shd * 0.85);
+              dbg = mix(dbg, vec3(0.25, 0.85, 0.35), max(rimS, shdS) * 0.7);
+              fragColor = vec4(dbg, 1.0);
+              return;
+            }
+
+            // ---- paper grain (fbm, per-layer phase — one paper set, many
+            // sheets; invariant 4). Seeded by pixel cell + layer only.
+            float ph = float(lvl) * 17.31;
+            col *= 1.0 + (fbm(px * 0.011 + ph) - 0.5) * (0.045 + 0.095 * uGrain);
+            col *= 1.0 + (fbm(px * 0.15 + ph * 1.7) - 0.5) * (0.018 + 0.065 * uGrain);
+            col *= 1.0 - 0.05 * uGrain * step(0.9945, hash12(floor(px * 0.7) + ph));
+
+            // restrained edge darkening + white guard
+            vec2 vq = (vUv - 0.5) * vec2(uAspect, 1.0);
+            col *= mix(0.92, 1.0, smoothstep(1.45, 0.50, length(vq)));
+            col = clamp(col, 0.0, 0.985);
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program + target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgram(fsSource, vsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program,
+            compileShader(gl.VERTEX_SHADER, vsSource || fullscreenVS));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          struct: createProgram(structFS),
+          blur: createProgram(blurFS),
+          stats: createProgram(statsFS),
+          composite: createProgram(compositeFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uAnim",
+            "uMirror", "uFake", "uHasVideo",
+          ]),
+          struct: getLocations(programs.struct, [
+            "uScene", "uPrev", "uTexel", "uAlpha", "uRadius", "uReset",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          stats: getLocations(programs.stats, ["uBand", "uStruct"]),
+          composite: getLocations(programs.composite, [
+            "uStruct", "uBand", "uBandM", "uResolution", "uAspect",
+            "uRelief", "uPalette", "uDetail", "uGrain",
+            "uPreset", "uInvert", "uDebug", "uTh[0]", "uN", "uDark",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          return tex;
+        }
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        // Video texture (DOM source → UNPACK_FLIP_Y, repo rule §8-10).
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        let targets = null;
+        let paintW = 2, paintH = 2;
+        let structW = 2, structH = 2;
+        let bandW = 2, bandH = 2;
+        const STATS_RES = 128;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          targets = {
+            scene: createTarget(paintW, paintH, false),
+            structA: createTarget(structW, structH, true),
+            structB: createTarget(structW, structH, true),
+            bandTmp: createTarget(bandW, bandH, true),
+            bandM: createTarget(bandW, bandH, true),
+            bandT: createTarget(bandW, bandH, true),
+            stats: createTarget(STATS_RES, STATS_RES, false),
+          };
+          needsReset = true;
+        }
+
+        function clearSimTargets() {
+          clearTarget(targets.scene, 0.2, 0.22, 0.22, 1);
+          clearTarget(targets.structA, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.structB, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.bandTmp, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.bandM, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.bandT, 0.5, 0.5, 0.5, 0.5);
+          clearTarget(targets.stats, 0.5, 0.5, 0, 1);
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            const cap = (limit) => Math.min(1, limit / maxSide);
+            const dim = (scale) => [
+              Math.max(8, Math.round(width * scale)),
+              Math.max(8, Math.round(height * scale)),
+            ];
+            [paintW, paintH] = dim(cap(1024));
+            [structW, structH] = dim(cap(768));
+            [bandW, bandH] = dim(cap(384));
+            rebuildTargets();
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        function blurPass(src, tmp, dst, sigma) {
+          renderPass(tmp, programs.blur, () => {
+            bindTexture(0, src.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 1 / tmp.width, 0);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 0, 1 / dst.height);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+        }
+
+        // True GPU sync — a 1×1 readPixels. gl.finish() is effectively
+        // non-blocking under swiftshader; without this the prewarm work
+        // queues up and stalls the compositor for tens of seconds (CRAFT §C4).
+        const syncPx = new Uint8Array(4);
+        function glSync() {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.stats.fbo);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+
+        /* ------------------------------------------------------------------
+           Quantile thresholds (CPU side of invariant 1). The 128×128 stats
+           target is read back every ~200 ms (never per frame), a histogram
+           of the ORIENTED quantization field F (preset decides bright-front
+           or dark-front) → equal-population quantiles → dead-zone
+           hysteresis + EMA → the uniform threshold array. A minimum gap
+           keeps bands from collapsing into slivers (invariants 2, 5).
+        ------------------------------------------------------------------ */
+
+        const BINS = 64;
+        const statsBuf = new Uint8Array(STATS_RES * STATS_RES * 4);
+        const histL = new Float32Array(BINS);
+        const histFine = new Float32Array(BINS);
+        const DEAD = 0.006;        // hysteresis dead zone (invariant 5)
+        const MIN_GAP = 0.045;     // min threshold separation (anti-sliver)
+
+        const TH = {
+          th: new Float32Array(7),
+          n: 6,
+          dark: 0.10,
+          inv: -1,
+          seeded: false,
+        };
+        function layerCount() {
+          return Math.min(8, 4 + Math.round(state.layers * 4));
+        }
+        function presetInvert() {
+          // night box: the DARK papers are the front layers
+          return state.preset === 1 ? 1 : 0;
+        }
+        (function seedEven() {
+          TH.n = layerCount();
+          for (let i = 0; i < TH.n - 1; i++) TH.th[i] = (i + 1) / TH.n;
+        })();
+
+        function quantileOf(hist, wsum, q) {
+          if (wsum < 8) return null;
+          const target = wsum * q;
+          let acc = 0;
+          for (let i = 0; i < BINS; i++) {
+            const next = acc + hist[i];
+            if (next >= target) {
+              const f = hist[i] > 0 ? (target - acc) / hist[i] : 0.5;
+              return (i + f) / BINS;
+            }
+            acc = next;
+          }
+          return 1;
+        }
+        function smoothScalar(cur, target, k) {
+          if (target === null) return cur;
+          if (!TH.seeded) return target;
+          if (Math.abs(target - cur) < DEAD) return cur;   // hysteresis
+          return cur + (target - cur) * k;
+        }
+
+        // dtStat = seconds since the previous stats update (real or simulated)
+        function updateThresholds(dtStat) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, targets.stats.fbo);
+          gl.readPixels(0, 0, STATS_RES, STATS_RES, gl.RGBA, gl.UNSIGNED_BYTE, statsBuf);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+          const inv = presetInvert();
+          histL.fill(0);
+          histFine.fill(0);
+          const count = STATS_RES * STATS_RES;
+          for (let i = 0; i < count; i++) {
+            const o = i * 4;
+            let v = statsBuf[o] / 255;
+            if (inv === 1) v = 1 - v;
+            histL[Math.min(BINS - 1, (v * BINS) | 0)]++;
+            histFine[Math.min(BINS - 1, ((statsBuf[o + 1] / 255) * BINS) | 0)]++;
+          }
+
+          const n = layerCount();
+          // FREEZE snaps instead of easing: a frozen scene has constant
+          // quantiles, so snapping makes the still frame deterministic and
+          // immediately flicker-free (the ease is for live footage only).
+          const snap = FREEZE || n !== TH.n || inv !== TH.inv || !TH.seeded;
+          TH.n = n;
+          TH.inv = inv;
+          const tau = 0.5 + 2.0 * state.calm;
+          const k = 1 - Math.exp(-Math.max(dtStat, 1e-3) / tau);
+          // pure equal-population quantiles crowd the thresholds inside the
+          // dominant tone mass (a bright wall pushes 3-4 cuts within ΔF≈0.08
+          // → washy, near-invisible steps). Blend the quantiles toward
+          // EQUAL SPACING over the field's own [P3, P97] range: every sheet
+          // keeps real area AND a readable tone step (invariant 1).
+          const lo = quantileOf(histL, count, 0.03);
+          const hi = quantileOf(histL, count, 0.97);
+          for (let i = 0; i < n - 1; i++) {
+            const t = quantileOf(histL, count, (i + 1) / n);
+            if (t === null) continue;
+            let tgt = t;
+            if (lo !== null && hi !== null && hi - lo > 0.05) {
+              const even = lo + ((hi - lo) * (i + 1)) / n;
+              tgt = t * 0.55 + even * 0.45;
+            }
+            TH.th[i] = snap ? tgt : smoothScalar(TH.th[i], tgt, k);
+          }
+          for (let i = 1; i < n - 1; i++) {
+            if (TH.th[i] < TH.th[i - 1] + MIN_GAP) TH.th[i] = TH.th[i - 1] + MIN_GAP;
+          }
+          // dark floor from the FINE histogram (actual darkness, never
+          // inverted): the darkest 2–7 % — eyes, brows, nostrils — become
+          // the extra ink sheet (invariant 6). Scales with the detail knob.
+          const dq = quantileOf(histFine, count, 0.02 + 0.05 * state.detail);
+          if (dq !== null) {
+            const dTarget = Math.min(Math.max(dq, 0.02), 0.45);
+            TH.dark = snap ? dTarget : smoothScalar(TH.dark, dTarget, k);
+          }
+          TH.seeded = true;
+          // diagnostic for headless probing
+          window.__thDbg = {
+            th: Array.from(TH.th.slice(0, Math.max(n - 1, 0))),
+            n, dark: TH.dark, inv,
+          };
+        }
+
+        /* ------------------------------------------------------------------
+           Render core + loop + prewarm
+        ------------------------------------------------------------------ */
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let structPing = false;
+        let readyStamped = false;
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        // One full pipeline step. dt is unused by the passes themselves
+        // (the fake scene reads animTime), emaDt drives every EMA (fixed
+        // during prewarm so the warmed state is deterministic and
+        // framerate-independent).
+        function renderCore(emaDt, drawFinal, haveVideo) {
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const structCur = structPing ? targets.structA : targets.structB;
+          const structPrev = structPing ? targets.structB : targets.structA;
+          const aStruct = 1 - Math.exp(-emaDt * (20 - 13 * state.calm));
+
+          // P0 — scene
+          renderPass(targets.scene, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize,
+              Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uAnim, animTime);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+          });
+
+          // P1 — kuwahara + EMA (ping-pong)
+          renderPass(structCur, programs.struct, () => {
+            const u = locations.struct;
+            bindTexture(0, targets.scene.tex);
+            bindTexture(1, structPrev.tex);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uPrev, 1);
+            gl.uniform2f(u.uTexel, 1 / structW, 1 / structH);
+            gl.uniform1f(u.uAlpha, aStruct);
+            gl.uniform1f(u.uRadius, 3.0 + 2.4 * state.smooth);
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+          });
+
+          // P1b — two-stage isotropic low-pass: medium (subdivision field +
+          // chroma) then heavy (the quantization field). The scissor
+          // roundness knob drives both sigmas.
+          blurPass(structCur, targets.bandTmp, targets.bandM,
+            1.0 + 1.6 * state.smooth);
+          blurPass(targets.bandM, targets.bandTmp, targets.bandT,
+            2.0 + 4.5 * state.smooth);
+
+          // P2 — stats source (read back on a slow CPU cadence)
+          renderPass(targets.stats, programs.stats, () => {
+            const u = locations.stats;
+            bindTexture(0, targets.bandT.tex);
+            bindTexture(1, structCur.tex);
+            gl.uniform1i(u.uBand, 0);
+            gl.uniform1i(u.uStruct, 1);
+          });
+
+          if (drawFinal) {
+            // P3 — composite → canvas
+            renderPass(null, programs.composite, () => {
+              const u = locations.composite;
+              bindTexture(0, structCur.tex);
+              bindTexture(1, targets.bandT.tex);
+              bindTexture(2, targets.bandM.tex);
+              gl.uniform1i(u.uStruct, 0);
+              gl.uniform1i(u.uBand, 1);
+              gl.uniform1i(u.uBandM, 2);
+              gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+              gl.uniform1f(u.uAspect, aspect);
+              gl.uniform1f(u.uRelief, state.relief);
+              gl.uniform1f(u.uPalette, state.palette);
+              gl.uniform1f(u.uDetail, state.detail);
+              gl.uniform1f(u.uGrain, state.grain);
+              gl.uniform1i(u.uPreset, state.preset);
+              gl.uniform1i(u.uInvert, presetInvert());
+              gl.uniform1i(u.uDebug, state.debugView);
+              gl.uniform1fv(u["uTh[0]"], TH.th);
+              gl.uniform1i(u.uN, TH.n);
+              gl.uniform1f(u.uDark, TH.dark);
+            });
+          }
+
+          structPing = !structPing;
+        }
+
+        // ?prewarm=<sec>: deterministic fast-forward BEFORE the first
+        // presented frame. Two phases (both fixed-step, so the result is a
+        // pure function of the prewarm value): (A) up to 3 simulated seconds
+        // of full pipeline steps at dt=1/20 — the GPU EMA converges in
+        // ~1-2 s; (B) the remaining simulated time in 1.5 s chunks of one
+        // pipeline step + one CPU quantile update each — the threshold EMA
+        // (τ up to ~2.5 s) converges without paying for full GPU steps
+        // (swiftshader budget, CRAFT §C4). Async-chunked so the page load
+        // event is never blocked; true glSync per chunk. Under ?freeze=1
+        // the scene stays pinned while every EMA converges onto it.
+        async function runPrewarm() {
+          const PDT = 1 / 20;
+          const stepsA = Math.round(Math.min(PREWARM, 3) / PDT);
+          for (let i = 0; i < stepsA; i++) {
+            if (!FREEZE && !state.pauseAnim) animTime += PDT;
+            renderCore(PDT, false, false);
+            if (i % 4 === 3) updateThresholds(4 * PDT);
+            if (i % 10 === 9) {
+              glSync();
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+          }
+          let remain = PREWARM - Math.min(PREWARM, 3);
+          while (remain > 1e-3) {
+            const chunk = Math.min(1.5, remain);
+            if (!FREEZE && !state.pauseAnim) animTime += chunk;
+            renderCore(PDT, false, false);
+            updateThresholds(chunk);
+            remain -= chunk;
+            glSync();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          updateThresholds(4 * PDT);
+          glSync();
+        }
+
+        function updateChip() {
+          statusChip.textContent = FAKE
+            ? "入力 · 合成 (fakesource=1)"
+            : (cameraReady ? "入力 · カメラ" : "カメラ待機中");
+          statusChip.classList.toggle(
+            "hidden", performance.now() - bootWall > 4000 && (FAKE || cameraReady));
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          const dt = FREEZE ? 0 : rawDt;
+          if (!state.pauseAnim) animTime += dt;
+
+          const haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || haveVideo;
+
+          renderCore(dt, true, haveVideo);
+
+          // low-cadence quantile refresh (never per frame, repo rule §8-13)
+          if (now - lastStatWall > 200) {
+            updateThresholds(Math.min(1, (now - lastStatWall) / 1000));
+            lastStatWall = now;
+          }
+
+          if (!readyStamped && hasInput) {
+            glSync();   // the first real frame actually finished (CRAFT §C4)
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
+              canvas.height} / 紙 ${TH.n}枚 · しきい値更新 ~200ms毎`;
+            updateChip();
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. Under ?fakesource=1 the synthetic scene drives the
+           whole pipeline (the video texture is never sampled); the camera
+           request still runs so the three error paths stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay("requesting", "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.");
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay("error", "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8888) or HTTPS, then reload.");
+            retryCamera.disabled = false;
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.");
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 }, height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            retryCamera.disabled = false;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay("error", "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true });
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay("error", "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true });
+            } else {
+              setOverlay("error", "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true });
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => { startCamera(); });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+        window.addEventListener("beforeunload", stopCamera);
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          // startCamera() runs in every mode. Under ?fakesource=1 the
+          // synthetic scene drives the whole pipeline regardless of the
+          // camera (the video texture is never sampled), so the camera is
+          // only exercised to keep the three error overlays observable.
+          startCamera();
+          if (PREWARM > 0) {
+            runPrewarm().then(() => requestAnimationFrame(frame));
+          } else {
+            requestAnimationFrame(frame);
+          }
+        } catch (error) {
+          setOverlay("error", "WEBGL SETUP ERROR",
+            error && error.message ? error.message : "Could not initialize the renderer.");
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
