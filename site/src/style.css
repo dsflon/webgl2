@@ -1,0 +1,219 @@
+/* トップページ「レンズ格子ポートフォリオ」(docs/top_page_spec_v1.1.md) */
+:root {
+  --bg: #0a0a0a;
+  --ink: #e8ecf0;
+  --muted: #97a0ad;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  touch-action: none; /* スワイプパンのためブラウザ既定ジェスチャを無効化 */
+  cursor: grab;
+}
+#stage.dragging {
+  cursor: grabbing;
+}
+#stage.fine {
+  cursor: pointer;
+}
+
+/* ---- オーバーレイ(§7.1) ---- */
+#overlay {
+  position: fixed;
+  top: clamp(16px, 4vh, 40px);
+  left: clamp(16px, 4vw, 44px);
+  z-index: 5;
+  pointer-events: none;
+  max-width: min(60vw, 34em);
+  opacity: 1;
+  transition: opacity 250ms ease;
+}
+#overlay.ov-dim {
+  opacity: 0.4;
+}
+.ov-swap {
+  transition: opacity 150ms ease;
+}
+#overlay.ov-fading .ov-swap {
+  opacity: 0;
+}
+#ov-title {
+  font-size: clamp(16px, 2.2vw, 28px);
+  font-weight: 600;
+  line-height: 1.3;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+}
+#ov-date {
+  margin-top: 2px;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+}
+#ov-tags {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  color: var(--ink);
+  background: rgba(10, 10, 10, 0.35);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---- ローディング(§6) ---- */
+#progress {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  text-align: center;
+  background: var(--bg);
+  transition: opacity 600ms ease;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#progress.done {
+  opacity: 0;
+  pointer-events: none;
+}
+.p-label {
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  color: var(--muted);
+}
+.p-count {
+  font-size: 13px;
+  color: var(--ink);
+}
+.p-bar {
+  width: 220px;
+  height: 2px;
+  margin: 0 auto;
+  background: rgba(255, 255, 255, 0.12);
+}
+#p-fill {
+  width: 0;
+  height: 100%;
+  background: var(--ink);
+  transition: width 120ms ease;
+}
+
+/* ---- sr-only(§7.3): display:none 禁止 ---- */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- フォールバック静的グリッド(§9) / noscript ---- */
+#fallback,
+.noscript-nav {
+  position: relative;
+  z-index: 6;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 48px 20px 64px;
+}
+#fallback h1,
+.noscript-nav h1 {
+  font-size: clamp(22px, 4vw, 36px);
+  font-weight: 650;
+  margin: 0 0 10px;
+}
+#fallback:not([hidden]) {
+  display: block;
+  height: 100%;
+  overflow-y: auto;
+}
+body:has(#fallback:not([hidden])) {
+  overflow: auto;
+}
+.fb-note {
+  color: var(--muted);
+  font-size: 13.5px;
+  margin: 0 0 28px;
+}
+.fb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+}
+.fb-card {
+  display: block;
+  text-decoration: none;
+  color: var(--ink);
+  background: #14161b;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: border-color 150ms ease;
+}
+.fb-card:hover,
+.fb-card:focus-visible {
+  border-color: rgba(255, 255, 255, 0.3);
+}
+.fb-card img {
+  width: 100%;
+  height: auto;
+  display: block;
+  aspect-ratio: 8 / 5;
+  object-fit: cover;
+}
+.fb-card h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 12px 14px 4px;
+}
+.fb-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin: 0 14px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.noscript-nav ul {
+  list-style: none;
+  padding: 0;
+  line-height: 2;
+}
+.noscript-nav a {
+  color: var(--ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #progress,
+  .ov-swap,
+  #overlay {
+    transition: none;
+  }
+}

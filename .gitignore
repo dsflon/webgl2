@@ -1,4 +1,9 @@
 src/
+!site/src/
+
+# top page (site/) build tooling
+site/node_modules/
+site/dist/
 
 # art-loop runtime artifacts
 loop/state/
