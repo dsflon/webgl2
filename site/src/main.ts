@@ -111,21 +111,32 @@ function run(
     const c1 = Math.ceil((px + vw) / g.cellW) + 1;
     const r0 = Math.floor(py / g.cellH) - 1;
     const r1 = Math.ceil((py + vh) / g.cellH) + 1;
+    let hit: Work | null = null;
     for (let row = r0; row <= r1; row++) {
       for (let col = c0; col <= c1; col++) {
         const si = stateIndex(col, row);
         if ((lastCol[si] as number) !== col || (lastRow[si] as number) !== row) continue;
-        const hw = (dispW[si] as number) / 2;
-        const hh = (dispHt[si] as number) / 2;
+        // 描画と同じ隆起倍率でヒット判定(注視タイルは最前面なので優先)
+        const isFocus = col === focusCol && row === focusRow;
+        const pop = 1 + (CONFIG.focusPop - 1) * (dispHl[si] as number) * lensAmount;
+        const hw = ((dispW[si] as number) * pop) / 2;
+        const hh = ((dispHt[si] as number) * pop) / 2;
         const sx = (dispX[si] as number) - px;
         const sy = (dispY[si] as number) - py;
         if (Math.abs(cx - sx) <= hw && Math.abs(cy - sy) <= hh) {
           const w = works[workAt(table, CONFIG.patternSize, col, row)] as Work;
-          if (CONFIG.openInNewTab) window.open(w.url, '_blank', 'noopener,noreferrer');
-          else location.href = w.url;
-          return;
+          if (isFocus) {
+            hit = w;
+            row = r1 + 1; // 最前面が確定
+            break;
+          }
+          if (hit === null) hit = w;
         }
       }
+    }
+    if (hit !== null) {
+      if (CONFIG.openInNewTab) window.open(hit.url, '_blank', 'noopener,noreferrer');
+      else location.href = hit.url;
     }
   });
 
@@ -229,6 +240,7 @@ function run(
     }
 
     let n = 0;
+    let focusInstance = -1;
     for (let row = r0; row <= r1; row++) {
       for (let col = c0; col <= c1; col++) {
         if (n >= CONFIG.maxInstances) break;
@@ -275,9 +287,12 @@ function run(
           bestRow = row;
         }
 
-        // ハイライトのクロスフェード(§5.4)
-        const hTarget = CONFIG.focusHighlight && col === focusCol && row === focusRow ? 1 : 0;
+        // ハイライト+隆起のクロスフェード(§5.4)
+        const isFocus = col === focusCol && row === focusRow;
+        const hTarget = CONFIG.focusHighlight && isFocus ? 1 : 0;
         dispHl[si] = (dispHl[si] as number) + (hTarget - (dispHl[si] as number)) * dtLerp(0.25, dt);
+        // 注視タイルの隆起: レンズ倍率にさらに上乗せ(意図的に隣へ重なり、最前面に描画される)
+        const pop = 1 + (CONFIG.focusPop - 1) * (dispHl[si] as number) * lensAmount;
 
         // ヴィネット/彩度(§5.4): レンズ中心からの距離で減衰
         const dCell = Math.hypot(cx - lensWX, cy - lensWY);
@@ -288,10 +303,11 @@ function run(
 
         const wi = workAt(table, CONFIG.patternSize, col, row);
         const o = n * STRIDE;
+        if (isFocus) focusInstance = n; // ループ後に最後尾へスワップ(最前面に描画)
         data[o] = sx;
         data[o + 1] = sy;
-        data[o + 2] = w;
-        data[o + 3] = h;
+        data[o + 2] = w * pop;
+        data[o + 3] = h * pop;
         data[o + 4] = uv[wi * 4] as number;
         data[o + 5] = uv[wi * 4 + 1] as number;
         data[o + 6] = uv[wi * 4 + 2] as number;
@@ -300,6 +316,17 @@ function run(
         data[o + 9] = sat;
         data[o + 10] = (dispHl[si] as number) * lensAmount;
         n++;
+      }
+    }
+
+    // 注視タイルを最後尾へスワップ(インスタンス順=描画順なので最前面になる)
+    if (focusInstance >= 0 && focusInstance !== n - 1) {
+      const a = focusInstance * STRIDE;
+      const b = (n - 1) * STRIDE;
+      for (let k = 0; k < STRIDE; k++) {
+        const t = data[a + k] as number;
+        data[a + k] = data[b + k] as number;
+        data[b + k] = t;
       }
     }
 

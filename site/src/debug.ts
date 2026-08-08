@@ -44,6 +44,7 @@ export function initDebug(): DebugTools {
   look.add(CONFIG, 'desatMin', 0, 1, 0.01);
   look.add(CONFIG, 'cornerRadius', 0, 24, 1);
   look.add(CONFIG, 'focusHighlight');
+  look.add(CONFIG, 'focusPop', 1, 2, 0.01);
 
   const stats = new Stats();
   stats.showPanel(0);

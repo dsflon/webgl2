@@ -5,7 +5,7 @@
 export const CONFIG = {
   // --- グリッド(§3) ---
   /** セル高 = 画面高 × この係数 */
-  cellFraction: 1 / 14,
+  cellFraction: 1 / 18,
   /** セル幅/高 比。既存サムネ(800×500)に合わせ 8:5 横長 // SPEC-DEFAULT */
   cellAspect: 1.6,
   /** 変形前のセル間ギャップ(セル寸法比) */
@@ -66,6 +66,8 @@ export const CONFIG = {
   cornerRadius: 6,
   /** 注視タイルのハイライト // SPEC-DEFAULT */
   focusHighlight: true,
+  /** 注視タイルの隆起倍率(hover時にレンズ倍率へ上乗せし、最前面に重ねて描画) */
+  focusPop: 1.35,
   /** 背景色 */
   background: [0x0a / 255, 0x0a / 255, 0x0a / 255] as const,
 

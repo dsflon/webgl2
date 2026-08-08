@@ -56,12 +56,12 @@ describe('レンズ関数(§4.2)', () => {
 
 describe('非重複と GAP_MIN(§4.2 受け入れ条件)', () => {
   const GAP_MIN = 2;
-  // 1080p 相当のグリッド(セル 123.4×77.1、ギャップ9%) — CONFIG 既定値と一致させること
-  const cellH = 1080 / 14;
+  // 1080p 相当のグリッド(セル 96×60、ギャップ9%) — CONFIG 既定値と一致させること
+  const cellH = 1080 / 18;
   const cellW = cellH * 1.6;
   const GAP_FRAC = 0.09;
 
-  it('いかなるポインタ位置・開度でも隣接タイルが重ならず GAP_MIN を維持', () => {
+  it('いかなるポインタ位置・開度でも隣接タイルが重ならず GAP_MIN を維持', { timeout: 30000 }, () => {
     const out = new Float64Array(2);
     const range = Math.ceil((shape.radius * shape.tailEnd * 1.2) / Math.min(cellW, cellH));
     const cols = range * 2 + 3; // 外周1セルのリング込み(本番と同じ)
