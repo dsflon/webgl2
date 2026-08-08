@@ -5,7 +5,10 @@
  */
 import type { Work } from '../data/works';
 
-export function showFallback(works: readonly Work[] | null): void {
+export function showFallback(
+  works: readonly Work[] | null,
+  newIds?: ReadonlySet<string>,
+): void {
   document.getElementById('stage')?.remove();
   document.getElementById('overlay')?.remove();
   document.getElementById('progress')?.remove();
@@ -39,6 +42,12 @@ export function showFallback(works: readonly Work[] | null): void {
     img.height = 500;
     const t = document.createElement('h2');
     t.textContent = w.title;
+    if (newIds?.has(w.id)) {
+      const badge = document.createElement('span');
+      badge.className = 'fb-new';
+      badge.textContent = 'NEW';
+      t.prepend(badge);
+    }
     const meta = document.createElement('p');
     meta.className = 'fb-meta';
     meta.textContent = [w.date, w.tags.join(' / ')].filter(Boolean).join(' — ');

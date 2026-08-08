@@ -56,6 +56,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 export async function buildAtlas(
   works: readonly Work[],
+  newIds: ReadonlySet<string>,
   onProgress: (done: number, total: number) => void,
 ): Promise<AtlasResult> {
   const tw = CONFIG.atlasTileW;
@@ -94,6 +95,7 @@ export async function buildAtlas(
       drawPlaceholder(ctx, w.id, x, y, tw, th);
       failed.add(w.id);
     }
+    if (newIds.has(w.id)) drawNewBadge(ctx, x, y);
     // UVは僅かに内側へ(隣枠のにじみ防止)
     const inset = 1;
     uv[i * 4 + 0] = (x + inset) / size;
@@ -125,6 +127,23 @@ function drawCover(
   const sx = (sw - cw) / 2;
   const sy = (sh - ch) / 2;
   ctx.drawImage(img, sx, sy, cw, ch, x, y, w, h);
+}
+
+/** 新着バッジ(§7.4): タイル左上に金地の NEW を焼き込む */
+function drawNewBadge(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+  const m = 14;
+  const bw = 96;
+  const bh = 38;
+  const r = 10;
+  ctx.beginPath();
+  ctx.roundRect(x + m, y + m, bw, bh, r);
+  ctx.fillStyle = '#d9a83c';
+  ctx.fill();
+  ctx.fillStyle = '#0a0a0a';
+  ctx.font = '700 24px system-ui, -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('NEW', x + m + bw / 2, y + m + bh / 2 + 1);
 }
 
 /** ロード失敗時のプレースホルダ: 単色 + IDテキスト(§6) */

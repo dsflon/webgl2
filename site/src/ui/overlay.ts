@@ -18,7 +18,7 @@ export class Overlay {
   private currentId = '';
   private timer = 0;
 
-  setWork(work: Work | null): void {
+  setWork(work: Work | null, isNew = false): void {
     const id = work ? work.id : '';
     if (id === this.currentId) return;
     this.currentId = id;
@@ -28,14 +28,19 @@ export class Overlay {
       if (work) {
         this.title.textContent = work.title;
         this.date.textContent = work.date ? work.date.slice(0, 7).replace('-', '.') : '';
-        this.tags.replaceChildren(
-          ...work.tags.map((t) => {
-            const el = document.createElement('span');
-            el.className = 'chip';
-            el.textContent = t;
-            return el;
-          }),
-        );
+        const chips = work.tags.map((t) => {
+          const el = document.createElement('span');
+          el.className = 'chip';
+          el.textContent = t;
+          return el;
+        });
+        if (isNew) {
+          const el = document.createElement('span');
+          el.className = 'chip chip-new';
+          el.textContent = 'NEW';
+          chips.unshift(el);
+        }
+        this.tags.replaceChildren(...chips);
       } else {
         this.title.textContent = '';
         this.date.textContent = '';

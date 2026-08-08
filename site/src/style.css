@@ -72,6 +72,22 @@ body {
   flex-wrap: wrap;
   gap: 6px;
 }
+.chip-new,
+.fb-new {
+  background: #d9a83c;
+  color: #0a0a0a;
+  border-color: #d9a83c;
+  font-weight: 700;
+}
+.fb-new {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  margin-right: 8px;
+  vertical-align: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .chip {
   font-size: 10.5px;
   letter-spacing: 0.06em;

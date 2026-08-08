@@ -55,3 +55,45 @@ export async function fetchWorks(): Promise<Work[]> {
   if (!res.ok) throw new Error(`works.json: HTTP ${res.status}`);
   return adaptWorks((await res.json()) as unknown);
 }
+
+/** date(YYYY-MM-DD)が now から days 日以内なら新着(§7.4)。不正な日付は false */
+export function isNewWork(date: string, now: number, days: number): boolean {
+  if (days <= 0) return false;
+  const t = Date.parse(date);
+  if (Number.isNaN(t)) return false;
+  return now - t <= days * 86400000;
+}
+
+/**
+ * NEW バッジ対象の作品ID集合(§7.4): date が days 日以内、かつ新しい順に最大 max 件。
+ * 制作ペースが速い時期に NEW が溢れないよう件数で上限を切る。
+ */
+export function newWorkIds(
+  works: readonly Work[],
+  now: number,
+  days: number,
+  max: number,
+): Set<string> {
+  return new Set(
+    works
+      .filter((w) => isNewWork(w.date, now, days))
+      .slice()
+      .sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
+      .slice(0, Math.max(0, max))
+      .map((w) => w.id),
+  );
+}
+
+/** 最も新しい date を持つ作品のインデックス。有効な日付が無ければ -1 */
+export function newestIndex(works: readonly Work[]): number {
+  let best = -1;
+  let bestT = -Infinity;
+  for (let i = 0; i < works.length; i++) {
+    const t = Date.parse((works[i] as Work).date);
+    if (!Number.isNaN(t) && t > bestT) {
+      bestT = t;
+      best = i;
+    }
+  }
+  return best;
+}

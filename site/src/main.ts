@@ -5,7 +5,7 @@
  */
 import './style.css';
 import { CONFIG, applyReducedMotion, dtLerp } from './config';
-import { fetchWorks, type Work } from './data/works';
+import { fetchWorks, newWorkIds, newestIndex, type Work } from './data/works';
 import { buildAssignment, workAt } from './gfx/grid';
 import { mapPoint, fitRects, type LensShape } from './gfx/lens';
 import { buildAtlas } from './gfx/atlas';
@@ -47,17 +47,28 @@ async function boot(): Promise<void> {
     showFallback(works);
     return;
   }
-  renderer.onContextRestoreFailed = () => showFallback(works);
+  renderer.onContextRestoreFailed = () => showFallback(works, newIds);
 
-  const atlas = await buildAtlas(works, (done, total) => overlay.setProgress(done, total));
+  // 新着判定(§7.4): newBadgeDays 日以内かつ最新 newBadgeMax 件
+  const newIds: ReadonlySet<string> = newWorkIds(
+    works,
+    Date.now(),
+    CONFIG.newBadgeDays,
+    CONFIG.newBadgeMax,
+  );
+
+  const atlas = await buildAtlas(works, newIds, (done, total) =>
+    overlay.setProgress(done, total),
+  );
   renderer.uploadAtlas(atlas.canvas);
   overlay.hideProgress();
 
-  run(works, atlas.uv, renderer, overlay, canvas);
+  run(works, newIds, atlas.uv, renderer, overlay, canvas);
 }
 
 function run(
   works: readonly Work[],
+  newIds: ReadonlySet<string>,
   uv: Float32Array,
   renderer: Renderer,
   overlay: Overlay,
@@ -69,6 +80,25 @@ function run(
   let vh = window.innerHeight;
   renderer.resize(vw, vh);
   const pointer = new PointerInput(canvas, vw, vh);
+
+  // 初期表示で最新作をレンズ中心(画面中央)へ(§7.4)
+  if (CONFIG.startOnNewest) {
+    const newest = newestIndex(works);
+    if (newest >= 0) {
+      const P = CONFIG.patternSize;
+      outer: for (let r = 0; r < P; r++) {
+        for (let c = 0; c < P; c++) {
+          if (table[r * P + c] === newest) {
+            const cellH = vh * CONFIG.cellFraction;
+            const cellW = cellH * CONFIG.cellAspect;
+            pointer.state.panX = (c + 0.5) * cellW - vw / 2;
+            pointer.state.panY = (r + 0.5) * cellH - vh / 2;
+            break outer;
+          }
+        }
+      }
+    }
+  }
   window.addEventListener('resize', () => {
     vw = window.innerWidth;
     vh = window.innerHeight;
@@ -335,7 +365,7 @@ function run(
       focusRow = bestRow;
       focusWork = works[workAt(table, CONFIG.patternSize, focusCol, focusRow)] ?? null;
     }
-    overlay.setWork(focusWork);
+    overlay.setWork(focusWork, focusWork !== null && newIds.has(focusWork.id));
     canvas.classList.toggle('fine', ps.fine && !ps.dragging);
     canvas.classList.toggle('dragging', ps.dragging);
 
