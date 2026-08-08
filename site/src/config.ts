@@ -20,12 +20,14 @@ export const CONFIG = {
   seed: 42,
 
   // --- レンズ(§4) ---
+  // 2026-08-07 発注者FB: 安静時は「ほぼフラットな小タイルの平面 + ホバー位置に丸みを帯びた
+  // 魚眼のふくらみ」にする。巨大レンズ(0.45/5.0)から半径・倍率を絞った既定値に変更。
   /** コア影響半径 = 画面短辺 × この係数 */
-  lensRadiusFraction: 0.45,
+  lensRadiusFraction: 0.3,
   /** 変位の裾野が消える距離(×LENS_RADIUS) */
-  tailEnd: 2.4,
+  tailEnd: 2.2,
   /** 中心セルの最大倍率 */
-  maxScale: 5.0,
+  maxScale: 3.0,
   /** 裾野圧縮部の最小倍率(これ未満に縮まない) */
   minScale: 0.5,
   /** ポインタ追従 Lerp(60fps基準) */
@@ -34,7 +36,8 @@ export const CONFIG = {
   // --- レンズ開閉(§4.5) ---
   lensOpenLerp: 0.1,
   lensCloseLerp: 0.18,
-  lensMin: 0.15,
+  /** ドラッグ中の残存率。ほぼフラットまで閉じ、平面を「掴んでいる」感を出す */
+  lensMin: 0.05,
   /** これ以上のパン速度(px/s)でレンズが閉じる */
   closeSpeed: 600,
 
@@ -58,16 +61,16 @@ export const CONFIG = {
   openInNewTab: true,
 
   // --- 見た目(§5.4) ---
-  /** 周縁の明度(中心=1) */
-  vignetteMin: 0.25,
+  /** 周縁の明度(中心=1)。レンズ半径を絞ったぶん減光も浅く */
+  vignetteMin: 0.45,
   /** 周縁の彩度(中心=1) */
-  desatMin: 0.6,
+  desatMin: 0.75,
   /** 角丸半径(CSS px) */
   cornerRadius: 6,
   /** 注視タイルのハイライト // SPEC-DEFAULT */
   focusHighlight: true,
-  /** 注視タイルの隆起倍率(hover時にレンズ倍率へ上乗せし、最前面に重ねて描画) */
-  focusPop: 1.35,
+  /** 注視タイルの隆起倍率(1.0=無効)。隆起は魚眼バンプ(レンズ)が担うため既定OFF // FB 2026-08-07 */
+  focusPop: 1.0,
   /** 背景色 */
   background: [0x0a / 255, 0x0a / 255, 0x0a / 255] as const,
 
