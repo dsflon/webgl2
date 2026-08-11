@@ -1,0 +1,1352 @@
+<!doctype html>
+<!--
+  fable5_unari.html — うなり — 干渉場ギターチューナー (WebGL2)
+
+  概要:
+    画面全体がひとつの干渉場になる、実用精度のギターチューナー。
+    プレイヤーの音とターゲット音(調弦の正解)の「うなり(beat)」を直交復調で
+    直接計測し、その位相をそのまま干渉縞のドリフトとして描く。
+    画面は左右2つの波源(左=基準音、右=あなたの音)が作る二源干渉のハイパーボラ:
+    中央では縦の縞、波源のそばでは同心の渦になる。音が高い(シャープ)と縞は
+    右(自分の音の側)へ流れ、低い(フラット)と左へ流れる。
+    完全に合うと全ての縞が静止し、中央の縦軸に金のヘアラインが灯る。
+    ストロボチューナー(Peterson 型)の原理の全画面翻案であり、
+    縞の運動 = うなりの物理量そのもの。ごまかしの無い計器である。
+    <meta name="art-input" content="mic"> 宣言(カメラ不使用のマイク入力プロファイル)。
+
+  実行方法:
+    python3 -m http.server 8888
+    → http://localhost:8888/fable5_unari.html を開き「マイクを許可して始める」
+    (マイク API はセキュアコンテキスト必須。file:// では動きません)
+    ギターの弦を1本だけ鳴らすと、最寄りの弦が自動選択され、縞が動き出します。
+    縞が静止するようにペグを回してください。±2セント以内が0.6秒続くとロック
+    (金の環)します。下部の弦ボタンで手動固定、AUTO で自動判別に戻ります。
+    チューニングプリセット(Regular / Drop D / 半音下げ / DADGAD / Open G)と
+    A4 基準(432〜446Hz)はパネルから変更できます。
+
+    検証用 URL パラメータ:
+      ?fakesource=1 … マイク・WebAudio を一切開かず、決定的スクリプトの
+                      調弦シナリオ(E2 を合わせてロック→G3 がシャープ、26秒ループ)
+                      で全パイプラインを駆動する(オフライン検証用)。
+      ?freeze=1     … 決定的静止フレーム: fakesource を強制し、固定 dt=1/60 で
+                      スクリプトを 12.4 秒ぶん事前ロール(CPU のみ)した状態で
+                      dt=0・残光バイパス・グレイン種固定にする(フリッカ検査用)。
+      ?tonestring=6&tonecent=7
+                    … 実 DSP 検証: 弦番号(1=高E〜6=低E)のターゲットから
+                      指定セントだけずらした合成ギター音(倍音つき PeriodicWave)を
+                      実解析経路(YIN+直交復調)へ注入する。window.__tuner に
+                      毎フレームの計測値(f0/cent/conf)が出るので、注入値との
+                      誤差を機械検証できる。&toneenv=1 で減衰弾弦エンベロープ。
+
+  様式解析(不変量。優先順):
+    | # | 視覚的不変量 | 担当軸 | 実装原理 | 外した場合の影響 |
+    |---|---|---|---|---|
+    | 1 | 縞の運動がうなりの物理量そのもの(速度=Δf、方向=符号、静止=合致) | 時間 | 直交復調(ロックイン)の位相差を積分し縞位相へ直結。1x/2x/4x の倍音バンド3層 | ただの音量ビジュアライザに退化し、計器として嘘になる |
+    | 2 | 金は中央の縦軸だけ。合致に近づくほど灯り、ロックで息づく(他は銀墨の単色) | 色 | exp(-|cent|/6) の接近グロー+±2cent×0.6s ヒステリシスのロック判定 | 常時カラフルだと「合った」報酬が消える |
+    | 3 | 縞は二源干渉のハイパーボラ(中央=縦縞、波源近傍=同心の渦)で、繊維質のフィラメントとして走り、縁は千切れて霧に溶ける | 形 | 行路差 rR-rL の等値線+縞に沿う fbm フィラメント+ノイズゲート侵食(sdf の生円/直線を可視形状にしない) | オシロスコープ/バーコードに見える(様式不成立) |
+    | 4 | 近いほど鮮明(合致に向かうほど縞のコントラストが上がる) | 質感 | コントラスト = conf × exp(-|cent|/28) | 遠くても近くても同じ絵で、進捗の手応えが無い |
+    | 5 | 無音時は薄霧の呼吸だけが残る静物(縞は眠る) | 時間 | activeEnv/idleEnv の2時定数クロスフェード+低振幅 fbm ミスト | 無音で真っ黒(死んだ画面)か、無音でも縞が踊る(嘘) |
+
+  パイプライン(毎フレーム):
+    [Audio] mic/tone → highpass 35Hz → lowpass 1.8kHz → AnalyserNode(8192)
+        → CPU: RMS ゲート → ×4 間引き(箱型平均) → YIN(CMNDF+放物線補間) = 粗f0
+        → 弦の自動選択(ヒステリシス、範囲外はクロマチック)
+        → 直交復調: フル 8192 サンプルを前半/後半で復調しターゲットとの Δf を
+          位相差から直接算出(|cent|<30 のとき採用。分解能 ~0.1 cent)
+        → 縞位相 PHI += 2π·Δf·dt(視覚は ±6Hz に tanh クランプ)
+    [GPU]
+      P1 field  : 二源干渉の行路差 × 倍音バンド(1x/2x/4x)× フィラメント/侵食
+                  → R=銀 G=金(中央軸) B=霧
+                  同パスで前フレーム(ping-pong)と EMA 合成(残光。freeze 時バイパス)
+      P2 present: 銀墨+金のグレード、ビネット、フィルム粒子、デバッグ表示 → 画面
+    [DOM] 音名/Hz/cent 数値、±50 セントスケール、6弦インジケータ(HUD)
+
+  スライダー(全パラメタは state に集約。DEFAULTS + RESET LOOK):
+    bands    縞の密度     — 干渉縞の密度(倍音層はその2倍/4倍)
+    warp     縞のうねり   — 静的 fbm による縞座標の有機ワープ量(波源近傍ほど強い)
+    octv     ストロボ段数 — 倍音バンドの層数(1=基本のみ〜3=1x/2x/4x)
+    trail    残光         — 縞のモーションブラー(EMA)。ドリフト方向の視認性
+    dissolve 縁の溶け     — 画面周縁の縞をノイズで千切って霧に溶かす量
+    grain    粒子         — フィルムグレイン(freeze 時は種固定)
+    gate     入力ゲート   — この dB 未満の入力を無音として扱う
+    calm     針の落ち着き — cent 表示と縞位相の平滑時定数(速い↔落ち着く)
+    a4       A4基準       — 基準ピッチ 432〜446 Hz(0.5 刻み)
+
+  依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00 / WebAudio のみ)
+-->
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="art-input" content="mic" />
+    <title>FABLE5 · うなり — 干渉場ギターチューナー (WebGL2)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #08080a;
+        --ink: #e9e4d6;
+        --muted: rgba(233, 228, 214, 0.6);
+        --gold: #e8b558;
+        --panel: rgba(10, 10, 13, 0.86);
+        --line: rgba(233, 228, 214, 0.14);
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: var(--bg); color: var(--ink);
+        font-family: ui-monospace, "Courier New", Courier, Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+
+      /* ---- HUD(計器の数値層) ---- */
+      #hud {
+        position: fixed; left: 0; right: 0; top: 34%;
+        display: flex; flex-direction: column; align-items: center; gap: 6px;
+        pointer-events: none; user-select: none;
+        text-shadow: 0 0 14px rgba(0, 0, 0, 0.85);
+        transition: opacity 0.4s;
+      }
+      #hud.dim { opacity: 0.55; }
+      #noteName {
+        font-size: clamp(52px, 11vmin, 96px); font-weight: 200; letter-spacing: 0.06em;
+        line-height: 1; color: var(--ink);
+      }
+      #noteName sub { font-size: 0.38em; font-weight: 300; opacity: 0.75; }
+      #centBig { font-size: clamp(16px, 2.8vmin, 24px); font-weight: 300; letter-spacing: 0.08em; }
+      #centBig .sep { opacity: 0.35; margin: 0 0.6em; }
+      #centBig .cent.locked { color: var(--gold); }
+      #hintTxt { font-size: 12px; color: var(--muted); min-height: 1.2em; letter-spacing: 0.08em; }
+      #a4Badge {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 16px; z-index: 5;
+        font-size: 12px; letter-spacing: 0.12em; color: rgba(232, 181, 88, 0.75);
+        pointer-events: none; user-select: none;
+      }
+      #centScale {
+        position: relative; width: min(320px, 72vw); height: 26px; margin-top: 8px;
+      }
+      #centScale .tick {
+        position: absolute; top: 8px; width: 1px; height: 7px;
+        background: rgba(233, 228, 214, 0.35);
+      }
+      #centScale .tick.zero { top: 4px; height: 15px; width: 1.5px; background: rgba(233, 228, 214, 0.7); }
+      #centScale .lab {
+        position: absolute; top: 17px; transform: translateX(-50%);
+        font-size: 9px; color: rgba(233, 228, 214, 0.4);
+      }
+      #centMark {
+        position: absolute; top: 0; left: 50%; width: 3px; height: 14px; border-radius: 2px;
+        background: var(--ink); transform: translateX(-50%);
+        transition: background 0.25s; box-shadow: 0 0 8px rgba(0, 0, 0, 0.9);
+      }
+      #centMark.locked { background: var(--gold); box-shadow: 0 0 10px rgba(232, 181, 88, 0.8); }
+      #centMark.off { opacity: 0.25; }
+
+      /* ---- 弦インジケータ ---- */
+      #stringsRow {
+        position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom));
+        transform: translateX(-50%);
+        display: flex; gap: clamp(14px, 4vw, 34px); align-items: flex-start; z-index: 5;
+      }
+      #stringsRow button {
+        appearance: none; border: none; background: none; cursor: pointer;
+        display: flex; flex-direction: column; align-items: center; gap: 7px;
+        color: rgba(233, 228, 214, 0.42); font: inherit; font-size: 12px;
+        letter-spacing: 0.1em; padding: 4px 2px; min-width: 26px;
+        transition: color 0.25s;
+      }
+      #stringsRow button .dot {
+        width: 7px; height: 7px; border-radius: 50%;
+        background: rgba(233, 228, 214, 0.3);
+        transition: background 0.25s, box-shadow 0.25s;
+      }
+      #stringsRow button .sub { font-size: 8.5px; letter-spacing: 0.14em; opacity: 0.7; min-height: 1em; }
+      #stringsRow button.on { color: var(--ink); }
+      #stringsRow button.on .dot { background: var(--ink); }
+      #stringsRow button.tuned { color: rgba(232, 181, 88, 0.85); }
+      #stringsRow button.tuned .dot { background: var(--gold); }
+      #stringsRow button.on.tuned { color: var(--gold); }
+      #stringsRow button.on.tuned .dot,
+      #stringsRow button.on.manual .dot { box-shadow: 0 0 9px rgba(232, 181, 88, 0.8); }
+      #stringsRow button.on .dot { box-shadow: 0 0 8px rgba(233, 228, 214, 0.55); }
+      #stringsRow button.auto { color: rgba(233, 228, 214, 0.35); font-size: 10px; padding-top: 5px; }
+      #stringsRow button.auto.on { color: rgba(233, 228, 214, 0.8); }
+
+      /* ---- パネル ---- */
+      #togglePanel {
+        position: fixed; top: max(10px, env(safe-area-inset-top)); right: 10px; z-index: 20;
+        appearance: none; border: 1px solid var(--line); background: var(--panel);
+        color: var(--ink); font: inherit; font-size: 15px; border-radius: 8px;
+        width: 38px; height: 38px; cursor: pointer;
+      }
+      #panel {
+        position: fixed; top: 0; right: 0; z-index: 15;
+        width: min(320px, 100vw); max-height: 100%; overflow-y: auto;
+        background: var(--panel); border-left: 1px solid var(--line);
+        padding: 14px 16px 20px; backdrop-filter: blur(6px);
+        transition: transform 0.25s ease;
+      }
+      #panel.collapsed { transform: translateX(105%); pointer-events: none; }
+      #panel h1 { font-size: 13px; font-weight: 500; letter-spacing: 0.12em; margin: 0 26px 2px 0; }
+      #panel .sub { font-size: 10px; color: var(--muted); margin: 0 0 12px; }
+      #closePanel {
+        position: absolute; top: 12px; right: 56px; appearance: none; border: none;
+        background: none; color: var(--muted); font: inherit; font-size: 14px; cursor: pointer;
+      }
+      #panel label.row { display: block; margin: 9px 0; }
+      #panel .lab-line { display: flex; justify-content: space-between; font-size: 11px; }
+      #panel .lab-line output { color: var(--muted); }
+      #panel .hint { font-size: 9.5px; color: var(--muted); opacity: 0.8; }
+      #panel input[type="range"] { width: 100%; accent-color: var(--gold); }
+      #panel select {
+        width: 100%; background: #131318; color: var(--ink); border: 1px solid var(--line);
+        border-radius: 6px; font: inherit; font-size: 11px; padding: 5px;
+      }
+      #panel .selrow { margin: 10px 0; font-size: 11px; }
+      #panel .selrow span { display: block; margin-bottom: 3px; }
+      #panel .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+      #panel .btns button {
+        appearance: none; border: 1px solid var(--line); background: #131318; color: var(--ink);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.06em; border-radius: 6px;
+        padding: 7px 10px; cursor: pointer;
+      }
+      #panel .chk { display: flex; align-items: center; gap: 7px; font-size: 11px; margin: 10px 0; }
+      #readout { font-size: 10px; color: var(--muted); margin-top: 12px; line-height: 1.6; }
+      .badge {
+        display: inline-block; font-size: 9px; color: var(--muted); border: 1px solid var(--line);
+        border-radius: 4px; padding: 2px 6px; margin-top: 8px; letter-spacing: 0.05em;
+      }
+
+      /* ---- オーバーレイ ---- */
+      #overlay {
+        position: fixed; inset: 0; z-index: 30; display: flex; align-items: center;
+        justify-content: center; background: rgba(5, 5, 7, 0.82); backdrop-filter: blur(4px);
+      }
+      #overlay.hidden { display: none; pointer-events: none; }
+      .overlay-card {
+        max-width: 420px; margin: 20px; padding: 26px 28px;
+        border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+      }
+      .overlay-card h2 { font-size: 17px; font-weight: 400; letter-spacing: 0.1em; margin: 0 0 10px; }
+      .overlay-card p { font-size: 12px; line-height: 1.8; color: var(--muted); margin: 0 0 16px; }
+      .overlay-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+      .overlay-btns button {
+        appearance: none; border: 1px solid var(--line); background: #131318; color: var(--ink);
+        font: inherit; font-size: 12px; border-radius: 8px; padding: 10px 14px; cursor: pointer;
+      }
+      .overlay-btns button.primary { border-color: rgba(232, 181, 88, 0.7); color: var(--gold); }
+      @media (max-width: 719px) {
+        #hud { top: 26%; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gl" aria-label="うなり — 干渉縞がうなり周波数で流れるギターチューナー"></canvas>
+
+    <div id="hud" class="dim" aria-live="off">
+      <div id="noteName">—</div>
+      <div id="centBig">&nbsp;</div>
+      <div id="centScale"></div>
+      <div id="hintTxt">弦を1本だけ鳴らしてください</div>
+    </div>
+    <div id="a4Badge">A4 = 440</div>
+
+    <div id="stringsRow" aria-label="弦の選択"></div>
+
+    <button id="togglePanel" type="button" aria-label="コントローラーを開閉">☰</button>
+    <section id="panel" class="collapsed" aria-label="うなり controls"></section>
+
+    <div id="overlay" class="hidden" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle"></h2>
+        <p id="overlayText"></p>
+        <div class="overlay-btns">
+          <button id="micStart" type="button" class="primary">マイクを許可して始める</button>
+          <button id="micSkip" type="button">マイクなしでデモを眺める</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      "use strict";
+      /* ================================================================
+         うなり — 干渉場ギターチューナー
+         構成: [0]定数と状態 [1]UI構築 [2]WebGL [3]音響解析 [4]fakesource
+               [5]チューナー状態機械 [6]メインループ
+         ================================================================ */
+
+      // ---------- [0] 定数・URLパラメータ・状態 ----------
+      const QUERY = new URLSearchParams(location.search);
+      const FREEZE = QUERY.get("freeze") === "1";
+      // freeze は決定的静止フレームが目的なので fakesource を強制する
+      const FAKESOURCE = FREEZE || QUERY.get("fakesource") === "1";
+      const TONE_STRING = QUERY.get("tonestring"); // 1(高E)〜6(低E)
+      const TONE_CENT = parseFloat(QUERY.get("tonecent") || "0");
+      const TONE_ENV = QUERY.get("toneenv") === "1";
+      const TONE_MODE = !FAKESOURCE && TONE_STRING !== null;
+      const FREEZE_T = 12.4; // 事前ロール秒数(スクリプトのロック中の瞬間)
+
+      const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+      // MIDI ノート番号(低→高)。f = a4 · 2^((m-69)/12)
+      const TUNINGS = [
+        { id: "regular",  label: "Regular (E A D G B E)",   midi: [40, 45, 50, 55, 59, 64] },
+        { id: "dropd",    label: "Drop D (D A D G B E)",    midi: [38, 45, 50, 55, 59, 64] },
+        { id: "halfdown", label: "半音下げ (E♭ A♭ D♭ G♭ B♭ E♭)", midi: [39, 44, 49, 54, 58, 63] },
+        { id: "dadgad",   label: "DADGAD (D A D G A D)",    midi: [38, 45, 50, 55, 57, 62] },
+        { id: "openg",    label: "Open G (D G D G B D)",    midi: [38, 43, 50, 55, 59, 62] },
+      ];
+
+      const DEFAULTS = {
+        bands: 14,     // 縞の密度
+        warp: 0.35,    // 縞のうねり
+        octv: 3,       // ストロボ段数(倍音バンド層数)
+        trail: 0.45,   // 残光(EMA)
+        dissolve: 0.55,// 縁の溶け
+        grain: 0.35,   // 粒子
+        gate: -54,     // 入力ゲート dB
+        calm: 0.5,     // 平滑時定数
+        a4: 440,       // 基準ピッチ
+      };
+      // [key, ラベル, ヒント, min, max, step]
+      const SLIDERS = [
+        ["bands", "縞の密度", "干渉縞の密度(倍音層は2倍/4倍)", 6, 24, 1],
+        ["warp", "縞のうねり", "fbm による縞座標の有機ワープ量(波源近傍ほど強い)", 0, 1, 0.01],
+        ["octv", "ストロボ段数", "倍音バンドの層数(1x/2x/4x)", 1, 3, 1],
+        ["trail", "残光", "縞のモーションブラー。ドリフト方向の視認性", 0, 0.92, 0.01],
+        ["dissolve", "縁の溶け", "周縁の縞を千切って霧へ溶かす量", 0, 1, 0.01],
+        ["grain", "粒子", "フィルムグレイン(freeze では種固定)", 0, 1, 0.01],
+        ["gate", "入力ゲート(dB)", "この音量未満は無音として扱う", -72, -30, 1],
+        ["calm", "針の落ち着き", "cent と縞位相の平滑(速い↔落ち着く)", 0, 1, 0.01],
+        ["a4", "A4基準(Hz)", "コンサートピッチ 432〜446", 432, 446, 0.5],
+      ];
+
+      const state = Object.assign({}, DEFAULTS, {
+        tuning: 0,        // TUNINGS index
+        manualString: -1, // -1 = AUTO
+        pauseAnim: false,
+        debugView: 0,
+      });
+
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+      if (reducedMotion.matches) state.pauseAnim = true;
+
+      // ---------- チューナーの実行時状態 ----------
+      const tuner = {
+        mode: FAKESOURCE ? "fake" : TONE_MODE ? "tone" : "mic",
+        listening: false,   // 音響経路が生きているか
+        soundOn: false,     // ゲートを越えた入力があるか
+        f0: 0,              // 計測基本周波数(平滑後)
+        conf: 0,            // 1 - CMNDF 谷値
+        rmsDb: -120,
+        stringIdx: -1,      // 0..5(低→高)。-1 = クロマチック/無し
+        targetMidi: -1,
+        targetHz: 0,
+        cent: 0,            // 平滑後の表示 cent
+        centJit: 99,        // cent のばらつき(σ)
+        beatHz: 0,          // f0 - target(うなり周波数)
+        phi: 0,             // 縞位相(2π·∫Δf dt)
+        lockT: 0,           // ロック連続時間
+        locked: false,
+        lockGlow: 0,        // 0..1(金の量)
+        activeEnv: 0,       // 発音包絡 0..1
+        idleEnv: 1,         // 無音包絡 0..1
+        tunedMask: 0,       // このセッションでロック済みの弦 bit
+        fineUsed: false,    // 直交復調の微調値を採用中か
+      };
+      // 機械検証フック: 毎フレーム更新(実 DSP の計測値)
+      window.__tuner = tuner;
+
+      const freqOfMidi = (m) => state.a4 * Math.pow(2, (m - 69) / 12);
+      const noteLabel = (m) => NOTE_NAMES[((m % 12) + 12) % 12] + Math.floor(m / 12 - 1);
+
+      // ---------- [1] UI 構築 ----------
+      const panel = document.getElementById("panel");
+      const fmtVal = (k, v) => (k === "a4" ? v.toFixed(1) : k === "gate" ? String(v) : (+v).toFixed(2).replace(/\.?0+$/, "") || "0");
+      panel.innerHTML = `
+        <button id="closePanel" type="button" aria-label="閉じる">✕</button>
+        <h1>うなり — 干渉場チューナー</h1>
+        <p class="sub">縞の流れ=うなり。静止=合致。昇る=高い/沈む=低い</p>
+        <div class="selrow"><span>チューニング</span>
+          <select id="presetSel" aria-label="チューニングプリセット">
+            ${TUNINGS.map((t, i) => `<option value="${i}">${t.label}</option>`).join("")}
+          </select>
+        </div>
+        <div class="selrow"><span>デバッグ表示</span>
+          <select id="debugView" aria-label="デバッグ表示">
+            <option value="0">0 作品</option>
+            <option value="1">1 干渉場(素)</option>
+            <option value="2">2 入力メータ</option>
+            <option value="3">3 位相ダイヤル</option>
+          </select>
+        </div>
+        ${SLIDERS.map(([key, label, hint, min, max, step]) => `
+          <label class="row">
+            <div class="lab-line"><span>${label}</span><output id="${key}Out">${fmtVal(key, state[key])}</output></div>
+            <input id="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${state[key]}" aria-label="${label}" />
+            <div class="hint">${hint}</div>
+          </label>`).join("")}
+        <label class="chk"><input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          アニメ停止(計測数値は動き続けます)</label>
+        <div class="btns">
+          <button id="savePng" type="button">SAVE PNG</button>
+          <button id="resetLook" type="button">RESET LOOK</button>
+          <button id="micBtn" type="button">MIC 再試行</button>
+        </div>
+        <div id="readout">FPS -- / f0 -- / 入力 -- dB</div>
+        <span class="badge" id="glBadge">WebGL2 · beat interference · YIN + lock-in · mic</span>
+      `;
+
+      for (const [key] of SLIDERS) {
+        const el = document.getElementById(key);
+        el.addEventListener("input", () => {
+          state[key] = parseFloat(el.value);
+          document.getElementById(key + "Out").textContent = fmtVal(key, state[key]);
+          if (key === "a4") retarget();
+        });
+      }
+      document.getElementById("presetSel").addEventListener("change", (e) => {
+        state.tuning = parseInt(e.target.value, 10);
+        tuner.tunedMask = 0;
+        buildStringsRow();
+        retarget();
+      });
+      document.getElementById("debugView").addEventListener("change", (e) => {
+        state.debugView = parseInt(e.target.value, 10);
+      });
+      document.getElementById("pauseAnim").addEventListener("change", (e) => {
+        state.pauseAnim = e.target.checked;
+      });
+      document.getElementById("resetLook").addEventListener("click", () => {
+        for (const [key] of SLIDERS) {
+          state[key] = DEFAULTS[key];
+          const el = document.getElementById(key);
+          el.value = String(DEFAULTS[key]);
+          document.getElementById(key + "Out").textContent = fmtVal(key, state[key]);
+        }
+        retarget();
+      });
+      document.getElementById("savePng").addEventListener("click", () => {
+        const a = document.createElement("a");
+        a.download = "fable5_unari.png";
+        a.href = canvas.toDataURL("image/png");
+        a.click();
+      });
+
+      const togglePanelBtn = document.getElementById("togglePanel");
+      const setPanel = (open) => {
+        panel.classList.toggle("collapsed", !open);
+        togglePanelBtn.setAttribute("aria-expanded", String(open));
+      };
+      togglePanelBtn.addEventListener("click", () => setPanel(panel.classList.contains("collapsed")));
+      document.getElementById("closePanel").addEventListener("click", () => setPanel(false));
+      if (window.innerWidth >= 720) setPanel(true);
+
+      // ---- HUD ----
+      const hud = document.getElementById("hud");
+      const noteNameEl = document.getElementById("noteName");
+      const centBigEl = document.getElementById("centBig");
+      const a4BadgeEl = document.getElementById("a4Badge");
+      const hintTxtEl = document.getElementById("hintTxt");
+      const centScaleEl = document.getElementById("centScale");
+      for (let c = -50; c <= 50; c += 10) {
+        const t = document.createElement("div");
+        t.className = "tick" + (c === 0 ? " zero" : "");
+        t.style.left = `${50 + c}%`;
+        centScaleEl.appendChild(t);
+        if (c === -50 || c === 0 || c === 50) {
+          const l = document.createElement("div");
+          l.className = "lab";
+          l.style.left = `${50 + c}%`;
+          l.textContent = c === 0 ? "0" : (c > 0 ? "+" : "") + c;
+          centScaleEl.appendChild(l);
+        }
+      }
+      const centMark = document.createElement("div");
+      centMark.id = "centMark";
+      centScaleEl.appendChild(centMark);
+
+      // ---- 弦インジケータ ----
+      const stringsRow = document.getElementById("stringsRow");
+      function buildStringsRow() {
+        const midi = TUNINGS[state.tuning].midi;
+        stringsRow.innerHTML = "";
+        const auto = document.createElement("button");
+        auto.type = "button";
+        auto.className = "auto";
+        auto.innerHTML = `<span class="dot"></span><span>AUTO</span><span class="sub"></span>`;
+        auto.setAttribute("aria-label", "弦の自動判別");
+        auto.addEventListener("click", () => { state.manualString = -1; refreshStringsRow(); });
+        stringsRow.appendChild(auto);
+        // 同名弦の区別(低E/高E など)は sub ラベルで
+        const names = midi.map((m) => NOTE_NAMES[((m % 12) + 12) % 12]);
+        midi.forEach((m, i) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          const dup = names.filter((n) => n === names[i]).length > 1;
+          const sub = dup ? (i <= 2 ? "LOW" : "HIGH") : "";
+          b.innerHTML = `<span class="dot"></span><span>${names[i]}</span><span class="sub">${sub}</span>`;
+          b.setAttribute("aria-label", `${noteLabel(m)} を手動選択`);
+          b.addEventListener("click", () => { state.manualString = i; refreshStringsRow(); });
+          stringsRow.appendChild(b);
+        });
+        refreshStringsRow();
+      }
+      function refreshStringsRow() {
+        const btns = stringsRow.querySelectorAll("button");
+        btns.forEach((b, k) => {
+          b.classList.remove("on", "tuned", "manual");
+          if (k === 0) {
+            if (state.manualString < 0) b.classList.add("on");
+          } else {
+            const i = k - 1;
+            if (tuner.tunedMask & (1 << i)) b.classList.add("tuned");
+            if (state.manualString === i) b.classList.add("manual", "on");
+            else if (state.manualString < 0 && tuner.stringIdx === i && tuner.soundOn) b.classList.add("on");
+          }
+        });
+      }
+      buildStringsRow();
+
+      // ---- オーバーレイ ----
+      const overlay = document.getElementById("overlay");
+      const overlayTitle = document.getElementById("overlayTitle");
+      const overlayText = document.getElementById("overlayText");
+      const micStartBtn = document.getElementById("micStart");
+      const micSkipBtn = document.getElementById("micSkip");
+      function showOverlay(title, text, showStart) {
+        overlayTitle.textContent = title;
+        overlayText.textContent = text;
+        micStartBtn.style.display = showStart ? "" : "none";
+        overlay.classList.remove("hidden");
+      }
+      function hideOverlay() { overlay.classList.add("hidden"); }
+
+      // ---------- [2] WebGL ----------
+      const canvas = document.getElementById("gl");
+      const gl = canvas.getContext("webgl2", {
+        antialias: false,
+        alpha: false,
+        preserveDrawingBuffer: true,
+      });
+      if (!gl) {
+        showOverlay("WebGL2 が利用できません", "このブラウザ/端末では WebGL2 コンテキストを作成できませんでした。別のブラウザでお試しください。", false);
+        throw new Error("WebGL2 unavailable");
+      }
+
+      const VS = `#version 300 es
+      layout(location=0) in vec2 aPos;
+      out vec2 vUv;
+      void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+      // 共有 GLSL: pcg 系ハッシュ + 値ノイズ + fbm(シードに時間を混ぜない)
+      const NOISE_GLSL = `
+      float hash12(vec2 p){
+        uvec2 q = uvec2(ivec2(floor(p))) * uvec2(1597334673u, 3812015801u);
+        uint n = (q.x ^ q.y) * 1597334673u;
+        n = n ^ (n >> 16); n = n * 2654435769u; n = n ^ (n >> 16);
+        return float(n) * (1.0 / 4294967295.0);
+      }
+      float vnoise(vec2 p){
+        vec2 i = floor(p), f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        float a = hash12(i);
+        float b = hash12(i + vec2(1.0, 0.0));
+        float c = hash12(i + vec2(0.0, 1.0));
+        float d = hash12(i + vec2(1.0, 1.0));
+        return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+      }
+      float fbm(vec2 p){
+        float v = 0.0, amp = 0.5;
+        for (int i = 0; i < 4; i++) {
+          v += amp * vnoise(p);
+          p = p * 2.03 + vec2(19.7, 7.3);
+          amp *= 0.5;
+        }
+        return v;
+      }`;
+
+      // P1: 干渉場 + 残光 EMA(ping-pong)。出力 R=銀縞 G=金 B=霧
+      const FS_FIELD = `#version 300 es
+      precision highp float;
+      in vec2 vUv;
+      out vec4 outColor;
+      uniform vec2 uRes;
+      uniform sampler2D uPrev;
+      uniform float uTime;      // 装飾時間(freeze で停止)
+      uniform float uPhi;       // 縞位相(rad)。うなりの積分
+      uniform float uBands;
+      uniform float uWarp;
+      uniform int   uOctv;
+      uniform float uTrail;     // 0 = バイパス(freeze)
+      uniform float uDissolve;
+      uniform float uActiveEnv; // 発音包絡
+      uniform float uIdleEnv;   // 無音包絡
+      uniform float uConf;
+      uniform float uCentAbs;   // |cent| clamp 60
+      uniform float uLockGlow;  // 金の量
+      ${NOISE_GLSL}
+      const float TAU = 6.28318530718;
+      void main(){
+        float aspect = uRes.x / max(uRes.y, 1.0);
+        vec2 p = (vUv - 0.5) * vec2(aspect, 1.0);
+
+        // --- 二源干渉の幾何(不変量#1/#3) ---
+        // 左の波源 = 基準音、右の波源 = 弾いた音。行路差 pathD の等値線
+        // (ハイパーボラ)が干渉縞になる。中央付近は縦の縞、波源のそばでは
+        // 同心円へ巻き込む — 幾何そのものが二波の干渉である。
+        float fx = 0.62 * max(aspect, 0.62);
+        float rL = length(p - vec2(-fx, 0.0));
+        float rR = length(p - vec2(fx, 0.0));
+        float pathD = (rR - rL) / (2.0 * fx);   // -1..1 正規化行路差
+        float nearF = 1.0 - smoothstep(0.0, 0.6, min(rL, rR)); // 波源への近さ
+
+        // 有機ワープ: 波源近傍ほど強く乱す(静的 fbm。時間はシードに混ぜない)
+        float w1 = fbm(vUv * vec2(2.3, 2.6) + vec2(7.31, 2.17));
+        float tCoord = pathD * uBands
+          + uWarp * (w1 - 0.5) * (0.3 + 1.4 * nearF);
+
+        // --- 倍音バンド 1x/2x/4x。位相は 2^j 倍で進む(ストロボ原理) ---
+        // phi 増加(シャープ)で縞は右の波源(=自分の音)側へ流れる
+        float acc = 0.0, wsum = 1e-4;
+        for (int j = 0; j < 3; j++) {
+          if (j >= uOctv) break;
+          float hm = exp2(float(j));
+          float c01 = 0.5 + 0.5 * cos(TAU * tCoord * hm - uPhi * hm);
+          // 剃刀の芯 + かすかなハロー
+          float core = smoothstep(0.82, 0.99, c01);
+          float halo = smoothstep(0.55, 0.96, c01) * 0.24;
+          float axn = abs(pathD);
+          float wj = j == 0 ? 1.0
+                   : j == 1 ? 0.85 * smoothstep(0.55, 0.12, axn)
+                   : 0.7 * smoothstep(0.3, 0.05, axn);
+          acc += (core + halo) * wj;
+          wsum += wj;
+        }
+        float fringe = min(acc / wsum * 1.5, 1.25);
+
+        // --- 近いほど鮮明(不変量#4) ---
+        float crisp = clamp(uConf, 0.0, 1.0) * (0.42 + 0.58 * exp(-uCentAbs / 28.0));
+
+        // --- 繊維質: 縞に沿って走る細いフィラメント(不変量#3) ---
+        // 縞に沿う座標 = rL+rR(楕円族)、横切る座標 = tCoord
+        float alongE = (rL + rR) * 3.0;
+        float fiber = 0.42 + 0.58 * fbm(vec2(alongE * 4.0, tCoord * 2.6));
+        float fine = 0.55 + 0.45 * vnoise(vec2(alongE * 42.0, tCoord * 7.0));
+        float mott = fiber * fine * 1.25;
+
+        // --- 包絡: 上下のビネット + 波源域はノイズで千切れて霧へ ---
+        float env = 1.0 - 0.45 * smoothstep(0.3, 0.62, abs(p.y));
+        float tear = fbm(vUv * 6.5 + vec2(0.0, uTime * 0.012));
+        float gateEdge = smoothstep(uDissolve * 0.72, uDissolve * 0.72 + 0.3,
+                                    tear * 0.8 + (1.0 - nearF) * 0.75);
+        env *= gateEdge;
+
+        // --- 中央の暗い柱(計器の数値が座る場所) ---
+        float ax = abs(p.x);
+        float gap = 1.0 - 0.82 * exp(-ax * ax * 140.0);
+        float silver = fringe * crisp * mott * env * gap * uActiveEnv;
+
+        // --- 無音時: 薄霧の呼吸(不変量#5) ---
+        float mist = fbm(vUv * 2.0 + vec2(uTime * 0.021, -uTime * 0.013));
+        float breath = 0.5 + 0.5 * sin(uTime * 0.45 + mist * 5.0);
+        float idleMist = uIdleEnv * env * (0.05 + 0.055 * mist + 0.03 * breath);
+        // 無音でも縞の気配だけ薄く残す(眠っている計器)
+        silver += uIdleEnv * fringe * mott * env * gap * 0.06;
+
+        // --- 金は中央の縦軸だけ(不変量#2): 合致に近づくほど灯る ---
+        // 剃刀のヘアライン + ごく淡い広がり(柱にしない)
+        float axisLine = exp(-ax * ax * 42000.0) + exp(-ax * ax * 3200.0) * 0.22;
+        float axisVis = smoothstep(0.07, 0.18, abs(p.y)) * (1.0 - smoothstep(0.44, 0.56, abs(p.y)));
+        float axisFlicker = 0.78 + 0.22 * fbm(vec2(p.y * 5.0 + 3.0, uTime * 0.05));
+        float closeGlow = exp(-uCentAbs / 6.0);
+        float lit = max(closeGlow * 0.85, uLockGlow);
+        float gold = axisLine * axisVis * axisFlicker
+                   * (0.12 + 0.88 * lit) * (0.15 + 0.85 * uActiveEnv);
+        // ロック時: 軸ぎわの縞だけがほんのり温まる(gap の内側は温めない)
+        gold += uLockGlow * (fringe * env * gap * 0.24 * exp(-ax * ax * 55.0)
+                             + exp(-ax * ax * 5000.0) * axisVis * 0.28);
+
+        vec3 cur = vec3(silver, gold, idleMist);
+        // --- 残光: EMA(有界。max 合成はしない → whiteout 恒久回避) ---
+        vec3 prev = texture(uPrev, vUv).rgb;
+        vec3 col = mix(cur, prev, uTrail);
+        outColor = vec4(col, 1.0);
+      }`;
+
+      // P2: 提示。銀墨+金グレード、ビネット、粒子、デバッグ表示
+      const FS_SHOW = `#version 300 es
+      precision highp float;
+      in vec2 vUv;
+      out vec4 outColor;
+      uniform sampler2D uTex;
+      uniform vec2 uRes;
+      uniform float uGrainAmt;
+      uniform float uSeed;      // freeze では固定
+      uniform int   uDebug;
+      uniform vec4  uMeters;    // level, conf, |cent|/50, lock
+      uniform float uPhi;
+      ${NOISE_GLSL}
+      const float TAU = 6.28318530718;
+      void main(){
+        vec3 field = texture(uTex, vUv).rgb;
+        float aspect = uRes.x / max(uRes.y, 1.0);
+        vec2 p = (vUv - 0.5) * vec2(aspect, 1.0);
+
+        if (uDebug == 1) { // 干渉場(素): 銀チャネルの素通し
+          outColor = vec4(vec3(field.r), 1.0);
+          return;
+        }
+
+        // 銀墨(わずかに暖かい)と金のグレード。純白手前で頭打ち(≤0.93)
+        vec3 bg = vec3(0.024, 0.024, 0.030);
+        vec3 silverC = vec3(0.86, 0.84, 0.78);
+        vec3 goldC = vec3(0.93, 0.72, 0.34);
+        vec3 col = bg
+          + silverC * min(field.r, 1.0) * 0.88
+          + vec3(0.55, 0.58, 0.62) * field.b
+          + goldC * min(field.g, 1.2) * 0.9;
+
+        // ビネット
+        col *= 1.0 - 0.38 * smoothstep(0.45, 1.15, length(p));
+
+        // フィルム粒子(freeze では uSeed 固定 → 決定的)
+        float g = hash12(gl_FragCoord.xy + vec2(uSeed * 61.7, uSeed * 13.3)) - 0.5;
+        col += g * uGrainAmt * 0.05 * (0.35 + field.r);
+
+        if (uDebug == 2) { // 入力メータ: 左下にバー4本
+          vec2 q = vUv * uRes;
+          for (int i = 0; i < 4; i++) {
+            float y0 = 22.0 + float(i) * 16.0;
+            float v = uMeters[i];
+            if (q.y > y0 && q.y < y0 + 9.0 && q.x > 20.0 && q.x < 20.0 + 180.0 * clamp(v, 0.0, 1.0)) {
+              col = mix(col, vec3(0.9, 0.85, 0.6), 0.85);
+            }
+          }
+        }
+        if (uDebug == 3) { // 位相ダイヤル: 中央の針
+          vec2 dir = vec2(sin(uPhi), cos(uPhi));
+          float along = dot(p, dir);
+          float side = abs(dot(p, vec2(-dir.y, dir.x)));
+          if (along > 0.0 && along < 0.24 && side < 0.004) col = vec3(0.95, 0.8, 0.4);
+        }
+
+        col = clamp(col, 0.0, 0.93);
+        outColor = vec4(col, 1.0);
+      }`;
+
+      function compile(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+          throw new Error("shader: " + gl.getShaderInfoLog(s));
+        }
+        return s;
+      }
+      function program(fsSrc) {
+        const p = gl.createProgram();
+        gl.attachShader(p, compile(gl.VERTEX_SHADER, VS));
+        gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+        gl.linkProgram(p);
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+          throw new Error("link: " + gl.getProgramInfoLog(p));
+        }
+        return p;
+      }
+      const progField = program(FS_FIELD);
+      const progShow = program(FS_SHOW);
+      const uni = (p, n) => gl.getUniformLocation(p, n);
+
+      // fullscreen triangle
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+      // 残光 ping-pong(RGBA8)
+      let texA = null, texB = null, fboA = null, fboB = null;
+      let W = 0, H = 0;
+      function makeTarget() {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        const fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+        return { tex, fbo };
+      }
+      function resize() {
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        const w = Math.max(2, Math.round(canvas.clientWidth * dpr));
+        const h = Math.max(2, Math.round(canvas.clientHeight * dpr));
+        if (w === W && h === H) return;
+        W = w; H = h;
+        canvas.width = W; canvas.height = H;
+        const a = makeTarget(), b = makeTarget();
+        texA = a.tex; fboA = a.fbo; texB = b.tex; fboB = b.fbo;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboA);
+        gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboB);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      }
+      window.addEventListener("resize", resize);
+      resize();
+
+      // ---------- [3] 音響解析(実マイク / tone 注入) ----------
+      let audioCtx = null, analyser = null, toneNodes = null;
+      let fullBuf = null, dsBuf = null;
+      const FFT_SIZE = 8192;
+      const DS = 4; // 間引き率
+
+      async function startMic() {
+        try {
+          if (!window.isSecureContext) {
+            showOverlay("HTTPS が必要です",
+              "マイク API はセキュアコンテキスト(https:// または localhost)でのみ動きます。GitHub Pages などの https 配信で開いてください。「マイクなしでデモを眺める」は使えます。", false);
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            showOverlay("マイクが利用できません",
+              "このブラウザにはマイク入力 API がありません。デモ表示は下のボタンからどうぞ。", false);
+            return;
+          }
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false, // チューナーには生波形が必要
+              noiseSuppression: false,
+              autoGainControl: false,
+              channelCount: 1,
+            },
+          });
+          setupAnalysis((ctx) => ctx.createMediaStreamSource(stream));
+          tuner.mode = "mic";
+          tuner.listening = true;
+          hideOverlay();
+        } catch (err) {
+          const name = err && err.name;
+          if (name === "NotAllowedError" || name === "SecurityError") {
+            showOverlay("マイクの権限が拒否されました",
+              "ブラウザのサイト設定でマイクを許可して、もう一度お試しください。パネルの「MIC 再試行」からも再挑戦できます。", true);
+          } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+            showOverlay("マイクが見つかりません",
+              "接続されたマイクがありません。外付けマイクを挿すか、デモ表示をどうぞ。", true);
+          } else {
+            showOverlay("マイクを開けませんでした",
+              String(err && err.message || err), true);
+          }
+        }
+      }
+
+      function setupAnalysis(makeSource) {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        const src = makeSource(audioCtx);
+        const hp = audioCtx.createBiquadFilter();
+        hp.type = "highpass"; hp.frequency.value = 35; hp.Q.value = 0.7;
+        const lp = audioCtx.createBiquadFilter();
+        lp.type = "lowpass"; lp.frequency.value = 1800; lp.Q.value = 0.7;
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = FFT_SIZE;
+        analyser.smoothingTimeConstant = 0;
+        src.connect(hp); hp.connect(lp); lp.connect(analyser);
+        // グラフを駆動するためミュートで destination へ
+        const mute = audioCtx.createGain();
+        mute.gain.value = 0;
+        analyser.connect(mute); mute.connect(audioCtx.destination);
+        fullBuf = new Float32Array(FFT_SIZE);
+        dsBuf = new Float32Array(Math.floor(FFT_SIZE / DS));
+      }
+
+      // tone 注入(実 DSP の機械検証): 倍音つき合成ギター音
+      function startTone() {
+        const sIdx = Math.max(0, Math.min(5, 6 - parseInt(TONE_STRING, 10))); // 6=低E → idx0
+        const targetHz = freqOfMidi(TUNINGS[state.tuning].midi[sIdx]);
+        const hz = targetHz * Math.pow(2, TONE_CENT / 1200);
+        setupAnalysis((ctx) => {
+          const osc = ctx.createOscillator();
+          // 弾弦らしい倍音列(基音+7倍音まで減衰)
+          const nH = 8;
+          const re = new Float32Array(nH + 1);
+          const im = new Float32Array(nH + 1);
+          const amps = [0, 1, 0.55, 0.33, 0.22, 0.14, 0.09, 0.055, 0.03];
+          for (let i = 1; i <= nH; i++) im[i] = amps[i];
+          osc.setPeriodicWave(ctx.createPeriodicWave(re, im, { disableNormalization: false }));
+          osc.frequency.value = hz;
+          const g = ctx.createGain();
+          g.gain.value = 0.25;
+          if (TONE_ENV) {
+            const t0 = ctx.currentTime;
+            for (let k = 0; k < 40; k++) {
+              const t = t0 + k * 2.5;
+              g.gain.setValueAtTime(0.32, t);
+              g.gain.exponentialRampToValueAtTime(0.02, t + 2.4);
+            }
+          }
+          osc.connect(g);
+          osc.start();
+          toneNodes = { osc, g };
+          return g;
+        });
+        state.manualString = sIdx; // 検証は対象弦固定で
+        refreshStringsRow();
+        tuner.mode = "tone";
+        tuner.listening = true;
+        hideOverlay();
+        // 自動再生ポリシーで止まっていたらクリックで再開
+        if (audioCtx.state === "suspended") {
+          showOverlay("クリックで開始", "自動再生がブロックされました。ボタンを押すと合成音の注入が始まります。", true);
+        }
+      }
+
+      document.getElementById("micBtn").addEventListener("click", () => {
+        if (TONE_MODE) { if (audioCtx) audioCtx.resume(); hideOverlay(); }
+        else startMic();
+      });
+      micStartBtn.addEventListener("click", () => {
+        if (TONE_MODE) { if (audioCtx) audioCtx.resume(); else startTone(); hideOverlay(); }
+        else startMic();
+      });
+      micSkipBtn.addEventListener("click", () => {
+        tuner.mode = "fake";
+        tuner.listening = true;
+        fakeT = 0;
+        hideOverlay();
+      });
+
+      // ---- YIN(CMNDF + 放物線補間) ----
+      // 戻り値: {f0, conf} または null
+      const yinScratch = { d: null, cm: null };
+      function yinPitch(buf, sr) {
+        const n = buf.length;
+        const tauMax = Math.min(n >> 1, Math.ceil(sr / 58));
+        const tauMin = Math.max(2, Math.floor(sr / 900));
+        const w = n - tauMax;
+        if (!yinScratch.d || yinScratch.d.length < tauMax + 2) {
+          yinScratch.d = new Float32Array(tauMax + 2);
+          yinScratch.cm = new Float32Array(tauMax + 2);
+        }
+        const d = yinScratch.d, cm = yinScratch.cm;
+        d[0] = 0; cm[0] = 1;
+        let running = 0;
+        for (let tau = 1; tau <= tauMax; tau++) {
+          let sum = 0;
+          for (let i = 0; i < w; i++) {
+            const diff = buf[i] - buf[i + tau];
+            sum += diff * diff;
+          }
+          d[tau] = sum;
+          running += sum;
+          cm[tau] = running > 0 ? (sum * tau) / running : 1;
+        }
+        // 絶対しきい値を最初に割る局所最小(標準 YIN)
+        const TH = 0.15;
+        let tauEst = -1;
+        for (let tau = tauMin + 1; tau < tauMax; tau++) {
+          if (cm[tau] < TH && cm[tau] <= cm[tau + 1] && cm[tau] <= cm[tau - 1]) { tauEst = tau; break; }
+        }
+        if (tauEst < 0) {
+          let best = 1e9;
+          for (let tau = tauMin; tau <= tauMax; tau++) {
+            if (cm[tau] < best) { best = cm[tau]; tauEst = tau; }
+          }
+          if (best > 0.4) return null; // 周期性なし
+        }
+        // オクターブ検定: 2τ の谷が明確に深ければ低い方(1オクターブ下)へ
+        const t2 = tauEst * 2;
+        if (t2 + 1 <= tauMax) {
+          let c2 = Math.min(cm[t2], cm[Math.max(2, t2 - 1)], cm[Math.min(tauMax, t2 + 1)]);
+          if (c2 < cm[tauEst] - 0.05 && c2 < 0.2) tauEst = t2;
+        }
+        // 放物線補間
+        let tF = tauEst;
+        if (tauEst > tauMin && tauEst < tauMax) {
+          const a = cm[tauEst - 1], b = cm[tauEst], c = cm[tauEst + 1];
+          const den = a - 2 * b + c;
+          if (Math.abs(den) > 1e-9) tF = tauEst + 0.5 * (a - c) / den;
+        }
+        return { f0: sr / tF, conf: 1 - cm[tauEst] };
+      }
+
+      // ---- 直交復調(ロックイン): 基準周波数 fr とのずれ Δf を位相差から ----
+      // buf 前半/後半を Hann 窓つきで e^{-iωt} 復調し、位相の傾き = Δf。
+      // fr には YIN の粗推定値を渡す(ずれが常に微小 → 位相折り返しが原理的に
+      // 起きない)。分解能 ~0.1 cent。Hann 窓は隣接倍音の漏れ込みを抑える。
+      let hannWin = null;
+      function lockinBeat(buf, fr, sr) {
+        const n = buf.length;
+        const half = n >> 1;
+        if (!hannWin || hannWin.length !== half) {
+          hannWin = new Float32Array(half);
+          for (let i = 0; i < half; i++) {
+            hannWin[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (half - 1));
+          }
+        }
+        const wStep = (2 * Math.PI * fr) / sr;
+        const cosS = Math.cos(wStep), sinS = Math.sin(wStep);
+        let cr = 1, ci = 0;
+        let re1 = 0, im1 = 0, re2 = 0, im2 = 0;
+        for (let i = 0; i < n; i++) {
+          const inHalf1 = i < half;
+          const x = buf[i] * hannWin[inHalf1 ? i : i - half];
+          if (inHalf1) { re1 += x * cr; im1 -= x * ci; }
+          else { re2 += x * cr; im2 -= x * ci; }
+          const nr = cr * cosS - ci * sinS;
+          ci = cr * sinS + ci * cosS;
+          cr = nr;
+        }
+        const a1 = Math.hypot(re1, im1), a2 = Math.hypot(re2, im2);
+        if (a1 < 1e-4 || a2 < 1e-4) return null;
+        let dth = Math.atan2(im2, re2) - Math.atan2(im1, re1);
+        while (dth > Math.PI) dth -= 2 * Math.PI;
+        while (dth < -Math.PI) dth += 2 * Math.PI;
+        const dtSec = half / sr;
+        return { df: dth / (2 * Math.PI * dtSec), amp: (a1 + a2) / n };
+      }
+
+      // ---- 計測の平滑と履歴 ----
+      const f0Hist = [];      // 生 f0(中央値フィルタ用)
+      const centHist = [];    // 平滑 cent の履歴(ジッタ計測)
+      let centSm = null;      // EMA state
+      let stringVote = -2, stringVoteN = 0;
+
+      function analyzeAudio(dt) {
+        if (!analyser) return;
+        analyser.getFloatTimeDomainData(fullBuf);
+        // RMS → dB ゲート
+        let sq = 0;
+        for (let i = 0; i < fullBuf.length; i++) sq += fullBuf[i] * fullBuf[i];
+        const rms = Math.sqrt(sq / fullBuf.length);
+        tuner.rmsDb = 20 * Math.log10(rms + 1e-9);
+        const gateOpen = tuner.rmsDb > state.gate;
+        if (!gateOpen) { measureMiss(dt); return; }
+
+        // ×4 間引き(箱型平均 = 簡易アンチエイリアス。lowpass 1.8kHz 済み)
+        const n4 = dsBuf.length;
+        for (let i = 0; i < n4; i++) {
+          const j = i * DS;
+          dsBuf[i] = (fullBuf[j] + fullBuf[j + 1] + fullBuf[j + 2] + fullBuf[j + 3]) * 0.25;
+        }
+        const sr = audioCtx.sampleRate;
+        const est = yinPitch(dsBuf, sr / DS);
+        if (!est || est.conf < 0.5) { measureMiss(dt); return; }
+
+        // 中央値フィルタ(オクターブ飛び除去)
+        f0Hist.push(est.f0);
+        if (f0Hist.length > 5) f0Hist.shift();
+        const f0med = f0Hist.slice().sort((a, b) => a - b)[f0Hist.length >> 1];
+
+        // ターゲット選択
+        chooseTarget(f0med);
+        if (tuner.targetHz <= 0) { measureMiss(dt); return; }
+
+        let f0used = f0med;
+        tuner.fineUsed = false;
+        // 直交復調で粗推定値を微修正(基準 = f0med なので位相折り返し無し)。
+        // |df| が粗推定から 20 cent 相当を超えたら異常として棄却。
+        const fine = lockinBeat(fullBuf, f0med, sr);
+        if (fine && Math.abs(fine.df) < f0med * 0.0116) {
+          f0used = f0med + fine.df;
+          tuner.fineUsed = true;
+        }
+        const centRaw = 1200 * Math.log2(f0used / tuner.targetHz);
+        measureHit(dt, f0used, centRaw, est.conf, rms);
+      }
+
+      function chooseTarget(f0) {
+        const midi = TUNINGS[state.tuning].midi;
+        if (state.manualString >= 0) {
+          setTarget(state.manualString, midi[state.manualString]);
+          return;
+        }
+        // 最寄りの弦(対数距離)。250 cent 超はクロマチックへ
+        let bi = 0, bd = 1e9;
+        for (let i = 0; i < 6; i++) {
+          const d = Math.abs(1200 * Math.log2(f0 / freqOfMidi(midi[i])));
+          if (d < bd) { bd = d; bi = i; }
+        }
+        let candIdx, candMidi;
+        if (bd <= 250) { candIdx = bi; candMidi = midi[bi]; }
+        else {
+          candIdx = -1;
+          candMidi = Math.round(69 + 12 * Math.log2(f0 / state.a4));
+        }
+        // ヒステリシス: 同じ候補が 8 フレーム続いたら切替
+        const key = candIdx * 1000 + candMidi;
+        if (key === stringVote) stringVoteN++;
+        else { stringVote = key; stringVoteN = 1; }
+        if (tuner.targetMidi < 0 || stringVoteN >= 8) setTarget(candIdx, candMidi);
+      }
+      function setTarget(idx, midi) {
+        if (tuner.stringIdx !== idx || tuner.targetMidi !== midi) {
+          tuner.stringIdx = idx;
+          tuner.targetMidi = midi;
+          centSm = null;
+          centHist.length = 0;
+          tuner.lockT = 0;
+        }
+        tuner.targetHz = freqOfMidi(midi);
+      }
+      function retarget() {
+        if (tuner.targetMidi >= 0) tuner.targetHz = freqOfMidi(tuner.targetMidi);
+      }
+
+      // 計測が得られたフレーム / 得られなかったフレームの共通状態更新
+      function measureHit(dt, f0, centRaw, conf, rms) {
+        tuner.soundOn = true;
+        const tc = 0.03 + state.calm * 0.3;
+        const al = dt > 0 ? 1 - Math.exp(-dt / tc) : 1;
+        centSm = centSm === null ? centRaw : centSm + (centRaw - centSm) * al;
+        tuner.cent = centSm;
+        tuner.f0 = f0;
+        tuner.conf = conf;
+        tuner.beatHz = f0 - tuner.targetHz;
+        centHist.push(centSm);
+        if (centHist.length > 24) centHist.shift();
+        let mu = 0;
+        for (const c of centHist) mu += c;
+        mu /= centHist.length;
+        let va = 0;
+        for (const c of centHist) va += (c - mu) * (c - mu);
+        tuner.centJit = Math.sqrt(va / centHist.length);
+        const lvl = Math.min(1, Math.max(0, (tuner.rmsDb - state.gate) / 30));
+        tuner.activeEnv += (Math.max(0.35, lvl) - tuner.activeEnv) * Math.min(1, dt * 9);
+      }
+      function measureMiss(dt) {
+        tuner.soundOn = false;
+        tuner.conf = 0;
+        tuner.beatHz = 0;
+        tuner.activeEnv += (0 - tuner.activeEnv) * Math.min(1, dt * 2.2);
+        centHist.length = 0;
+        f0Hist.length = 0;
+      }
+
+      // ---------- [4] fakesource: 決定的スクリプトの調弦シナリオ ----------
+      // 26 秒ループ。E2 を -22c から合わせて 11 秒すぎにロック、
+      // 休符、G3 が +15c から +3.5c へ(未ロック)、休符。
+      let fakeT = 0;
+      function scriptAt(t) {
+        const tt = t % 26;
+        const pluckEnv = (t0) => Math.exp(-1.6 * (((tt - t0) % 2.3 + 2.3) % 2.3));
+        if (tt < 2.2) return { on: false };
+        if (tt < 9) {
+          const u = (tt - 2.2) / 6.8;
+          const cent = -22 + 19.5 * (u * u * (3 - 2 * u)) + 1.4 * Math.sin(tt * 0.9);
+          return { on: true, s: 0, cent, lvl: 0.4 + 0.6 * pluckEnv(2.2) };
+        }
+        if (tt < 14.2) {
+          const u = Math.min(1, (tt - 9) / 1.5);
+          const cent = -2.5 + 3.1 * u * u + 0.35 * Math.sin(tt * 1.3) * (1 - u * 0.6);
+          return { on: true, s: 0, cent: Math.min(cent, 0.6 + 0.3 * Math.sin(tt * 0.7)), lvl: 0.4 + 0.6 * pluckEnv(9.0) };
+        }
+        if (tt < 16.2) return { on: false };
+        if (tt < 23.2) {
+          const u = (tt - 16.2) / 7.0;
+          const cent = 15 - 11.5 * (u * u * (3 - 2 * u)) + 1.1 * Math.sin(tt * 1.1);
+          return { on: true, s: 3, cent, lvl: 0.4 + 0.6 * pluckEnv(16.2) };
+        }
+        return { on: false };
+      }
+      function applyScript(dt, t) {
+        const sc = scriptAt(t);
+        if (!sc.on) { measureMiss(dt || 1 / 60); tuner.rmsDb = -90; return; }
+        const midi = TUNINGS[state.tuning].midi;
+        setTarget(sc.s, midi[sc.s]);
+        const f0 = tuner.targetHz * Math.pow(2, sc.cent / 1200);
+        tuner.rmsDb = -30 + 12 * (sc.lvl - 1);
+        measureHit(dt || 1 / 60, f0, sc.cent, 0.92, sc.lvl * 0.1);
+      }
+
+      // ---------- [5] チューナー状態機械(共通) ----------
+      function updateTuner(dt) {
+        // 無音包絡(発音が消えて約2秒で霧へ戻る)
+        const idleTarget = tuner.activeEnv > 0.05 ? 0 : 1;
+        tuner.idleEnv += (idleTarget - tuner.idleEnv) * Math.min(1, dt * (idleTarget ? 0.55 : 3.5));
+
+        // 縞位相: PHI += 2π·Δf·dt(視覚は ±6Hz に tanh クランプ = 遠すぎる時の
+        // ストロボ・エイリアシング防止。読み取りの符号と単調性は保存される)
+        if (tuner.soundOn) {
+          const dfVis = 6 * Math.tanh(tuner.beatHz / 6);
+          tuner.phi += 2 * Math.PI * dfVis * dt;
+        } else {
+          // 無音: 眠っている計器のごく遅い漂流
+          tuner.phi += 2 * Math.PI * 0.018 * dt * tuner.idleEnv;
+        }
+
+        // ロック判定: ±2cent × ジッタ<1.5 が 0.6 秒(ヒステリシス)
+        const inTune = tuner.soundOn && Math.abs(tuner.cent) <= 2 && tuner.centJit < 1.5;
+        tuner.lockT = inTune ? tuner.lockT + dt : Math.max(0, tuner.lockT - dt * 2.5);
+        const wasLocked = tuner.locked;
+        tuner.locked = tuner.lockT >= 0.6;
+        if (tuner.locked && !wasLocked && tuner.stringIdx >= 0) {
+          tuner.tunedMask |= 1 << tuner.stringIdx;
+        }
+        const glowTarget = tuner.locked ? 1 : 0;
+        tuner.lockGlow += (glowTarget - tuner.lockGlow) * Math.min(1, dt * (glowTarget ? 5.5 : 1.3));
+      }
+
+      // ---------- [6] メインループ ----------
+      let prevNow = 0, frameN = 0, fpsEma = 0, hudClock = 0;
+      let readyFlagged = false;
+
+      // freeze: スクリプトを固定 dt で事前ロール(CPU のみ、描画なし)し
+      // FREEZE_T の決定的状態を作る。シードに時間を混ぜていないので再現的。
+      if (FREEZE) {
+        const STEP = 1 / 60;
+        const steps = Math.round(FREEZE_T / STEP);
+        for (let i = 0; i < steps; i++) {
+          applyScript(STEP, i * STEP);
+          updateTuner(STEP);
+        }
+        fakeT = FREEZE_T;
+      }
+      if (FAKESOURCE) tuner.listening = true;
+
+      function render(timeSec) {
+        const trailNow = FREEZE ? 0 : state.trail;
+        // P1: field → 書き込み側 target(読み込みは前フレーム側)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboB);
+        gl.viewport(0, 0, W, H);
+        gl.useProgram(progField);
+        gl.bindVertexArray(vao);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texA);
+        gl.uniform1i(uni(progField, "uPrev"), 0);
+        gl.uniform2f(uni(progField, "uRes"), W, H);
+        gl.uniform1f(uni(progField, "uTime"), timeSec);
+        gl.uniform1f(uni(progField, "uPhi"), tuner.phi);
+        gl.uniform1f(uni(progField, "uBands"), state.bands);
+        gl.uniform1f(uni(progField, "uWarp"), state.warp);
+        gl.uniform1i(uni(progField, "uOctv"), Math.round(state.octv));
+        gl.uniform1f(uni(progField, "uTrail"), trailNow);
+        gl.uniform1f(uni(progField, "uDissolve"), state.dissolve);
+        gl.uniform1f(uni(progField, "uActiveEnv"), tuner.activeEnv);
+        gl.uniform1f(uni(progField, "uIdleEnv"), tuner.idleEnv);
+        gl.uniform1f(uni(progField, "uConf"), tuner.soundOn ? Math.max(0.35, tuner.conf) : 0);
+        gl.uniform1f(uni(progField, "uCentAbs"), Math.min(60, Math.abs(tuner.cent)));
+        gl.uniform1f(uni(progField, "uLockGlow"), tuner.lockGlow);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+        // P2: present
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, W, H);
+        gl.useProgram(progShow);
+        gl.bindTexture(gl.TEXTURE_2D, texB);
+        gl.uniform1i(uni(progShow, "uTex"), 0);
+        gl.uniform2f(uni(progShow, "uRes"), W, H);
+        gl.uniform1f(uni(progShow, "uGrainAmt"), state.grain);
+        gl.uniform1f(uni(progShow, "uSeed"), FREEZE ? 7 : (frameN % 997));
+        gl.uniform1i(uni(progShow, "uDebug"), state.debugView);
+        gl.uniform4f(uni(progShow, "uMeters"),
+          Math.min(1, Math.max(0, (tuner.rmsDb + 72) / 60)),
+          tuner.conf,
+          Math.min(1, Math.abs(tuner.cent) / 50),
+          tuner.lockGlow);
+        gl.uniform1f(uni(progShow, "uPhi"), tuner.phi);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+        // ping-pong swap
+        const t = texA; texA = texB; texB = t;
+        const f = fboA; fboA = fboB; fboB = f;
+      }
+
+      function updateHud() {
+        const midi = TUNINGS[state.tuning].midi;
+        a4BadgeEl.textContent = `A4 = ${state.a4 % 1 ? state.a4.toFixed(1) : state.a4}`;
+        const showTarget = tuner.targetMidi >= 0 && (tuner.soundOn || tuner.activeEnv > 0.08);
+        hud.classList.toggle("dim", !showTarget);
+        if (showTarget) {
+          const nm = noteLabel(tuner.targetMidi);
+          noteNameEl.innerHTML = nm.replace(/(-?\d+)$/, "<sub>$1</sub>");
+          const c = tuner.cent;
+          const cTxt = (c >= 0 ? "+" : "−") + Math.abs(c).toFixed(1) + " cent";
+          centBigEl.innerHTML =
+            `<span class="hz">${tuner.f0.toFixed(2)} Hz</span><span class="sep">|</span>` +
+            `<span class="cent${tuner.locked ? " locked" : ""}">${cTxt}</span>`;
+          hintTxtEl.textContent = tuner.locked ? "✓ 合いました"
+            : c > 3 ? "♯ 高い — ペグを緩める(縞が右へ流れています)"
+            : c < -3 ? "♭ 低い — ペグを巻き上げる(縞が左へ流れています)"
+            : "静止するまであと少し";
+          centMark.classList.remove("off");
+          centMark.classList.toggle("locked", tuner.locked);
+          const x = Math.max(-50, Math.min(50, c));
+          centMark.style.left = `${50 + x}%`;
+        } else {
+          noteNameEl.textContent = "—";
+          centBigEl.innerHTML = tuner.listening
+            ? `<span class="hz" style="opacity:.55">${TUNINGS[state.tuning].label}</span>`
+            : "&nbsp;";
+          hintTxtEl.textContent = tuner.listening ? "弦を1本だけ鳴らしてください" : "";
+          centMark.classList.add("off");
+          centMark.classList.remove("locked");
+          centMark.style.left = "50%";
+        }
+        refreshStringsRow();
+        const modeTxt = tuner.mode === "fake" ? "fakesource" : tuner.mode === "tone" ? "tone" : "mic";
+        document.getElementById("readout").textContent =
+          `FPS ${fpsEma.toFixed(0)} / ${W}×${H} / f0 ${tuner.soundOn ? tuner.f0.toFixed(2) + " Hz" : "--"} ` +
+          `/ 入力 ${tuner.rmsDb > -100 ? tuner.rmsDb.toFixed(0) : "--"} dB / conf ${tuner.conf.toFixed(2)} ` +
+          `/ ${tuner.fineUsed ? "lock-in" : "yin"} / ${modeTxt}${FREEZE ? " · freeze" : ""}`;
+        void midi;
+      }
+
+      function frame(now) {
+        const rawDt = prevNow ? Math.min(0.05, (now - prevNow) / 1000) : 1 / 60;
+        prevNow = now;
+        const dt = FREEZE ? 0 : rawDt;
+        const visT = FREEZE ? FREEZE_T : now / 1000;
+
+        if (dt > 0) {
+          if (FAKESOURCE) {
+            applyScript(dt, fakeT);
+            fakeT += dt;
+          } else if (tuner.listening) {
+            analyzeAudio(dt);
+          }
+          if (!state.pauseAnim) updateTuner(dt);
+        }
+
+        if (fpsEma === 0) fpsEma = 60;
+        if (rawDt > 0) fpsEma += (1 / rawDt - fpsEma) * 0.06;
+
+        render(state.pauseAnim ? 0 : visT);
+        frameN++;
+
+        hudClock += rawDt;
+        if (hudClock > 0.12 || FREEZE) {
+          hudClock = 0;
+          updateHud();
+        }
+
+        if (!readyFlagged) {
+          readyFlagged = true;
+          window.__artReady = true; // 最初の本描画フレーム完了(検証フック)
+        }
+        requestAnimationFrame(frame);
+      }
+
+      // ---------- 起動 ----------
+      if (FAKESOURCE) {
+        hideOverlay();
+      } else if (TONE_MODE) {
+        startTone();
+      } else {
+        showOverlay(
+          "うなり — 干渉場ギターチューナー",
+          "ギターの音とターゲット音の「うなり」を全画面の干渉縞として描く実用チューナーです。縞が昇れば高すぎ、沈めば低すぎ、完全に静止すれば合っています(±2セントで金の環がロック)。マイクの許可が必要です。",
+          true,
+        );
+      }
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+      });
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
