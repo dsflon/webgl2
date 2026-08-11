@@ -1,5 +1,21 @@
 [
   {
+    "slug": "fable5_unari",
+    "file": "fable5_unari.html",
+    "title": "うなり",
+    "date": "2026-08-11",
+    "desc": "実用のギターチューナー。画面は左右2つの波源 — 基準音と自分の音 — が作る二源干渉の縞で、その流れはうなりの物理量そのもの。高ければ縞は右へ、低ければ左へ流れ、合うと完全に静止して中央の縦軸に金が灯る。弾いた瞬間は波が場を走り抜け、ずれが大きいほど場は乱流で荒れ、合わせるほど結晶質に静まる。±2セントが0.6秒続くと金の一閃がロックを告げる。Fable 5 で制作。",
+    "model": "Fable 5",
+    "tags": [
+      "WebGL2",
+      "Mic",
+      "Tuner",
+      "Interactive"
+    ],
+    "series": "FABLE5",
+    "thumb": "thumbs/fable5_unari.jpg"
+  },
+  {
     "slug": "fable5_kirie-sekai",
     "file": "fable5_kirie-sekai.html",
     "title": "切り紙の世界",
