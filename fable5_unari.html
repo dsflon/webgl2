@@ -25,9 +25,10 @@
     (マイク API はセキュアコンテキスト必須。file:// では動きません)
     ギターの弦を1本だけ鳴らすと、最寄りの弦が自動選択され、縞が動き出します。
     縞が静止するようにペグを回してください。±2セント以内が0.6秒続くとロック
-    (金の環)します。下部の弦ボタンで手動固定、AUTO で自動判別に戻ります。
-    チューニングプリセット(Regular / Drop D / 半音下げ / DADGAD / Open G)と
-    A4 基準(432〜446Hz)はパネルから変更できます。
+    (金の軸)します。下部の弦ボタンで手動固定、AUTO で自動判別に戻ります。
+    チューニングは画面上部の据え置きボタン(全音下げ / 半音下げ / OPEN G)で
+    切替。A4=440 固定。針の平滑・入力ゲート等は作品既定値で固定
+    (開発用パネル=右下の「⋯」からのみ変更可能)。
 
     検証用 URL パラメータ:
       ?fakesource=1 … マイク・WebAudio を一切開かず、決定的スクリプトの
@@ -68,16 +69,17 @@
       P2 present: 銀墨+金のグレード、ビネット、フィルム粒子、デバッグ表示 → 画面
     [DOM] 上下中央の音名1文字+動く針(±50cent、固定目盛なし)+6弦ドット(文字レス HUD)
 
-  スライダー(全パラメタは state に集約。DEFAULTS + RESET LOOK):
+  スライダー(開発用パネル内。全パラメタは state に集約。DEFAULTS + RESET LOOK。
+  作品としては DEFAULTS で固定し、パネルは右下「⋯」の奥に非表示):
     bands    縞の密度     — 干渉縞の密度(倍音層はその2倍/4倍)
     warp     縞のうねり   — 静的 fbm による縞座標の有機ワープ量(波源近傍ほど強い)
     octv     ストロボ段数 — 倍音バンドの層数(1=基本のみ〜3=1x/2x/4x)
     trail    残光         — 縞のモーションブラー(EMA)。ドリフト方向の視認性
     dissolve 縁の溶け     — 画面周縁の縞をノイズで千切って霧に溶かす量
     grain    粒子         — フィルムグレイン(freeze 時は種固定)
-    gate     入力ゲート   — この dB 未満の入力を無音として扱う
-    calm     針の落ち着き — cent 表示と縞位相の平滑時定数(速い↔落ち着く)
-    a4       A4基準       — 基準ピッチ 432〜446 Hz(0.5 刻み)
+    gate     入力ゲート   — この dB 未満の入力を無音として扱う(既定 -60 = 高感度)
+    calm     針の落ち着き — cent 表示と縞位相の平滑時定数(既定 1 = 最も落ち着く)
+    a4       A4基準       — 基準ピッチ(既定 440 固定)
 
   依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00 / WebAudio のみ)
 -->
@@ -162,13 +164,33 @@
       #stringsRow button.auto { color: rgba(233, 228, 214, 0.35); font-size: 10px; padding-top: 5px; }
       #stringsRow button.auto.on { color: rgba(233, 228, 214, 0.8); }
 
-      /* ---- パネル ---- */
-      #togglePanel {
-        position: fixed; top: max(10px, env(safe-area-inset-top)); right: 10px; z-index: 20;
-        appearance: none; border: 1px solid var(--line); background: var(--panel);
-        color: var(--ink); font: inherit; font-size: 15px; border-radius: 8px;
-        width: 38px; height: 38px; cursor: pointer;
+      /* ---- 画面上部のチューニングバー ---- */
+      #tuneBar {
+        position: fixed; top: max(16px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 10;
+        display: flex; gap: clamp(18px, 5vw, 44px); align-items: center;
       }
+      #tuneBar button {
+        appearance: none; border: none; background: none; cursor: pointer;
+        font: inherit; font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase;
+        color: rgba(233, 228, 214, 0.34); padding: 8px 2px 9px;
+        border-bottom: 1px solid transparent;
+        transition: color 0.3s, border-color 0.3s, text-shadow 0.3s;
+      }
+      #tuneBar button:hover { color: rgba(233, 228, 214, 0.75); }
+      #tuneBar button.on {
+        color: var(--gold); border-bottom-color: rgba(232, 181, 88, 0.55);
+        text-shadow: 0 0 12px rgba(232, 181, 88, 0.35);
+      }
+
+      /* ---- 開発用パネル(右下の気配だけの点) ---- */
+      #togglePanel {
+        position: fixed; bottom: 8px; right: 8px; z-index: 20;
+        appearance: none; border: none; background: none;
+        color: rgba(233, 228, 214, 0.16); font: inherit; font-size: 15px;
+        width: 34px; height: 34px; cursor: pointer; transition: color 0.3s;
+      }
+      #togglePanel:hover { color: rgba(233, 228, 214, 0.6); }
       #panel {
         position: fixed; top: 0; right: 0; z-index: 15;
         width: min(320px, 100vw); max-height: 100%; overflow-y: auto;
@@ -238,8 +260,10 @@
 
     <div id="stringsRow" aria-label="弦の選択"></div>
 
-    <button id="togglePanel" type="button" aria-label="コントローラーを開閉">☰</button>
-    <section id="panel" class="collapsed" aria-label="うなり controls"></section>
+    <nav id="tuneBar" aria-label="チューニングの選択"></nav>
+
+    <button id="togglePanel" type="button" aria-label="開発用パネルを開閉">⋯</button>
+    <section id="panel" class="collapsed" aria-label="うなり dev controls"></section>
 
     <div id="overlay" class="hidden" role="status" aria-live="polite">
       <div class="overlay-card">
@@ -274,23 +298,22 @@
       const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
       // MIDI ノート番号(低→高)。f = a4 · 2^((m-69)/12)
       const TUNINGS = [
-        { id: "regular",  label: "Regular (E A D G B E)",   midi: [40, 45, 50, 55, 59, 64] },
-        { id: "dropd",    label: "Drop D (D A D G B E)",    midi: [38, 45, 50, 55, 59, 64] },
-        { id: "halfdown", label: "半音下げ (E♭ A♭ D♭ G♭ B♭ E♭)", midi: [39, 44, 49, 54, 58, 63] },
-        { id: "dadgad",   label: "DADGAD (D A D G A D)",    midi: [38, 45, 50, 55, 57, 62] },
-        { id: "openg",    label: "Open G (D G D G B D)",    midi: [38, 43, 50, 55, 59, 62] },
+        { id: "wholedown", label: "WHOLE DOWN", desc: "全音下げ D G C F A D", midi: [38, 43, 48, 53, 57, 62] },
+        { id: "halfdown",  label: "HALF DOWN",  desc: "半音下げ E♭ A♭ D♭ G♭ B♭ E♭", midi: [39, 44, 49, 54, 58, 63] },
+        { id: "openg",     label: "OPEN G",     desc: "オープンG D G D G B D", midi: [38, 43, 50, 55, 59, 62] },
       ];
 
+      // 作品既定で固定(開発用パネルからのみ変更可能。既定は非表示)
       const DEFAULTS = {
         bands: 14,     // 縞の密度
-        warp: 0.35,    // 縞のうねり
+        warp: 0.4,     // 縞のうねり
         octv: 3,       // ストロボ段数(倍音バンド層数)
-        trail: 0.45,   // 残光(EMA)
+        trail: 0.5,    // 残光(EMA)
         dissolve: 0.55,// 縁の溶け
-        grain: 0.35,   // 粒子
-        gate: -54,     // 入力ゲート dB
-        calm: 0.5,     // 平滑時定数
-        a4: 440,       // 基準ピッチ
+        grain: 0.4,    // 粒子
+        gate: -60,     // 入力ゲート dB(ギターを感知しやすい高感度)
+        calm: 1,       // 平滑時定数(最も落ち着いた針)
+        a4: 440,       // 基準ピッチ(固定)
       };
       // [key, ラベル, ヒント, min, max, step]
       const SLIDERS = [
@@ -353,8 +376,6 @@
       const fmtVal = (k, v) => (k === "a4" ? v.toFixed(1) : k === "gate" ? String(v) : (+v).toFixed(2).replace(/\.?0+$/, "") || "0");
       panel.innerHTML = `
         <button id="closePanel" type="button" aria-label="閉じる">✕</button>
-        <h1>うなり — 干渉場チューナー</h1>
-        <p class="sub">縞の流れ=うなり。静止=合致。昇る=高い/沈む=低い</p>
         <div class="selrow"><span>チューニング</span>
           <select id="presetSel" aria-label="チューニングプリセット">
             ${TUNINGS.map((t, i) => `<option value="${i}">${t.label}</option>`).join("")}
@@ -393,11 +414,16 @@
           if (key === "a4") retarget();
         });
       }
-      document.getElementById("presetSel").addEventListener("change", (e) => {
-        state.tuning = parseInt(e.target.value, 10);
+      function selectTuning(i) {
+        state.tuning = i;
         tuner.tunedMask = 0;
+        document.getElementById("presetSel").value = String(i);
         buildStringsRow();
+        buildTuneBar();
         retarget();
+      }
+      document.getElementById("presetSel").addEventListener("change", (e) => {
+        selectTuning(parseInt(e.target.value, 10));
       });
       document.getElementById("debugView").addEventListener("change", (e) => {
         state.debugView = parseInt(e.target.value, 10);
@@ -436,6 +462,21 @@
       const centMark = document.createElement("div");
       centMark.id = "centMark";
       centScaleEl.appendChild(centMark);
+
+      // ---- 画面上部のチューニングバー ----
+      const tuneBar = document.getElementById("tuneBar");
+      function buildTuneBar() {
+        tuneBar.innerHTML = "";
+        TUNINGS.forEach((t, i) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = t.label;
+          b.setAttribute("aria-label", t.desc);
+          if (i === state.tuning) b.classList.add("on");
+          b.addEventListener("click", () => selectTuning(i));
+          tuneBar.appendChild(b);
+        });
+      }
 
       // ---- 弦インジケータ ----
       const stringsRow = document.getElementById("stringsRow");
@@ -478,6 +519,7 @@
         });
       }
       buildStringsRow();
+      buildTuneBar();
 
       // ---- オーバーレイ ----
       const overlay = document.getElementById("overlay");
@@ -583,7 +625,7 @@
         float agitN = fbm(vUv * 3.1 + vec2(uTime * 0.34, -uTime * 0.22));
         float tCoord = pathD * uBands
           + uWarp * (w1 - 0.5) * (0.3 + 1.4 * nearF)
-          + uAgit * (agitN - 0.5) * 2.4;
+          + uAgit * (agitN - 0.5) * 2.8;
 
         // --- 倍音バンド 1x/2x/4x。位相は 2^j 倍で進む(ストロボ原理) ---
         // phi 増加(シャープ)で縞は右の波源(=自分の音)側へ流れる
@@ -607,11 +649,11 @@
         // --- 弾弦バースト: 右の波源(=自分の音)から波が走り抜ける ---
         float dBurst = (rR - uBurstR) / 0.1;
         float burstWave = exp(-dBurst * dBurst);
-        fringe *= 1.0 + uBurst * burstWave * 2.4;
+        fringe *= 1.0 + uBurst * burstWave * 3.2;
 
         // --- 乱流の明滅: 荒れているあいだ縞の明るさが波打つ ---
         float flick = fbm(vUv * 2.1 + vec2(-uTime * 0.42, uTime * 0.3));
-        fringe *= 1.0 + uAgit * (flick - 0.5) * 1.3;
+        fringe *= 1.0 + uAgit * (flick - 0.5) * 1.5;
 
         // --- 近いほど鮮明(不変量#4) ---
         float crisp = clamp(uConf, 0.0, 1.0) * (0.42 + 0.58 * exp(-uCentAbs / 28.0));
@@ -657,9 +699,9 @@
         // ロックの一閃: 金の波面が軸から左右へ走り、縞を舐めて消える
         float dLock = (ax - uLockR) / 0.11;
         float lockWave = exp(-dLock * dLock) * uLockE;
-        gold += lockWave * (fringe * env * gap * 0.9 + 0.05 * env);
+        gold += lockWave * (fringe * env * gap * 1.0 + 0.055 * env);
         // 弾弦バーストの先端は銀の微光
-        silver += uBurst * burstWave * env * gap * 0.1;
+        silver += uBurst * burstWave * env * gap * 0.14;
 
         vec3 cur = vec3(silver, gold, idleMist);
         // --- 残光: EMA(有界。max 合成はしない → whiteout 恒久回避) ---
