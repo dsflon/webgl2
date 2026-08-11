@@ -12,14 +12,16 @@
     完全に合うと全ての縞が静止し、中央の縦軸に金のヘアラインが灯る。
     弾いた瞬間は右の波源から波が場を走り抜け、ずれが大きいほど場は乱流で
     荒れ、合致へ向かうほど結晶質に静まる。ロックの瞬間、金の波が軸から
-    左右へ一閃する。HUD はほぼ文字レス(音名1文字+無ラベル目盛+弦ドット)。
+    左右へ一閃する。HUD はほぼ文字レス(上下中央の音名1文字+動く針+弦ドット。
+    固定目盛なし)。設定パネルは右上の☰の奥に畳んであり、既定では現れない。
     ストロボチューナー(Peterson 型)の原理の全画面翻案であり、
     縞の運動 = うなりの物理量そのもの。ごまかしの無い計器である。
     <meta name="art-input" content="mic"> 宣言(カメラ不使用のマイク入力プロファイル)。
 
   実行方法:
     python3 -m http.server 8888
-    → http://localhost:8888/fable5_unari.html を開き「マイクを許可して始める」
+    → http://localhost:8888/fable5_unari.html を開くと自動でマイク許可を
+    リクエストする(開始画面なし。エラー時のみオーバーレイ)。
     (マイク API はセキュアコンテキスト必須。file:// では動きません)
     ギターの弦を1本だけ鳴らすと、最寄りの弦が自動選択され、縞が動き出します。
     縞が静止するようにペグを回してください。±2セント以内が0.6秒続くとロック
@@ -50,7 +52,7 @@
     | 4 | 近いほど鮮明(合致に向かうほど縞のコントラストが上がる) | 質感 | コントラスト = conf × exp(-|cent|/28) | 遠くても近くても同じ絵で、進捗の手応えが無い |
     | 5 | 無音時は薄霧の呼吸だけが残る静物(縞は眠る) | 時間 | activeEnv/idleEnv の2時定数クロスフェード+低振幅 fbm ミスト | 無音で真っ黒(死んだ画面)か、無音でも縞が踊る(嘘) |
     | 6 | 音に触っている手応え: 弾いた瞬間に右の波源から波が場を走り、ずれが大きいほど場は乱流で荒れ、合致へ向かうほど結晶質に静まり、ロックで金の波が軸から一閃する | 時間 | オンセット検出(速い包絡が遅い包絡を跳び越え)→波面伝播 / |cent|→乱流ワープ+明滅 / ロックエッジ→一閃波面 | 静的な計器になり、インタラクティブ性が死ぬ |
-    | 7 | 画面に文字はほぼ無い(音名1文字+無ラベル目盛+弦ドットのみ)。数値・説明文・単位を出さない | 形 | 方向=ドリフト、量=速度と乱流、達成=金、で情報を全て絵に負わせる | 計器のラベルだらけになり様式が死ぬ |
+    | 7 | 画面に文字はほぼ無い(上下中央の音名1文字+動く針+弦ドットのみ。固定目盛も無い)。数値・説明文・単位を出さない | 形 | 方向=ドリフト、量=速度と乱流、達成=金、で情報を全て絵に負わせる | 計器のラベルだらけになり様式が死ぬ |
 
   パイプライン(毎フレーム):
     [Audio] mic/tone → highpass 35Hz → lowpass 1.8kHz → AnalyserNode(8192)
@@ -64,7 +66,7 @@
                   → R=銀 G=金(中央軸) B=霧
                   同パスで前フレーム(ping-pong)と EMA 合成(残光。freeze 時バイパス)
       P2 present: 銀墨+金のグレード、ビネット、フィルム粒子、デバッグ表示 → 画面
-    [DOM] 音名1文字+無ラベル目盛(±50cent)+6弦ドットのみ(文字レス HUD)
+    [DOM] 上下中央の音名1文字+動く針(±50cent、固定目盛なし)+6弦ドット(文字レス HUD)
 
   スライダー(全パラメタは state に集約。DEFAULTS + RESET LOOK):
     bands    縞の密度     — 干渉縞の密度(倍音層はその2倍/4倍)
@@ -105,8 +107,8 @@
 
       /* ---- HUD(計器の数値層) ---- */
       #hud {
-        position: fixed; left: 0; right: 0; top: 34%;
-        display: flex; flex-direction: column; align-items: center; gap: 6px;
+        position: fixed; left: 0; right: 0; top: 50%; transform: translateY(-50%);
+        display: flex; flex-direction: column; align-items: center; gap: 10px;
         pointer-events: none; user-select: none;
         text-shadow: 0 0 14px rgba(0, 0, 0, 0.85);
         transition: opacity 0.4s;
@@ -120,15 +122,10 @@
       #noteName.locked { color: var(--gold); text-shadow: 0 0 24px rgba(232, 181, 88, 0.45); }
       #noteName { transition: color 0.5s; }
       #centScale {
-        position: relative; width: min(320px, 72vw); height: 26px; margin-top: 8px;
+        position: relative; width: min(320px, 72vw); height: 20px;
       }
-      #centScale .tick {
-        position: absolute; top: 8px; width: 1px; height: 7px;
-        background: rgba(233, 228, 214, 0.35);
-      }
-      #centScale .tick.zero { top: 4px; height: 15px; width: 1.5px; background: rgba(233, 228, 214, 0.7); }
       #centMark {
-        position: absolute; top: 0; left: 50%; width: 3px; height: 14px; border-radius: 2px;
+        position: absolute; top: 1px; left: 50%; width: 3px; height: 18px; border-radius: 2px;
         background: var(--ink); transform: translateX(-50%);
         transition: background 0.25s; box-shadow: 0 0 8px rgba(0, 0, 0, 0.9);
       }
@@ -228,9 +225,7 @@
         font: inherit; font-size: 12px; border-radius: 8px; padding: 10px 14px; cursor: pointer;
       }
       .overlay-btns button.primary { border-color: rgba(232, 181, 88, 0.7); color: var(--gold); }
-      @media (max-width: 719px) {
-        #hud { top: 26%; }
-      }
+
     </style>
   </head>
   <body>
@@ -251,7 +246,7 @@
         <h2 id="overlayTitle"></h2>
         <p id="overlayText"></p>
         <div class="overlay-btns">
-          <button id="micStart" type="button" class="primary">マイクを許可して始める</button>
+          <button id="micStart" type="button" class="primary">マイクを再試行</button>
           <button id="micSkip" type="button">マイクなしでデモを眺める</button>
         </div>
       </div>
@@ -433,18 +428,11 @@
       };
       togglePanelBtn.addEventListener("click", () => setPanel(panel.classList.contains("collapsed")));
       document.getElementById("closePanel").addEventListener("click", () => setPanel(false));
-      if (window.innerWidth >= 720) setPanel(true);
 
       // ---- HUD ----
       const hud = document.getElementById("hud");
       const noteNameEl = document.getElementById("noteName");
       const centScaleEl = document.getElementById("centScale");
-      for (let c = -50; c <= 50; c += 10) {
-        const t = document.createElement("div");
-        t.className = "tick" + (c === 0 ? " zero" : "");
-        t.style.left = `${50 + c}%`;
-        centScaleEl.appendChild(t);
-      }
       const centMark = document.createElement("div");
       centMark.id = "centMark";
       centScaleEl.appendChild(centMark);
@@ -834,6 +822,7 @@
             },
           });
           setupAnalysis((ctx) => ctx.createMediaStreamSource(stream));
+          if (audioCtx.state === "suspended") audioCtx.resume();
           tuner.mode = "mic";
           tuner.listening = true;
           hideOverlay();
@@ -1350,12 +1339,14 @@
       } else if (TONE_MODE) {
         startTone();
       } else {
-        showOverlay(
-          "うなり — 干渉場ギターチューナー",
-          "ギターの音とターゲット音の「うなり」を全画面の干渉縞として描く実用チューナーです。縞が昇れば高すぎ、沈めば低すぎ、完全に静止すれば合っています(±2セントで金の環がロック)。マイクの許可が必要です。",
-          true,
-        );
+        // 開始画面は出さない: ロードと同時にマイクをリクエストする。
+        // オーバーレイはエラー(非HTTPS/拒否/デバイス無し)のときだけ現れる
+        startMic();
       }
+      // 自動再生ポリシーで AudioContext が止まっていたら、最初の操作で起こす
+      const wakeAudio = () => { if (audioCtx && audioCtx.state === "suspended") audioCtx.resume(); };
+      document.addEventListener("pointerdown", wakeAudio);
+      document.addEventListener("keydown", wakeAudio);
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden && audioCtx && audioCtx.state === "suspended") audioCtx.resume();
       });
