@@ -384,11 +384,11 @@
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   },
   "fable5_unari": {
-    "query": "freeze=1",
-    "warmMs": 1200,
+    "query": "fakesource=1&mode=particle",
+    "warmMs": 23000,
     "readyFlag": true,
     "audio": false,
-    "hideCss": "#tuneBar,#togglePanel{display:none}",
-    "note": "freeze=1 は決定的なロック(金軸)フレーム。上部チューニングバーと開発用ドットだけ隠し、音名と弦ドットは作品の顔として残す。"
+    "hideCss": "#tuneBar,#togglePanel,#modeBar{display:none}",
+    "note": "PARTICLE(既定)のライブ fakesource。スクリプトが E2 をロックする区間(warm 23s、ヘッドレスのスロー係数込み)で金の文字を撮る。freeze は sim が止まり文字が出ないため使わない。"
   }
 }

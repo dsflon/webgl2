@@ -15,9 +15,10 @@
     左右へ一閃する。HUD はほぼ文字レス(上下中央の音名1文字+動く針+弦ドット。
     固定目盛なし)。設定パネルは右下の「⋯」の奥に畳んであり、既定では現れない。
 
-    表示モードは2つ(右上の FIELD / PARTICLE で切替、?mode=particle でも指定可):
-    - FIELD    … 上記の二源干渉の縞(既定)
-    - PARTICLE … 65,536 粒の GPU パーティクル。ずれが大きいほど curl ノイズで
+    表示モードは2つ(右上の FIELD / PARTICLE で切替。既定は PARTICLE、
+    ?mode=field で干渉場を指定可):
+    - FIELD    … 上記の二源干渉の縞
+    - PARTICLE … 65,536 粒の GPU パーティクル(既定)。ずれが大きいほど curl ノイズで
       発散し、音程が近づくほど粒が1粒ずつ音名グリフの目標点へリクルートされ、
       文字が塵の中から組み上がっていく。ロック(±2cent×0.6s)で全粒が参加し
       完全な文字が金で完成する。弾弦バーストは粒を弾き飛ばし、シャープ/フラット
@@ -381,8 +382,8 @@
         manualString: -1, // -1 = AUTO
         pauseAnim: false,
         debugView: 0,
-        // 0 = FIELD(二源干渉) / 1 = PARTICLE(粒が音名の文字を形成)
-        mode: QUERY.get("mode") === "particle" ? 1 : 0,
+        // 0 = FIELD(二源干渉) / 1 = PARTICLE(粒が音名の文字を形成)。既定は PARTICLE
+        mode: QUERY.get("mode") === "field" ? 0 : 1,
       });
 
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -1188,6 +1189,7 @@
         ptsVao = gl.createVertexArray(); // 属性なし(gl_VertexID 描画)
         if (!sceneTex) makeSceneTarget();
       }
+      if (!PARTICLE_OK) state.mode = 0; // float FBO 非対応環境は FIELD へ
       buildModeBar();
       hud.classList.toggle("letterMode", state.mode === 1);
 
