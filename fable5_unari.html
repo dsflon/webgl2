@@ -1070,7 +1070,7 @@
         vSeed = P.w;
         vDepth = persp;
         float px = (0.8 + P.w * 1.7) * (uRes.y / 800.0) * persp;
-        px *= mix(1.0, 1.35, uIdle);
+        px *= mix(1.15, 1.35, uIdle);
         gl_PointSize = max(1.0, px * mix(1.0, 1.5, vRec * uLockGlow));
       }`;
 
@@ -1086,15 +1086,17 @@
       uniform float uBurst;
       uniform float uTime;
       uniform float uTint;     // 音程の温度: フラット=-1(冷) / シャープ=+1(熱)
+      uniform float uDensity;  // 粒数間引きの輝度補償(縦画面 >1)
       void main(){
         vec2 q = gl_PointCoord - 0.5;
         float d2 = dot(q, q);
         float disc = exp(-d2 * 9.0) * step(d2, 0.25);
         // 無音: 星々が個々の位相で呼吸する(消えない。待機も見世物)
         float breath = 0.62 + 0.38 * sin(uTime * 0.5 + vSeed * 6.2832);
-        float lively = 0.16 + 0.5 * uLevel + 0.4 * uBurst;
+        float lively = 0.38 + 0.55 * uLevel + 0.4 * uBurst;
         float bright = mix(lively, 0.3 + 0.75 * breath, uIdle);
         bright *= 0.7 + 0.6 * vSeed;
+        bright *= uDensity; // 縦画面の間引き分を輝度で補償
         // 遠近: 近い粒は明るく、遠い粒は暗く大気に沈む
         bright *= clamp(vDepth * vDepth * 0.7, 0.22, 1.9);
 
@@ -1786,10 +1788,11 @@
         gl.uniform1f(uni(progPts, "uTint"), tuner.windN);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, gl.ONE);
-        // 縦画面では粒の面密度が上がりすぎるため、アスペクト比で間引く
-        const drawCount = Math.round(
-          SIM_N * SIM_N * Math.min(1, Math.max(0.3, W / Math.max(1, H) / 1.35)),
-        );
+        // 縦画面では粒の面密度が上がりすぎるため、アスペクト比で間引く。
+        // 間引いた分は輝度補償(uDensity)で存在感を保つ
+        const cf = Math.min(1, Math.max(0.4, W / Math.max(1, H) / 1.2));
+        gl.uniform1f(uni(progPts, "uDensity"), 1 / Math.sqrt(cf));
+        const drawCount = Math.round(SIM_N * SIM_N * cf);
         gl.drawArrays(gl.POINTS, 0, drawCount);
         gl.disable(gl.BLEND);
 
