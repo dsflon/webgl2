@@ -10,6 +10,9 @@
     中央では縦の縞、波源のそばでは同心の渦になる。音が高い(シャープ)と縞は
     右(自分の音の側)へ流れ、低い(フラット)と左へ流れる。
     完全に合うと全ての縞が静止し、中央の縦軸に金のヘアラインが灯る。
+    弾いた瞬間は右の波源から波が場を走り抜け、ずれが大きいほど場は乱流で
+    荒れ、合致へ向かうほど結晶質に静まる。ロックの瞬間、金の波が軸から
+    左右へ一閃する。HUD はほぼ文字レス(音名1文字+無ラベル目盛+弦ドット)。
     ストロボチューナー(Peterson 型)の原理の全画面翻案であり、
     縞の運動 = うなりの物理量そのもの。ごまかしの無い計器である。
     <meta name="art-input" content="mic"> 宣言(カメラ不使用のマイク入力プロファイル)。
@@ -46,6 +49,8 @@
     | 3 | 縞は二源干渉のハイパーボラ(中央=縦縞、波源近傍=同心の渦)で、繊維質のフィラメントとして走り、縁は千切れて霧に溶ける | 形 | 行路差 rR-rL の等値線+縞に沿う fbm フィラメント+ノイズゲート侵食(sdf の生円/直線を可視形状にしない) | オシロスコープ/バーコードに見える(様式不成立) |
     | 4 | 近いほど鮮明(合致に向かうほど縞のコントラストが上がる) | 質感 | コントラスト = conf × exp(-|cent|/28) | 遠くても近くても同じ絵で、進捗の手応えが無い |
     | 5 | 無音時は薄霧の呼吸だけが残る静物(縞は眠る) | 時間 | activeEnv/idleEnv の2時定数クロスフェード+低振幅 fbm ミスト | 無音で真っ黒(死んだ画面)か、無音でも縞が踊る(嘘) |
+    | 6 | 音に触っている手応え: 弾いた瞬間に右の波源から波が場を走り、ずれが大きいほど場は乱流で荒れ、合致へ向かうほど結晶質に静まり、ロックで金の波が軸から一閃する | 時間 | オンセット検出(速い包絡が遅い包絡を跳び越え)→波面伝播 / |cent|→乱流ワープ+明滅 / ロックエッジ→一閃波面 | 静的な計器になり、インタラクティブ性が死ぬ |
+    | 7 | 画面に文字はほぼ無い(音名1文字+無ラベル目盛+弦ドットのみ)。数値・説明文・単位を出さない | 形 | 方向=ドリフト、量=速度と乱流、達成=金、で情報を全て絵に負わせる | 計器のラベルだらけになり様式が死ぬ |
 
   パイプライン(毎フレーム):
     [Audio] mic/tone → highpass 35Hz → lowpass 1.8kHz → AnalyserNode(8192)
@@ -59,7 +64,7 @@
                   → R=銀 G=金(中央軸) B=霧
                   同パスで前フレーム(ping-pong)と EMA 合成(残光。freeze 時バイパス)
       P2 present: 銀墨+金のグレード、ビネット、フィルム粒子、デバッグ表示 → 画面
-    [DOM] 音名/Hz/cent 数値、±50 セントスケール、6弦インジケータ(HUD)
+    [DOM] 音名1文字+無ラベル目盛(±50cent)+6弦ドットのみ(文字レス HUD)
 
   スライダー(全パラメタは state に集約。DEFAULTS + RESET LOOK):
     bands    縞の密度     — 干渉縞の密度(倍音層はその2倍/4倍)
@@ -112,15 +117,8 @@
         line-height: 1; color: var(--ink);
       }
       #noteName sub { font-size: 0.38em; font-weight: 300; opacity: 0.75; }
-      #centBig { font-size: clamp(16px, 2.8vmin, 24px); font-weight: 300; letter-spacing: 0.08em; }
-      #centBig .sep { opacity: 0.35; margin: 0 0.6em; }
-      #centBig .cent.locked { color: var(--gold); }
-      #hintTxt { font-size: 12px; color: var(--muted); min-height: 1.2em; letter-spacing: 0.08em; }
-      #a4Badge {
-        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 16px; z-index: 5;
-        font-size: 12px; letter-spacing: 0.12em; color: rgba(232, 181, 88, 0.75);
-        pointer-events: none; user-select: none;
-      }
+      #noteName.locked { color: var(--gold); text-shadow: 0 0 24px rgba(232, 181, 88, 0.45); }
+      #noteName { transition: color 0.5s; }
       #centScale {
         position: relative; width: min(320px, 72vw); height: 26px; margin-top: 8px;
       }
@@ -129,10 +127,6 @@
         background: rgba(233, 228, 214, 0.35);
       }
       #centScale .tick.zero { top: 4px; height: 15px; width: 1.5px; background: rgba(233, 228, 214, 0.7); }
-      #centScale .lab {
-        position: absolute; top: 17px; transform: translateX(-50%);
-        font-size: 9px; color: rgba(233, 228, 214, 0.4);
-      }
       #centMark {
         position: absolute; top: 0; left: 50%; width: 3px; height: 14px; border-radius: 2px;
         background: var(--ink); transform: translateX(-50%);
@@ -244,11 +238,8 @@
 
     <div id="hud" class="dim" aria-live="off">
       <div id="noteName">—</div>
-      <div id="centBig">&nbsp;</div>
       <div id="centScale"></div>
-      <div id="hintTxt">弦を1本だけ鳴らしてください</div>
     </div>
-    <div id="a4Badge">A4 = 440</div>
 
     <div id="stringsRow" aria-label="弦の選択"></div>
 
@@ -351,6 +342,10 @@
         idleEnv: 1,         // 無音包絡 0..1
         tunedMask: 0,       // このセッションでロック済みの弦 bit
         fineUsed: false,    // 直交復調の微調値を採用中か
+        lvlSlow: 0,         // 音量の遅い包絡(オンセット検出の基準)
+        burstAge: 99,       // 直近の弾弦からの経過秒(波の伝播)
+        lockAge: 99,        // ロック成立からの経過秒(金の一閃)
+        agit: 0,            // 乱流量 0..1(ずれが大きいほど荒れる)
       };
       // 機械検証フック: 毎フレーム更新(実 DSP の計測値)
       window.__tuner = tuner;
@@ -443,22 +438,12 @@
       // ---- HUD ----
       const hud = document.getElementById("hud");
       const noteNameEl = document.getElementById("noteName");
-      const centBigEl = document.getElementById("centBig");
-      const a4BadgeEl = document.getElementById("a4Badge");
-      const hintTxtEl = document.getElementById("hintTxt");
       const centScaleEl = document.getElementById("centScale");
       for (let c = -50; c <= 50; c += 10) {
         const t = document.createElement("div");
         t.className = "tick" + (c === 0 ? " zero" : "");
         t.style.left = `${50 + c}%`;
         centScaleEl.appendChild(t);
-        if (c === -50 || c === 0 || c === 50) {
-          const l = document.createElement("div");
-          l.className = "lab";
-          l.style.left = `${50 + c}%`;
-          l.textContent = c === 0 ? "0" : (c > 0 ? "+" : "") + c;
-          centScaleEl.appendChild(l);
-        }
       }
       const centMark = document.createElement("div");
       centMark.id = "centMark";
@@ -583,6 +568,11 @@
       uniform float uConf;
       uniform float uCentAbs;   // |cent| clamp 60
       uniform float uLockGlow;  // 金の量
+      uniform float uAgit;      // 乱流量(ずれの大きさ)
+      uniform float uBurst;     // 弾弦バーストの強さ(指数減衰)
+      uniform float uBurstR;    // バースト波面の半径(右の波源から)
+      uniform float uLockR;     // ロック一閃の波面(軸からの距離)
+      uniform float uLockE;     // ロック一閃の強さ(指数減衰)
       ${NOISE_GLSL}
       const float TAU = 6.28318530718;
       void main(){
@@ -601,8 +591,11 @@
 
         // 有機ワープ: 波源近傍ほど強く乱す(静的 fbm。時間はシードに混ぜない)
         float w1 = fbm(vUv * vec2(2.3, 2.6) + vec2(7.31, 2.17));
+        // 乱流: ずれが大きいほど場そのものがうねり流れる(時間駆動 = freeze で停止)
+        float agitN = fbm(vUv * 3.1 + vec2(uTime * 0.34, -uTime * 0.22));
         float tCoord = pathD * uBands
-          + uWarp * (w1 - 0.5) * (0.3 + 1.4 * nearF);
+          + uWarp * (w1 - 0.5) * (0.3 + 1.4 * nearF)
+          + uAgit * (agitN - 0.5) * 2.4;
 
         // --- 倍音バンド 1x/2x/4x。位相は 2^j 倍で進む(ストロボ原理) ---
         // phi 増加(シャープ)で縞は右の波源(=自分の音)側へ流れる
@@ -622,6 +615,15 @@
           wsum += wj;
         }
         float fringe = min(acc / wsum * 1.5, 1.25);
+
+        // --- 弾弦バースト: 右の波源(=自分の音)から波が走り抜ける ---
+        float dBurst = (rR - uBurstR) / 0.1;
+        float burstWave = exp(-dBurst * dBurst);
+        fringe *= 1.0 + uBurst * burstWave * 2.4;
+
+        // --- 乱流の明滅: 荒れているあいだ縞の明るさが波打つ ---
+        float flick = fbm(vUv * 2.1 + vec2(-uTime * 0.42, uTime * 0.3));
+        fringe *= 1.0 + uAgit * (flick - 0.5) * 1.3;
 
         // --- 近いほど鮮明(不変量#4) ---
         float crisp = clamp(uConf, 0.0, 1.0) * (0.42 + 0.58 * exp(-uCentAbs / 28.0));
@@ -664,6 +666,12 @@
         // ロック時: 軸ぎわの縞だけがほんのり温まる(gap の内側は温めない)
         gold += uLockGlow * (fringe * env * gap * 0.24 * exp(-ax * ax * 55.0)
                              + exp(-ax * ax * 5000.0) * axisVis * 0.28);
+        // ロックの一閃: 金の波面が軸から左右へ走り、縞を舐めて消える
+        float dLock = (ax - uLockR) / 0.11;
+        float lockWave = exp(-dLock * dLock) * uLockE;
+        gold += lockWave * (fringe * env * gap * 0.9 + 0.05 * env);
+        // 弾弦バーストの先端は銀の微光
+        silver += uBurst * burstWave * env * gap * 0.1;
 
         vec3 cur = vec3(silver, gold, idleMist);
         // --- 残光: EMA(有界。max 合成はしない → whiteout 恒久回避) ---
@@ -1116,13 +1124,17 @@
         for (const c of centHist) va += (c - mu) * (c - mu);
         tuner.centJit = Math.sqrt(va / centHist.length);
         const lvl = Math.min(1, Math.max(0, (tuner.rmsDb - state.gate) / 30));
-        tuner.activeEnv += (Math.max(0.35, lvl) - tuner.activeEnv) * Math.min(1, dt * 9);
+        // オンセット検出: 速い包絡が遅い包絡を跳び越えたら「弾いた」
+        if (lvl > tuner.lvlSlow + 0.16 && tuner.burstAge > 0.3) tuner.burstAge = 0;
+        tuner.lvlSlow += (lvl - tuner.lvlSlow) * Math.min(1, dt * 2.0);
+        tuner.activeEnv += (Math.max(0.35, lvl * 1.1) - tuner.activeEnv) * Math.min(1, dt * 12);
       }
       function measureMiss(dt) {
         tuner.soundOn = false;
         tuner.conf = 0;
         tuner.beatHz = 0;
         tuner.activeEnv += (0 - tuner.activeEnv) * Math.min(1, dt * 2.2);
+        tuner.lvlSlow += (0 - tuner.lvlSlow) * Math.min(1, dt * 2.0);
         centHist.length = 0;
         f0Hist.length = 0;
       }
@@ -1169,23 +1181,33 @@
         const idleTarget = tuner.activeEnv > 0.05 ? 0 : 1;
         tuner.idleEnv += (idleTarget - tuner.idleEnv) * Math.min(1, dt * (idleTarget ? 0.55 : 3.5));
 
-        // 縞位相: PHI += 2π·Δf·dt(視覚は ±6Hz に tanh クランプ = 遠すぎる時の
-        // ストロボ・エイリアシング防止。読み取りの符号と単調性は保存される)
+        tuner.burstAge += dt;
+        tuner.lockAge += dt;
+
+        // 縞位相: PHI += 2π·(2·Δf)·dt。第2倍音基準のストロボ(Peterson 同様)で
+        // ドリフトは物理の2倍速 — 静止=合致の関係は厳密に保存される。
+        // ±6Hz の tanh クランプは遠すぎる時のエイリアシング防止(符号と単調性は保存)
         if (tuner.soundOn) {
-          const dfVis = 6 * Math.tanh(tuner.beatHz / 6);
+          const dfVis = 6 * Math.tanh(tuner.beatHz * 2 / 6);
           tuner.phi += 2 * Math.PI * dfVis * dt;
         } else {
           // 無音: 眠っている計器のごく遅い漂流
           tuner.phi += 2 * Math.PI * 0.018 * dt * tuner.idleEnv;
         }
 
+        // 乱流: ずれが大きいほど場が荒れ、合致へ向かうほど結晶質に静まる
+        const agitTarget = tuner.soundOn
+          ? Math.min(1, Math.abs(tuner.cent) / 30) : tuner.agit * 0.5;
+        tuner.agit += (agitTarget - tuner.agit) * Math.min(1, dt * 2.6);
+
         // ロック判定: ±2cent × ジッタ<1.5 が 0.6 秒(ヒステリシス)
         const inTune = tuner.soundOn && Math.abs(tuner.cent) <= 2 && tuner.centJit < 1.5;
         tuner.lockT = inTune ? tuner.lockT + dt : Math.max(0, tuner.lockT - dt * 2.5);
         const wasLocked = tuner.locked;
         tuner.locked = tuner.lockT >= 0.6;
-        if (tuner.locked && !wasLocked && tuner.stringIdx >= 0) {
-          tuner.tunedMask |= 1 << tuner.stringIdx;
+        if (tuner.locked && !wasLocked) {
+          tuner.lockAge = 0; // 金の一閃(軸から外へ走る波)
+          if (tuner.stringIdx >= 0) tuner.tunedMask |= 1 << tuner.stringIdx;
         }
         const glowTarget = tuner.locked ? 1 : 0;
         tuner.lockGlow += (glowTarget - tuner.lockGlow) * Math.min(1, dt * (glowTarget ? 5.5 : 1.3));
@@ -1231,6 +1253,11 @@
         gl.uniform1f(uni(progField, "uConf"), tuner.soundOn ? Math.max(0.35, tuner.conf) : 0);
         gl.uniform1f(uni(progField, "uCentAbs"), Math.min(60, Math.abs(tuner.cent)));
         gl.uniform1f(uni(progField, "uLockGlow"), tuner.lockGlow);
+        gl.uniform1f(uni(progField, "uAgit"), tuner.agit);
+        gl.uniform1f(uni(progField, "uBurst"), Math.exp(-tuner.burstAge * 2.0));
+        gl.uniform1f(uni(progField, "uBurstR"), tuner.burstAge * 1.6);
+        gl.uniform1f(uni(progField, "uLockR"), tuner.lockAge * 1.5);
+        gl.uniform1f(uni(progField, "uLockE"), Math.exp(-tuner.lockAge * 1.4));
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
         // P2: present
@@ -1257,32 +1284,19 @@
       }
 
       function updateHud() {
-        const midi = TUNINGS[state.tuning].midi;
-        a4BadgeEl.textContent = `A4 = ${state.a4 % 1 ? state.a4.toFixed(1) : state.a4}`;
         const showTarget = tuner.targetMidi >= 0 && (tuner.soundOn || tuner.activeEnv > 0.08);
         hud.classList.toggle("dim", !showTarget);
         if (showTarget) {
           const nm = noteLabel(tuner.targetMidi);
           noteNameEl.innerHTML = nm.replace(/(-?\d+)$/, "<sub>$1</sub>");
-          const c = tuner.cent;
-          const cTxt = (c >= 0 ? "+" : "−") + Math.abs(c).toFixed(1) + " cent";
-          centBigEl.innerHTML =
-            `<span class="hz">${tuner.f0.toFixed(2)} Hz</span><span class="sep">|</span>` +
-            `<span class="cent${tuner.locked ? " locked" : ""}">${cTxt}</span>`;
-          hintTxtEl.textContent = tuner.locked ? "✓ 合いました"
-            : c > 3 ? "♯ 高い — ペグを緩める(縞が右へ流れています)"
-            : c < -3 ? "♭ 低い — ペグを巻き上げる(縞が左へ流れています)"
-            : "静止するまであと少し";
+          noteNameEl.classList.toggle("locked", tuner.locked);
           centMark.classList.remove("off");
           centMark.classList.toggle("locked", tuner.locked);
-          const x = Math.max(-50, Math.min(50, c));
+          const x = Math.max(-50, Math.min(50, tuner.cent));
           centMark.style.left = `${50 + x}%`;
         } else {
           noteNameEl.textContent = "—";
-          centBigEl.innerHTML = tuner.listening
-            ? `<span class="hz" style="opacity:.55">${TUNINGS[state.tuning].label}</span>`
-            : "&nbsp;";
-          hintTxtEl.textContent = tuner.listening ? "弦を1本だけ鳴らしてください" : "";
+          noteNameEl.classList.remove("locked");
           centMark.classList.add("off");
           centMark.classList.remove("locked");
           centMark.style.left = "50%";
@@ -1293,7 +1307,6 @@
           `FPS ${fpsEma.toFixed(0)} / ${W}×${H} / f0 ${tuner.soundOn ? tuner.f0.toFixed(2) + " Hz" : "--"} ` +
           `/ 入力 ${tuner.rmsDb > -100 ? tuner.rmsDb.toFixed(0) : "--"} dB / conf ${tuner.conf.toFixed(2)} ` +
           `/ ${tuner.fineUsed ? "lock-in" : "yin"} / ${modeTxt}${FREEZE ? " · freeze" : ""}`;
-        void midi;
       }
 
       function frame(now) {
