@@ -801,6 +801,7 @@
       uniform float uGrainAmt;
       uniform float uSeed;      // freeze では固定
       uniform int   uDebug;
+      uniform int   uDirect;    // 1 = accum は完成 RGB(パーティクルモード)
       uniform vec4  uMeters;    // level, conf, |cent|/50, lock
       uniform float uPhi;
       ${NOISE_GLSL}
@@ -819,10 +820,15 @@
         vec3 bg = vec3(0.024, 0.024, 0.030);
         vec3 silverC = vec3(0.86, 0.84, 0.78);
         vec3 goldC = vec3(0.93, 0.72, 0.34);
-        vec3 col = bg
-          + silverC * min(field.r, 1.0) * 0.88
-          + vec3(0.55, 0.58, 0.62) * field.b
-          + goldC * min(field.g, 1.2) * 0.9;
+        vec3 col;
+        if (uDirect == 1) {
+          col = bg + min(field, vec3(1.3));
+        } else {
+          col = bg
+            + silverC * min(field.r, 1.0) * 0.88
+            + vec3(0.55, 0.58, 0.62) * field.b
+            + goldC * min(field.g, 1.2) * 0.9;
+        }
 
         // ビネット
         col *= 1.0 - 0.38 * smoothstep(0.45, 1.15, length(p));
@@ -972,8 +978,9 @@
           float h2 = hash12(vec2(idx, 17.7));
           float h3 = hash12(vec2(idx, 29.3));
           float h4 = hash12(vec2(idx, 41.9));
+          float h5 = hash12(vec2(idx, 53.9));
           oPos = vec4((h1 - 0.5) * uAspect * 1.05, (h2 - 0.5) * 1.02, h3, h4);
-          oVel = vec4(0.0);
+          oVel = vec4(0.0, 0.0, (h5 - 0.5) * 1.5, 0.0); // z 位置は vel.z に
           return;
         }
         vec4 P = texelFetch(uPosT, ij, 0);
@@ -981,6 +988,8 @@
         vec4 T = texelFetch(uTgtT, ij, 0);
         vec2 pos = P.xy;
         vec2 vel = V.xy;
+        float zp = V.z;                    // 奥行き位置(-0.9..0.9)
+        float zv = V.w;                    // 奥行き速度
         float rec = step(P.z, uAttract);   // この粒は文字へリクルート済みか
         // 自由粒子: curl ノイズの乱流。ずれと音量で荒ぶり、無音でも眠らない
         float freeAmp = mix(0.25, 0.95, uAgit) * (0.4 + 0.6 * uLevel);
@@ -988,6 +997,9 @@
         freeAmp *= mix(1.0, 0.06, rec * smoothstep(0.2, 0.75, uAttract));
         vec2 cn = curl2(pos * 1.7 + vec2(uTime * 0.11, -uTime * 0.07) + P.w * 3.7);
         vel += cn * freeAmp * uDt;
+        // 奥行き方向の乱流(体積として沸き立つ)
+        float zn = fbm(pos * 1.5 + vec2(uTime * 0.08 + zp * 1.7, P.w * 5.1)) - 0.5;
+        zv += zn * freeAmp * 1.3 * uDt;
         // 待機の渦: 無音のあいだ、粒は銀河のようにゆっくり大きく回り続ける
         float rr = max(length(pos), 1e-3);
         vec2 tang = vec2(-pos.y, pos.x) / rr;
@@ -999,13 +1011,22 @@
         // uGlyph: 縦画面では文字を縮めて画面内に収める
         float k = rec * mix(9.0, 32.0, uAttract);
         vel += (T.xy * uGlyph - pos) * k * uDt;
+        zv += (0.0 - zp) * k * uDt;        // 文字は焦点面(z=0)に定着
         // 弾弦バースト: 中心から外へ弾く(文字の粒はわずかに震えるだけ)
         float wave = exp(-pow((length(pos) - uBurstR) / 0.13, 2.0));
         vec2 dir = pos / max(length(pos), 1e-3);
         vel += dir * wave * uBurst * mix(1.6, 0.25, rec) * uDt * 9.0;
+        zv += sign(zp + 1e-3) * wave * uBurst * mix(1.1, 0.15, rec) * uDt * 6.0;
         // 抵抗(文字の粒は強く減衰して定着する)
-        vel *= exp(-uDt * mix(1.7, 9.0, rec));
+        float drg = exp(-uDt * mix(1.7, 9.0, rec));
+        vel *= drg;
+        zv *= drg;
         pos += vel * uDt;
+        zp += zv * uDt;
+        if (rec < 0.5) {
+          if (zp >  0.9) zp -= 1.8;
+          if (zp < -0.9) zp += 1.8;
+        }
         // 自由粒子は画面外でそっと反対側へ
         float hx = uAspect * 0.56;
         if (rec < 0.5) {
@@ -1015,27 +1036,39 @@
           if (pos.y < -0.56) pos.y += 1.12;
         }
         oPos = vec4(pos, P.zw);
-        oVel = vec4(vel, 0.0, 0.0);
+        oVel = vec4(vel, zp, zv);
       }`;
 
       const VS_PTS = `#version 300 es
       precision highp float;
       uniform sampler2D uPos;
+      uniform sampler2D uVel;   // z 位置は vel.z
       uniform vec2 uRes;
       uniform float uAttract;
       uniform float uLockGlow;
       uniform float uIdle;
+      uniform float uTime;
       out float vRec;
       out float vSeed;
+      out float vDepth;         // 遠近係数(近い=大きい)
       void main(){
         int i = gl_VertexID;
         ivec2 ij = ivec2(i % ${SIM_N}, i / ${SIM_N});
         vec4 P = texelFetch(uPos, ij, 0);
+        float zp = texelFetch(uVel, ij, 0).z;
         float aspect = uRes.x / max(uRes.y, 1.0);
-        gl_Position = vec4(P.x / (0.5 * aspect), P.y * 2.0, 0.0, 1.0);
+        // ゆっくり歳差するカメラ(ロック中は静める — 文字を読ませる)
+        float th = (0.16 * sin(uTime * 0.19) + 0.09 * sin(uTime * 0.113 + 2.0))
+                 * (1.0 - 0.7 * uLockGlow);
+        float cs = cos(th), sn = sin(th);
+        float xr = P.x * cs + zp * sn;
+        float zr = -P.x * sn + zp * cs;
+        float persp = clamp(1.35 / (1.35 + zr), 0.45, 2.3);
+        gl_Position = vec4(xr / (0.5 * aspect) * persp, P.y * 2.0 * persp, 0.0, 1.0);
         vRec = step(P.z, uAttract);
         vSeed = P.w;
-        float px = (0.8 + P.w * 1.7) * (uRes.y / 800.0);
+        vDepth = persp;
+        float px = (0.8 + P.w * 1.7) * (uRes.y / 800.0) * persp;
         px *= mix(1.0, 1.35, uIdle);
         gl_PointSize = max(1.0, px * mix(1.0, 1.5, vRec * uLockGlow));
       }`;
@@ -1044,12 +1077,14 @@
       precision highp float;
       in float vRec;
       in float vSeed;
+      in float vDepth;
       out vec4 outColor;
       uniform float uLit;      // 接近グロー/ロック(金の割合)
       uniform float uLevel;
       uniform float uIdle;
       uniform float uBurst;
       uniform float uTime;
+      uniform float uTint;     // 音程の温度: フラット=-1(冷) / シャープ=+1(熱)
       void main(){
         vec2 q = gl_PointCoord - 0.5;
         float d2 = dot(q, q);
@@ -1059,9 +1094,26 @@
         float lively = 0.16 + 0.5 * uLevel + 0.4 * uBurst;
         float bright = mix(lively, 0.3 + 0.75 * breath, uIdle);
         bright *= 0.7 + 0.6 * vSeed;
-        float goldMix = vRec * (0.3 + 0.7 * uLit);
-        float a = disc * bright;
-        outColor = vec4(a * (1.0 - goldMix), a * goldMix, 0.0, 1.0);
+        // 遠近: 近い粒は明るく、遠い粒は暗く大気に沈む
+        bright *= clamp(vDepth * vDepth * 0.7, 0.22, 1.9);
+
+        // 粒の性格: 銀のきらめきと熾火(銅〜赤橙)が混在。音量で熾火が増える
+        vec3 silverC = vec3(0.84, 0.84, 0.88);
+        vec3 emberA = vec3(1.0, 0.45, 0.16);
+        vec3 emberB = vec3(0.72, 0.19, 0.07);
+        vec3 goldC = vec3(1.0, 0.78, 0.38);
+        float embery = smoothstep(0.35, 0.8, fract(vSeed * 7.13));
+        float emberAmt = embery * clamp(0.3 + 0.85 * uLevel + 0.7 * uBurst, 0.0, 1.0);
+        emberAmt *= mix(1.0, 0.45, uIdle);
+        vec3 col = mix(silverC, mix(emberA, emberB, fract(vSeed * 3.71)), emberAmt);
+        // 音程の温度: フラットで冷たく沈み、シャープで熱を帯びる(自由粒子)
+        col = mix(col, vec3(0.35, 0.52, 1.0), max(-uTint, 0.0) * 0.4 * (1.0 - vRec));
+        col = mix(col, vec3(1.0, 0.4, 0.18), max(uTint, 0.0) * 0.4 * (1.0 - vRec));
+        // 文字の粒は金へ(達成の色)
+        col = mix(col, goldC, vRec * (0.35 + 0.65 * uLit));
+        // 遠い粒は青みがかって沈む(大気遠近)
+        col = mix(col * vec3(0.62, 0.68, 0.9), col, clamp(vDepth, 0.4, 1.0));
+        outColor = vec4(col * disc * bright, 1.0);
       }`;
 
       // 粒シーン + 前フレームの EMA 合成。金の軸とロック一閃は FIELD と同じ言語
@@ -1081,12 +1133,14 @@
         float aspect = uRes.x / max(uRes.y, 1.0);
         vec2 p = (vUv - 0.5) * vec2(aspect, 1.0);
         vec3 cur = texture(uScene, vUv).rgb;
+        vec3 goldC = vec3(1.0, 0.78, 0.38);
         float ax = abs(p.x);
         float axisVis = smoothstep(0.07, 0.18, abs(p.y)) * (1.0 - smoothstep(0.44, 0.56, abs(p.y)));
-        cur.g += (exp(-ax * ax * 42000.0) + exp(-ax * ax * 3200.0) * 0.22)
+        cur += goldC * (exp(-ax * ax * 42000.0) + exp(-ax * ax * 3200.0) * 0.22)
                * axisVis * (0.05 + 0.6 * uLit) * (0.15 + 0.85 * uActiveEnv) * 0.5;
         float dLock = (ax - uLockR) / 0.11;
-        cur.g += exp(-dLock * dLock) * uLockE * (cur.r * 1.3 + 0.05);
+        float lum = dot(cur, vec3(0.35, 0.45, 0.2));
+        cur += goldC * exp(-dLock * dLock) * uLockE * (lum * 1.2 + 0.05);
         vec3 prev = texture(uPrev, vUv).rgb;
         outColor = vec4(mix(cur, prev, uTrail), 1.0);
       }`;
@@ -1149,14 +1203,22 @@
         x.fillStyle = "#fff";
         x.textAlign = "center";
         x.textBaseline = "middle";
-        let fs = 430;
-        x.font = `700 ${fs}px ui-monospace, "Courier New", Courier, monospace`;
+        const gothic = (n) =>
+          `900 ${n}px "Arial Black", "Helvetica Neue", Helvetica, Arial, ` +
+          `"Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif`;
+        let fs = 420;
+        x.font = gothic(fs);
         const wpx = x.measureText(letter).width;
-        if (wpx > 450) {
-          fs = Math.floor((fs * 450) / wpx);
-          x.font = `700 ${fs}px ui-monospace, "Courier New", Courier, monospace`;
+        if (wpx > 440) {
+          fs = Math.floor((fs * 440) / wpx);
+          x.font = gothic(fs);
         }
+        // ストロークで太らせた極太ゴシック
+        x.lineWidth = fs * 0.07;
+        x.lineJoin = "round";
+        x.strokeStyle = "#fff";
         x.fillText(letter, cw / 2, cw / 2 + fs * 0.04);
+        x.strokeText(letter, cw / 2, cw / 2 + fs * 0.04);
         const img = x.getImageData(0, 0, cw, cw).data;
         const rnd = mulberry32(1234 + letter.charCodeAt(0) * 7 + (letter.charCodeAt(1) || 0) * 131);
         const n = SIM_N * SIM_N;
@@ -1712,7 +1774,10 @@
         gl.bindVertexArray(ptsVao);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, posA);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, velA);
         gl.uniform1i(uni(progPts, "uPos"), 0);
+        gl.uniform1i(uni(progPts, "uVel"), 1);
         gl.uniform2f(uni(progPts, "uRes"), W, H);
         gl.uniform1f(uni(progPts, "uAttract"), tuner.attract);
         gl.uniform1f(uni(progPts, "uLockGlow"), tuner.lockGlow);
@@ -1722,6 +1787,7 @@
         gl.uniform1f(uni(progPts, "uIdle"), tuner.idleEnv);
         gl.uniform1f(uni(progPts, "uBurst"), Math.exp(-tuner.burstAge * 2.0));
         gl.uniform1f(uni(progPts, "uTime"), timeSec);
+        gl.uniform1f(uni(progPts, "uTint"), tuner.windN);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, gl.ONE);
         // 縦画面では粒の面密度が上がりすぎるため、アスペクト比で間引く
@@ -1763,6 +1829,7 @@
         gl.uniform1f(uni(progShow, "uGrainAmt"), state.grain);
         gl.uniform1f(uni(progShow, "uSeed"), FREEZE ? 7 : (frameN % 997));
         gl.uniform1i(uni(progShow, "uDebug"), state.debugView);
+        gl.uniform1i(uni(progShow, "uDirect"), state.mode === 1 && PARTICLE_OK ? 1 : 0);
         gl.uniform4f(uni(progShow, "uMeters"),
           Math.min(1, Math.max(0, (tuner.rmsDb + 72) / 60)),
           tuner.conf,
