@@ -64,6 +64,7 @@
     | 6 | 音に触っている手応え: 弾いた瞬間に右の波源から波が場を走り、ずれが大きいほど場は乱流で荒れ、合致へ向かうほど結晶質に静まり、ロックで金の波が軸から一閃する | 時間 | オンセット検出(速い包絡が遅い包絡を跳び越え)→波面伝播 / |cent|→乱流ワープ+明滅 / ロックエッジ→一閃波面 | 静的な計器になり、インタラクティブ性が死ぬ |
     | 7 | 画面に文字はほぼ無い(上下中央の音名1文字+動く針+弦ドットのみ。固定目盛も無い)。数値・説明文・単位を出さない | 形 | 方向=ドリフト、量=速度と乱流、達成=金、で情報を全て絵に負わせる | 計器のラベルだらけになり様式が死ぬ |
     | 8 | (PARTICLE)文字は「達成の証」として粒から組み上がる — ずれ=発散する塵、接近=1粒ずつのリクルート、ロック=完全な金の文字 | 形/時間 | 粒ごとのしきい値 P.z と吸着率 uAttract の比較でリクルート、ばね+強減衰で定着 | 常に文字が見えていると達成の物語が消える |
+    | 9 | (PARTICLE)弾くたびに文字は一度ほどけて花火のように散り、音が続くあいだに再び集まる(ロック中は崩れずきらめく) | 時間 | オンセットで scatter=1 → 吸着率を一時 8 割解除+強キック+乱流サージ、τ0.55s で減衰し再集結 | 弾いても絵が変わらず、発散の瞬間が存在しない |
 
   パイプライン(毎フレーム):
     [Audio] mic/tone → highpass 35Hz → lowpass 1.8kHz → AnalyserNode(8192)
@@ -411,6 +412,7 @@
         fineUsed: false,    // 直交復調の微調値を採用中か
         lvlSlow: 0,         // 音量の遅い包絡(オンセット検出の基準)
         attract: 0,         // 文字への吸着率 0..1(音程の近さ。粒のリクルート率)
+        scatter: 0,         // 弾弦の発散包絡: 弾くたびに文字がほどけて散る
         windN: 0,           // 自由粒子への横風(cent の符号と大きさ)
         burstAge: 99,       // 直近の弾弦からの経過秒(波の伝播)
         lockAge: 99,        // ロック成立からの経過秒(金の一閃)
@@ -994,6 +996,7 @@
         float rec = step(P.z, uAttract);   // この粒は文字へリクルート済みか
         // 自由粒子: curl ノイズの乱流。ずれと音量で荒ぶり、無音でも眠らない
         float freeAmp = mix(0.25, 0.95, uAgit) * (0.4 + 0.6 * uLevel);
+        freeAmp += uBurst * 0.9; // 弾いた直後は乱流も燃え上がる
         freeAmp = mix(freeAmp, 0.5, uIdle);
         freeAmp *= mix(1.0, 0.06, rec * smoothstep(0.2, 0.75, uAttract));
         vec2 cn = curl2(pos * 1.7 + vec2(uTime * 0.11, -uTime * 0.07) + P.w * 3.7);
@@ -1016,8 +1019,8 @@
         // 弾弦バースト: 中心から外へ弾く(文字の粒はわずかに震えるだけ)
         float wave = exp(-pow((length(pos) - uBurstR) / 0.13, 2.0));
         vec2 dir = pos / max(length(pos), 1e-3);
-        vel += dir * wave * uBurst * mix(1.6, 0.25, rec) * uDt * 9.0;
-        zv += sign(zp + 1e-3) * wave * uBurst * mix(1.1, 0.15, rec) * uDt * 6.0;
+        vel += dir * wave * uBurst * mix(2.8, 0.4, rec) * uDt * 9.0;
+        zv += sign(zp + 1e-3) * wave * uBurst * mix(1.9, 0.3, rec) * uDt * 6.0;
         // 抵抗(文字の粒は強く減衰して定着する)
         float drg = exp(-uDt * mix(1.7, 9.0, rec));
         vel *= drg;
@@ -1569,7 +1572,10 @@
         tuner.centJit = Math.sqrt(va / centHist.length);
         const lvl = Math.min(1, Math.max(0, (tuner.rmsDb - state.gate) / 30));
         // オンセット検出: 速い包絡が遅い包絡を跳び越えたら「弾いた」
-        if (lvl > tuner.lvlSlow + 0.16 && tuner.burstAge > 0.3) tuner.burstAge = 0;
+        if (lvl > tuner.lvlSlow + 0.16 && tuner.burstAge > 0.3) {
+          tuner.burstAge = 0;
+          tuner.scatter = 1; // 弾いた瞬間: 粒を解き放つ(発散→再集結の物語)
+        }
         tuner.lvlSlow += (lvl - tuner.lvlSlow) * Math.min(1, dt * 2.0);
         tuner.activeEnv += (Math.max(0.35, lvl * 1.1) - tuner.activeEnv) * Math.min(1, dt * 12);
       }
@@ -1627,6 +1633,7 @@
 
         tuner.burstAge += dt;
         tuner.lockAge += dt;
+        tuner.scatter *= Math.exp(-dt / 0.55);
 
         // 縞位相: PHI += 2π·(2·Δf)·dt。第2倍音基準のストロボ(Peterson 同様)で
         // ドリフトは物理の2倍速 — 静止=合致の関係は厳密に保存される。
@@ -1731,6 +1738,10 @@
 
       function renderParticleAccum(timeSec, simDt, trailNow, lit) {
         ensureLetterTargets();
+        // 弾いた瞬間は吸着を解いて粒を散らせ、減衰とともに再集結させる。
+        // ロック中は文字を崩さない(きらめきに留める)
+        const attractEff = tuner.attract
+          * (1 - 0.8 * tuner.scatter * (1 - 0.65 * tuner.lockGlow));
         // sim: (posA,velA) → (posB,velB)  MRT ping-pong
         gl.bindFramebuffer(gl.FRAMEBUFFER, simFboB);
         gl.viewport(0, 0, SIM_N, SIM_N);
@@ -1747,7 +1758,7 @@
         gl.uniform1i(uni(progSim, "uTgtT"), 2);
         gl.uniform1f(uni(progSim, "uDt"), Math.min(simDt, 1 / 30));
         gl.uniform1f(uni(progSim, "uTime"), timeSec);
-        gl.uniform1f(uni(progSim, "uAttract"), tuner.attract);
+        gl.uniform1f(uni(progSim, "uAttract"), attractEff);
         gl.uniform1f(uni(progSim, "uWind"), tuner.windN);
         gl.uniform1f(uni(progSim, "uBurst"), Math.exp(-tuner.burstAge * 2.0));
         gl.uniform1f(uni(progSim, "uBurstR"), tuner.burstAge * 1.4);
@@ -1777,7 +1788,7 @@
         gl.uniform1i(uni(progPts, "uPos"), 0);
         gl.uniform1i(uni(progPts, "uVel"), 1);
         gl.uniform2f(uni(progPts, "uRes"), W, H);
-        gl.uniform1f(uni(progPts, "uAttract"), tuner.attract);
+        gl.uniform1f(uni(progPts, "uAttract"), attractEff);
         gl.uniform1f(uni(progPts, "uLockGlow"), tuner.lockGlow);
         gl.uniform1f(uni(progPts, "uIdle"), tuner.idleEnv);
         gl.uniform1f(uni(progPts, "uLit"), lit);
