@@ -13,7 +13,16 @@
     弾いた瞬間は右の波源から波が場を走り抜け、ずれが大きいほど場は乱流で
     荒れ、合致へ向かうほど結晶質に静まる。ロックの瞬間、金の波が軸から
     左右へ一閃する。HUD はほぼ文字レス(上下中央の音名1文字+動く針+弦ドット。
-    固定目盛なし)。設定パネルは右上の☰の奥に畳んであり、既定では現れない。
+    固定目盛なし)。設定パネルは右下の「⋯」の奥に畳んであり、既定では現れない。
+
+    表示モードは2つ(右上の FIELD / PARTICLE で切替、?mode=particle でも指定可):
+    - FIELD    … 上記の二源干渉の縞(既定)
+    - PARTICLE … 65,536 粒の GPU パーティクル。ずれが大きいほど curl ノイズで
+      発散し、音程が近づくほど粒が1粒ずつ音名グリフの目標点へリクルートされ、
+      文字が塵の中から組み上がっていく。ロック(±2cent×0.6s)で全粒が参加し
+      完全な文字が金で完成する。弾弦バーストは粒を弾き飛ばし、シャープ/フラット
+      の横風・金の軸・ロック一閃は FIELD と同じ視覚言語を共有する。
+      (float FBO 必須。EXT_color_buffer_float 非対応環境ではボタン非表示)
     ストロボチューナー(Peterson 型)の原理の全画面翻案であり、
     縞の運動 = うなりの物理量そのもの。ごまかしの無い計器である。
     <meta name="art-input" content="mic"> 宣言(カメラ不使用のマイク入力プロファイル)。
@@ -54,6 +63,7 @@
     | 5 | 無音時は薄霧の呼吸だけが残る静物(縞は眠る) | 時間 | activeEnv/idleEnv の2時定数クロスフェード+低振幅 fbm ミスト | 無音で真っ黒(死んだ画面)か、無音でも縞が踊る(嘘) |
     | 6 | 音に触っている手応え: 弾いた瞬間に右の波源から波が場を走り、ずれが大きいほど場は乱流で荒れ、合致へ向かうほど結晶質に静まり、ロックで金の波が軸から一閃する | 時間 | オンセット検出(速い包絡が遅い包絡を跳び越え)→波面伝播 / |cent|→乱流ワープ+明滅 / ロックエッジ→一閃波面 | 静的な計器になり、インタラクティブ性が死ぬ |
     | 7 | 画面に文字はほぼ無い(上下中央の音名1文字+動く針+弦ドットのみ。固定目盛も無い)。数値・説明文・単位を出さない | 形 | 方向=ドリフト、量=速度と乱流、達成=金、で情報を全て絵に負わせる | 計器のラベルだらけになり様式が死ぬ |
+    | 8 | (PARTICLE)文字は「達成の証」として粒から組み上がる — ずれ=発散する塵、接近=1粒ずつのリクルート、ロック=完全な金の文字 | 形/時間 | 粒ごとのしきい値 P.z と吸着率 uAttract の比較でリクルート、ばね+強減衰で定着 | 常に文字が見えていると達成の物語が消える |
 
   パイプライン(毎フレーム):
     [Audio] mic/tone → highpass 35Hz → lowpass 1.8kHz → AnalyserNode(8192)
@@ -68,6 +78,15 @@
                   同パスで前フレーム(ping-pong)と EMA 合成(残光。freeze 時バイパス)
       P2 present: 銀墨+金のグレード、ビネット、フィルム粒子、デバッグ表示 → 画面
     [DOM] 上下中央の音名1文字+動く針(±50cent、固定目盛なし)+6弦ドット(文字レス HUD)
+
+    PARTICLE モード時(GPU パーティクル):
+      P1 sim    : 位置/速度 RGBA32F ping-pong(MRT・texelFetch)。curl ノイズ+
+                  音名グリフ目標点へのばね(吸着率 = 音程の近さ、粒ごとの
+                  しきい値で順次リクルート)+弾弦バーストの波面キック
+      P2 points : gl_VertexID 描画の 65,536 点 → RGBA16F シーンへ加算合成
+      P3 accum  : シーン + 前フレーム EMA + 金の軸/ロック一閃 → ping-pong
+      P4 present: FIELD と共通(銀墨+金グレード、粒子、ビネット)
+      グリフ目標点は Canvas2D から決定的シード(mulberry32)で採取(時間は不混入)
 
   スライダー(開発用パネル内。全パラメタは state に集約。DEFAULTS + RESET LOOK。
   作品としては DEFAULTS で固定し、パネルは右下「⋯」の奥に非表示):
@@ -182,6 +201,23 @@
         color: var(--gold); border-bottom-color: rgba(232, 181, 88, 0.55);
         text-shadow: 0 0 12px rgba(232, 181, 88, 0.35);
       }
+      #modeBar {
+        position: fixed; top: max(16px, env(safe-area-inset-top)); right: 18px; z-index: 10;
+        display: flex; gap: 16px; align-items: center;
+      }
+      #modeBar button {
+        appearance: none; border: none; background: none; cursor: pointer;
+        font: inherit; font-size: 9.5px; letter-spacing: 0.24em; text-transform: uppercase;
+        color: rgba(233, 228, 214, 0.28); padding: 8px 2px 9px;
+        border-bottom: 1px solid transparent;
+        transition: color 0.3s, border-color 0.3s;
+      }
+      #modeBar button:hover { color: rgba(233, 228, 214, 0.7); }
+      #modeBar button.on {
+        color: rgba(233, 228, 214, 0.75);
+        border-bottom-color: rgba(233, 228, 214, 0.35);
+      }
+      #hud.letterMode #noteName { visibility: hidden; }
 
       /* ---- 開発用パネル(右下の気配だけの点) ---- */
       #togglePanel {
@@ -261,6 +297,7 @@
     <div id="stringsRow" aria-label="弦の選択"></div>
 
     <nav id="tuneBar" aria-label="チューニングの選択"></nav>
+    <nav id="modeBar" aria-label="表示モードの選択"></nav>
 
     <button id="togglePanel" type="button" aria-label="開発用パネルを開閉">⋯</button>
     <section id="panel" class="collapsed" aria-label="うなり dev controls"></section>
@@ -334,6 +371,8 @@
         manualString: -1, // -1 = AUTO
         pauseAnim: false,
         debugView: 0,
+        // 0 = FIELD(二源干渉) / 1 = PARTICLE(粒が音名の文字を形成)
+        mode: QUERY.get("mode") === "particle" ? 1 : 0,
       });
 
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -362,6 +401,8 @@
         tunedMask: 0,       // このセッションでロック済みの弦 bit
         fineUsed: false,    // 直交復調の微調値を採用中か
         lvlSlow: 0,         // 音量の遅い包絡(オンセット検出の基準)
+        attract: 0,         // 文字への吸着率 0..1(音程の近さ。粒のリクルート率)
+        windN: 0,           // 自由粒子への横風(cent の符号と大きさ)
         burstAge: 99,       // 直近の弾弦からの経過秒(波の伝播)
         lockAge: 99,        // ロック成立からの経過秒(金の一閃)
         agit: 0,            // 乱流量 0..1(ずれが大きいほど荒れる)
@@ -479,6 +520,30 @@
         });
       }
 
+      // ---- 表示モード切替(右上) ----
+      const MODES = [
+        { id: 0, label: "FIELD", desc: "二源干渉の縞" },
+        { id: 1, label: "PARTICLE", desc: "粒が音名の文字を形成" },
+      ];
+      const modeBar = document.getElementById("modeBar");
+      function buildModeBar() {
+        modeBar.innerHTML = "";
+        MODES.forEach((m) => {
+          if (m.id === 1 && !window.__particleOK) return; // float FBO 非対応環境
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = m.label;
+          b.setAttribute("aria-label", m.desc);
+          if (state.mode === m.id) b.classList.add("on");
+          b.addEventListener("click", () => {
+            state.mode = m.id;
+            hud.classList.toggle("letterMode", state.mode === 1);
+            buildModeBar();
+          });
+          modeBar.appendChild(b);
+        });
+      }
+
       // ---- 弦インジケータ ----
       const stringsRow = document.getElementById("stringsRow");
       function buildStringsRow() {
@@ -547,6 +612,13 @@
         showOverlay("WebGL2 が利用できません", "このブラウザ/端末では WebGL2 コンテキストを作成できませんでした。別のブラウザでお試しください。", false);
         throw new Error("WebGL2 unavailable");
       }
+
+      // パーティクル文字モードは float FBO が必須(制作規約 §9-3)。
+      // 非対応環境では FIELD モードのみ提供(モードボタンを出さない)
+      const PARTICLE_OK = !!gl.getExtension("EXT_color_buffer_float");
+      window.__particleOK = PARTICLE_OK;
+      const SIM_N = 256; // SIM_N^2 = 65,536 粒
+      let sceneTex = null, sceneFbo = null;
 
       const VS = `#version 300 es
       layout(location=0) in vec2 aPos;
@@ -781,9 +853,9 @@
         }
         return s;
       }
-      function program(fsSrc) {
+      function program(fsSrc, vsSrc) {
         const p = gl.createProgram();
-        gl.attachShader(p, compile(gl.VERTEX_SHADER, VS));
+        gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc || VS));
         gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
         gl.linkProgram(p);
         if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
@@ -834,9 +906,269 @@
         gl.bindFramebuffer(gl.FRAMEBUFFER, fboB);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        if (PARTICLE_OK) makeSceneTarget();
+      }
+      function makeSceneTarget() {
+        if (sceneTex) { gl.deleteTexture(sceneTex); gl.deleteFramebuffer(sceneFbo); }
+        sceneTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, W, H, 0, gl.RGBA, gl.HALF_FLOAT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        sceneFbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       }
       window.addEventListener("resize", resize);
       resize();
+
+      // ---------- [2.5] パーティクル文字モード ----------
+      // 粒の状態(位置/速度)は RGBA32F テクスチャの ping-pong(texelFetch)。
+      // 各粒は固有のしきい値 P.z を持ち、吸着率 uAttract がそれを越えた粒から
+      // 順に音名グリフの目標点へ「リクルート」される — ずれが小さくなるほど
+      // 文字が1粒ずつ組み上がり、ロック(attract=1)で完成する。
+      const FS_SIM = `#version 300 es
+      precision highp float;
+      layout(location = 0) out vec4 oPos;
+      layout(location = 1) out vec4 oVel;
+      uniform sampler2D uPosT;
+      uniform sampler2D uVelT;
+      uniform sampler2D uTgtT;
+      uniform float uDt;
+      uniform float uTime;
+      uniform float uAttract;
+      uniform float uWind;
+      uniform float uBurst;
+      uniform float uBurstR;
+      uniform float uLevel;
+      uniform float uIdle;
+      uniform float uAspect;
+      uniform float uInit;
+      uniform float uAgit;
+      ${NOISE_GLSL}
+      vec2 curl2(vec2 p){
+        float e = 0.09;
+        float a = fbm(p + vec2(0.0, e)) - fbm(p - vec2(0.0, e));
+        float b = fbm(p + vec2(e, 0.0)) - fbm(p - vec2(e, 0.0));
+        return vec2(a, -b) / (2.0 * e);
+      }
+      void main(){
+        ivec2 ij = ivec2(gl_FragCoord.xy);
+        float idx = float(ij.x + ij.y * ${SIM_N});
+        if (uInit > 0.5) {
+          float h1 = hash12(vec2(idx, 3.1));
+          float h2 = hash12(vec2(idx, 17.7));
+          float h3 = hash12(vec2(idx, 29.3));
+          float h4 = hash12(vec2(idx, 41.9));
+          oPos = vec4((h1 - 0.5) * uAspect * 1.05, (h2 - 0.5) * 1.02, h3, h4);
+          oVel = vec4(0.0);
+          return;
+        }
+        vec4 P = texelFetch(uPosT, ij, 0);
+        vec4 V = texelFetch(uVelT, ij, 0);
+        vec4 T = texelFetch(uTgtT, ij, 0);
+        vec2 pos = P.xy;
+        vec2 vel = V.xy;
+        float rec = step(P.z, uAttract);   // この粒は文字へリクルート済みか
+        // 自由粒子: curl ノイズの乱流。ずれと音量で荒ぶり、無音で熾火になる
+        float freeAmp = mix(0.25, 0.95, uAgit) * (0.4 + 0.6 * uLevel);
+        freeAmp = mix(freeAmp, freeAmp * 0.2, uIdle);
+        freeAmp *= mix(1.0, 0.06, rec * smoothstep(0.2, 0.75, uAttract));
+        vec2 cn = curl2(pos * 1.7 + vec2(uTime * 0.11, -uTime * 0.07) + P.w * 3.7);
+        vel += cn * freeAmp * uDt;
+        // 横風: シャープ=右へ / フラット=左へ(自由粒子のみ。FIELD と同じ言語)
+        vel.x += uWind * (1.0 - rec) * 0.4 * uDt;
+        // 文字へのばね(リクルート済みの粒のみ。近いほど強く締まる)
+        float k = rec * mix(9.0, 32.0, uAttract);
+        vel += (T.xy - pos) * k * uDt;
+        // 弾弦バースト: 中心から外へ弾く(文字の粒はわずかに震えるだけ)
+        float wave = exp(-pow((length(pos) - uBurstR) / 0.13, 2.0));
+        vec2 dir = pos / max(length(pos), 1e-3);
+        vel += dir * wave * uBurst * mix(1.6, 0.25, rec) * uDt * 9.0;
+        // 抵抗(文字の粒は強く減衰して定着する)
+        vel *= exp(-uDt * mix(1.7, 9.0, rec));
+        pos += vel * uDt;
+        // 自由粒子は画面外でそっと反対側へ
+        float hx = uAspect * 0.56;
+        if (rec < 0.5) {
+          if (pos.x >  hx) pos.x -= 2.0 * hx;
+          if (pos.x < -hx) pos.x += 2.0 * hx;
+          if (pos.y >  0.56) pos.y -= 1.12;
+          if (pos.y < -0.56) pos.y += 1.12;
+        }
+        oPos = vec4(pos, P.zw);
+        oVel = vec4(vel, 0.0, 0.0);
+      }`;
+
+      const VS_PTS = `#version 300 es
+      precision highp float;
+      uniform sampler2D uPos;
+      uniform vec2 uRes;
+      uniform float uAttract;
+      uniform float uLockGlow;
+      out float vRec;
+      out float vSeed;
+      void main(){
+        int i = gl_VertexID;
+        ivec2 ij = ivec2(i % ${SIM_N}, i / ${SIM_N});
+        vec4 P = texelFetch(uPos, ij, 0);
+        float aspect = uRes.x / max(uRes.y, 1.0);
+        gl_Position = vec4(P.x / (0.5 * aspect), P.y * 2.0, 0.0, 1.0);
+        vRec = step(P.z, uAttract);
+        vSeed = P.w;
+        float px = (0.8 + P.w * 1.7) * (uRes.y / 800.0);
+        gl_PointSize = max(1.0, px * mix(1.0, 1.5, vRec * uLockGlow));
+      }`;
+
+      const FS_PTS = `#version 300 es
+      precision highp float;
+      in float vRec;
+      in float vSeed;
+      out vec4 outColor;
+      uniform float uLit;      // 接近グロー/ロック(金の割合)
+      uniform float uLevel;
+      uniform float uIdle;
+      uniform float uBurst;
+      void main(){
+        vec2 q = gl_PointCoord - 0.5;
+        float d2 = dot(q, q);
+        float disc = exp(-d2 * 9.0) * step(d2, 0.25);
+        float bright = 0.16 + 0.5 * uLevel + 0.4 * uBurst;
+        bright *= mix(1.0, 0.3, uIdle);           // 無音は熾火
+        bright *= 0.7 + 0.6 * vSeed;
+        float goldMix = vRec * (0.3 + 0.7 * uLit);
+        float a = disc * bright;
+        outColor = vec4(a * (1.0 - goldMix), a * goldMix, 0.0, 1.0);
+      }`;
+
+      // 粒シーン + 前フレームの EMA 合成。金の軸とロック一閃は FIELD と同じ言語
+      const FS_PACCUM = `#version 300 es
+      precision highp float;
+      in vec2 vUv;
+      out vec4 outColor;
+      uniform sampler2D uScene;
+      uniform sampler2D uPrev;
+      uniform vec2 uRes;
+      uniform float uTrail;
+      uniform float uLockR;
+      uniform float uLockE;
+      uniform float uLit;
+      uniform float uActiveEnv;
+      void main(){
+        float aspect = uRes.x / max(uRes.y, 1.0);
+        vec2 p = (vUv - 0.5) * vec2(aspect, 1.0);
+        vec3 cur = texture(uScene, vUv).rgb;
+        float ax = abs(p.x);
+        float axisVis = smoothstep(0.07, 0.18, abs(p.y)) * (1.0 - smoothstep(0.44, 0.56, abs(p.y)));
+        cur.g += (exp(-ax * ax * 42000.0) + exp(-ax * ax * 3200.0) * 0.22)
+               * axisVis * (0.05 + 0.6 * uLit) * (0.15 + 0.85 * uActiveEnv) * 0.5;
+        float dLock = (ax - uLockR) / 0.11;
+        cur.g += exp(-dLock * dLock) * uLockE * (cur.r * 1.3 + 0.05);
+        vec3 prev = texture(uPrev, vUv).rgb;
+        outColor = vec4(mix(cur, prev, uTrail), 1.0);
+      }`;
+
+      let progSim = null, progPts = null, progPaccum = null;
+      let posA = null, posB = null, velA = null, velB = null;
+      let simFboA = null, simFboB = null, targetTex = null, ptsVao = null;
+      let simInitPending = true;
+      let letterNow = "";
+
+      function makeSimTex() {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, SIM_N, SIM_N, 0, gl.RGBA, gl.FLOAT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return t;
+      }
+      function makeSimFbo(pt, vt) {
+        const f = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pt, 0);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, vt, 0);
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return f;
+      }
+      if (PARTICLE_OK) {
+        progSim = program(FS_SIM);
+        progPts = program(FS_PTS, VS_PTS);
+        progPaccum = program(FS_PACCUM);
+        posA = makeSimTex(); velA = makeSimTex();
+        posB = makeSimTex(); velB = makeSimTex();
+        simFboA = makeSimFbo(posA, velA);
+        simFboB = makeSimFbo(posB, velB);
+        targetTex = makeSimTex();
+        ptsVao = gl.createVertexArray(); // 属性なし(gl_VertexID 描画)
+        if (!sceneTex) makeSceneTarget();
+      }
+      buildModeBar();
+      hud.classList.toggle("letterMode", state.mode === 1);
+
+      // ---- 音名グリフ → 目標点群(決定的シード。時間は混ぜない) ----
+      function mulberry32(a) {
+        return function () {
+          a |= 0; a = (a + 0x6D2B79F5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+      function buildLetterTargets(letter) {
+        const cw = 512;
+        const c = document.createElement("canvas");
+        c.width = c.height = cw;
+        const x = c.getContext("2d", { willReadFrequently: true });
+        x.clearRect(0, 0, cw, cw);
+        x.fillStyle = "#fff";
+        x.textAlign = "center";
+        x.textBaseline = "middle";
+        let fs = 430;
+        x.font = `700 ${fs}px ui-monospace, "Courier New", Courier, monospace`;
+        const wpx = x.measureText(letter).width;
+        if (wpx > 450) {
+          fs = Math.floor((fs * 450) / wpx);
+          x.font = `700 ${fs}px ui-monospace, "Courier New", Courier, monospace`;
+        }
+        x.fillText(letter, cw / 2, cw / 2 + fs * 0.04);
+        const img = x.getImageData(0, 0, cw, cw).data;
+        const rnd = mulberry32(1234 + letter.charCodeAt(0) * 7 + (letter.charCodeAt(1) || 0) * 131);
+        const n = SIM_N * SIM_N;
+        const arr = new Float32Array(n * 4);
+        let filled = 0, guard = 0;
+        while (filled < n && guard < n * 300) {
+          guard++;
+          const px = rnd() * cw, py = rnd() * cw;
+          if (img[((py | 0) * cw + (px | 0)) * 4 + 3] > 128) {
+            const k = filled * 4;
+            arr[k] = (px / cw - 0.5) * 0.72;       // 文字の高さ ~0.72(p 空間)
+            arr[k + 1] = (0.5 - py / cw) * 0.72;
+            arr[k + 2] = rnd();
+            arr[k + 3] = rnd();
+            filled++;
+          }
+        }
+        for (let i = filled; i < n; i++) {
+          const j = ((rnd() * Math.max(1, filled)) | 0) * 4;
+          arr[i * 4] = arr[j]; arr[i * 4 + 1] = arr[j + 1];
+          arr[i * 4 + 2] = arr[j + 2]; arr[i * 4 + 3] = arr[j + 3];
+        }
+        gl.bindTexture(gl.TEXTURE_2D, targetTex);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, SIM_N, SIM_N, gl.RGBA, gl.FLOAT, arr);
+      }
+      function ensureLetterTargets() {
+        const L = tuner.targetMidi >= 0
+          ? NOTE_NAMES[((tuner.targetMidi % 12) + 12) % 12] : (letterNow || "E");
+        if (L === letterNow) return;
+        letterNow = L;
+        buildLetterTargets(L);
+      }
 
       // ---------- [3] 音響解析(実マイク / tone 注入) ----------
       let audioCtx = null, analyser = null, toneNodes = null;
@@ -1232,6 +1564,17 @@
           ? Math.min(1, Math.abs(tuner.cent) / 30) : tuner.agit * 0.5;
         tuner.agit += (agitTarget - tuner.agit) * Math.min(1, dt * 2.6);
 
+        // 吸着率(パーティクル文字): 近いほど多くの粒が文字へ参加する。
+        // ロックで 1 に張り付き文字が完成する
+        const closeT = tuner.soundOn
+          ? Math.pow(Math.max(0, 1 - Math.abs(tuner.cent) / 45), 1.6)
+            * Math.min(1, tuner.conf * 1.4)
+          : 0;
+        tuner.attract += (Math.max(closeT, tuner.locked ? 1 : 0) - tuner.attract)
+          * Math.min(1, dt * 2.8);
+        const windT = tuner.soundOn ? Math.max(-1, Math.min(1, tuner.cent / 40)) : 0;
+        tuner.windN += (windT - tuner.windN) * Math.min(1, dt * 3);
+
         // ロック判定: ±2cent × ジッタ<1.5 が 0.6 秒(ヒステリシス)
         const inTune = tuner.soundOn && Math.abs(tuner.cent) <= 2 && tuner.centJit < 1.5;
         tuner.lockT = inTune ? tuner.lockT + dt : Math.max(0, tuner.lockT - dt * 2.5);
@@ -1262,8 +1605,21 @@
       }
       if (FAKESOURCE) tuner.listening = true;
 
-      function render(timeSec) {
+      function render(timeSec, simDt) {
         const trailNow = FREEZE ? 0 : state.trail;
+        const lit = Math.max(
+          (tuner.soundOn ? 1 : 0) * Math.exp(-Math.min(60, Math.abs(tuner.cent)) / 6) * 0.85,
+          tuner.lockGlow,
+        );
+        if (state.mode === 1 && PARTICLE_OK) {
+          renderParticleAccum(timeSec, simDt, trailNow, lit);
+        } else {
+          renderFieldAccum(timeSec, trailNow);
+        }
+        presentAccum();
+      }
+
+      function renderFieldAccum(timeSec, trailNow) {
         // P1: field → 書き込み側 target(読み込みは前フレーム側)
         gl.bindFramebuffer(gl.FRAMEBUFFER, fboB);
         gl.viewport(0, 0, W, H);
@@ -1291,7 +1647,85 @@
         gl.uniform1f(uni(progField, "uLockR"), tuner.lockAge * 1.5);
         gl.uniform1f(uni(progField, "uLockE"), Math.exp(-tuner.lockAge * 1.4));
         gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
 
+      function renderParticleAccum(timeSec, simDt, trailNow, lit) {
+        ensureLetterTargets();
+        // sim: (posA,velA) → (posB,velB)  MRT ping-pong
+        gl.bindFramebuffer(gl.FRAMEBUFFER, simFboB);
+        gl.viewport(0, 0, SIM_N, SIM_N);
+        gl.useProgram(progSim);
+        gl.bindVertexArray(vao);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, posA);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, velA);
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, targetTex);
+        gl.uniform1i(uni(progSim, "uPosT"), 0);
+        gl.uniform1i(uni(progSim, "uVelT"), 1);
+        gl.uniform1i(uni(progSim, "uTgtT"), 2);
+        gl.uniform1f(uni(progSim, "uDt"), Math.min(simDt, 1 / 30));
+        gl.uniform1f(uni(progSim, "uTime"), timeSec);
+        gl.uniform1f(uni(progSim, "uAttract"), tuner.attract);
+        gl.uniform1f(uni(progSim, "uWind"), tuner.windN);
+        gl.uniform1f(uni(progSim, "uBurst"), Math.exp(-tuner.burstAge * 2.0));
+        gl.uniform1f(uni(progSim, "uBurstR"), tuner.burstAge * 1.4);
+        gl.uniform1f(uni(progSim, "uLevel"), tuner.activeEnv);
+        gl.uniform1f(uni(progSim, "uIdle"), tuner.idleEnv);
+        gl.uniform1f(uni(progSim, "uAspect"), W / Math.max(1, H));
+        gl.uniform1f(uni(progSim, "uInit"), simInitPending ? 1 : 0);
+        gl.uniform1f(uni(progSim, "uAgit"), tuner.agit);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        simInitPending = false;
+        let t = posA; posA = posB; posB = t;
+        t = velA; velA = velB; velB = t;
+        const f = simFboA; simFboA = simFboB; simFboB = f;
+
+        // 粒 → シーン(加算)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
+        gl.viewport(0, 0, W, H);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(progPts);
+        gl.bindVertexArray(ptsVao);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, posA);
+        gl.uniform1i(uni(progPts, "uPos"), 0);
+        gl.uniform2f(uni(progPts, "uRes"), W, H);
+        gl.uniform1f(uni(progPts, "uAttract"), tuner.attract);
+        gl.uniform1f(uni(progPts, "uLockGlow"), tuner.lockGlow);
+        gl.uniform1f(uni(progPts, "uLit"), lit);
+        gl.uniform1f(uni(progPts, "uLevel"), tuner.activeEnv);
+        gl.uniform1f(uni(progPts, "uIdle"), tuner.idleEnv);
+        gl.uniform1f(uni(progPts, "uBurst"), Math.exp(-tuner.burstAge * 2.0));
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE);
+        gl.drawArrays(gl.POINTS, 0, SIM_N * SIM_N);
+        gl.disable(gl.BLEND);
+
+        // シーン + 前フレーム EMA + 金の軸/ロック一閃 → accum
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboB);
+        gl.viewport(0, 0, W, H);
+        gl.useProgram(progPaccum);
+        gl.bindVertexArray(vao);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, texA);
+        gl.uniform1i(uni(progPaccum, "uScene"), 0);
+        gl.uniform1i(uni(progPaccum, "uPrev"), 1);
+        gl.uniform2f(uni(progPaccum, "uRes"), W, H);
+        gl.uniform1f(uni(progPaccum, "uTrail"), trailNow);
+        gl.uniform1f(uni(progPaccum, "uLockR"), tuner.lockAge * 1.5);
+        gl.uniform1f(uni(progPaccum, "uLockE"), Math.exp(-tuner.lockAge * 1.4));
+        gl.uniform1f(uni(progPaccum, "uLit"), lit);
+        gl.uniform1f(uni(progPaccum, "uActiveEnv"), tuner.activeEnv);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.activeTexture(gl.TEXTURE0);
+      }
+
+      function presentAccum() {
         // P2: present
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, W, H);
@@ -1360,7 +1794,7 @@
         if (fpsEma === 0) fpsEma = 60;
         if (rawDt > 0) fpsEma += (1 / rawDt - fpsEma) * 0.06;
 
-        render(state.pauseAnim ? 0 : visT);
+        render(state.pauseAnim ? 0 : visT, state.pauseAnim ? 0 : dt);
         frameN++;
 
         hudClock += rawDt;
