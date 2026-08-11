@@ -382,5 +382,13 @@
     "audio": false,
     "note": "合成の歌は24秒の天候弧(無音5s→静かな持続10s→ふくらみ4s→無音)。prewarm=13 は光が満ちて後光が立ち、雨がまだ残る瞬間 — 雨と光の両方が一枚に入る。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
+  },
+  "fable5_unari": {
+    "query": "freeze=1",
+    "warmMs": 1200,
+    "readyFlag": true,
+    "audio": false,
+    "hideCss": "#tuneBar,#togglePanel{display:none}",
+    "note": "freeze=1 は決定的なロック(金軸)フレーム。上部チューニングバーと開発用ドットだけ隠し、音名と弦ドットは作品の顔として残す。"
   }
 }
