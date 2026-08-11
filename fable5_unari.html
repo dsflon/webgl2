@@ -218,6 +218,14 @@
         border-bottom-color: rgba(233, 228, 214, 0.35);
       }
       #hud.letterMode #noteName { visibility: hidden; }
+      @media (max-width: 719px) {
+        #tuneBar { gap: 13px; }
+        #tuneBar button { font-size: 9px; letter-spacing: 0.14em; padding: 7px 1px 8px; }
+        #modeBar {
+          top: calc(max(16px, env(safe-area-inset-top)) + 36px);
+          right: auto; left: 50%; transform: translateX(-50%); gap: 26px;
+        }
+      }
 
       /* ---- 開発用パネル(右下の気配だけの点) ---- */
       #togglePanel {
@@ -948,6 +956,7 @@
       uniform float uAspect;
       uniform float uInit;
       uniform float uAgit;
+      uniform float uGlyph;
       ${NOISE_GLSL}
       vec2 curl2(vec2 p){
         float e = 0.09;
@@ -973,17 +982,23 @@
         vec2 pos = P.xy;
         vec2 vel = V.xy;
         float rec = step(P.z, uAttract);   // この粒は文字へリクルート済みか
-        // 自由粒子: curl ノイズの乱流。ずれと音量で荒ぶり、無音で熾火になる
+        // 自由粒子: curl ノイズの乱流。ずれと音量で荒ぶり、無音でも眠らない
         float freeAmp = mix(0.25, 0.95, uAgit) * (0.4 + 0.6 * uLevel);
-        freeAmp = mix(freeAmp, freeAmp * 0.2, uIdle);
+        freeAmp = mix(freeAmp, 0.5, uIdle);
         freeAmp *= mix(1.0, 0.06, rec * smoothstep(0.2, 0.75, uAttract));
         vec2 cn = curl2(pos * 1.7 + vec2(uTime * 0.11, -uTime * 0.07) + P.w * 3.7);
         vel += cn * freeAmp * uDt;
+        // 待機の渦: 無音のあいだ、粒は銀河のようにゆっくり大きく回り続ける
+        float rr = max(length(pos), 1e-3);
+        vec2 tang = vec2(-pos.y, pos.x) / rr;
+        float orbit = 0.14 + 0.28 * smoothstep(0.05, 0.55, rr);
+        vel += (tang * orbit - vel) * uIdle * (1.0 - rec) * 1.5 * uDt;
         // 横風: シャープ=右へ / フラット=左へ(自由粒子のみ。FIELD と同じ言語)
         vel.x += uWind * (1.0 - rec) * 0.4 * uDt;
         // 文字へのばね(リクルート済みの粒のみ。近いほど強く締まる)
+        // uGlyph: 縦画面では文字を縮めて画面内に収める
         float k = rec * mix(9.0, 32.0, uAttract);
-        vel += (T.xy - pos) * k * uDt;
+        vel += (T.xy * uGlyph - pos) * k * uDt;
         // 弾弦バースト: 中心から外へ弾く(文字の粒はわずかに震えるだけ)
         float wave = exp(-pow((length(pos) - uBurstR) / 0.13, 2.0));
         vec2 dir = pos / max(length(pos), 1e-3);
@@ -1009,6 +1024,7 @@
       uniform vec2 uRes;
       uniform float uAttract;
       uniform float uLockGlow;
+      uniform float uIdle;
       out float vRec;
       out float vSeed;
       void main(){
@@ -1020,6 +1036,7 @@
         vRec = step(P.z, uAttract);
         vSeed = P.w;
         float px = (0.8 + P.w * 1.7) * (uRes.y / 800.0);
+        px *= mix(1.0, 1.35, uIdle);
         gl_PointSize = max(1.0, px * mix(1.0, 1.5, vRec * uLockGlow));
       }`;
 
@@ -1032,12 +1049,15 @@
       uniform float uLevel;
       uniform float uIdle;
       uniform float uBurst;
+      uniform float uTime;
       void main(){
         vec2 q = gl_PointCoord - 0.5;
         float d2 = dot(q, q);
         float disc = exp(-d2 * 9.0) * step(d2, 0.25);
-        float bright = 0.16 + 0.5 * uLevel + 0.4 * uBurst;
-        bright *= mix(1.0, 0.3, uIdle);           // 無音は熾火
+        // 無音: 星々が個々の位相で呼吸する(消えない。待機も見世物)
+        float breath = 0.62 + 0.38 * sin(uTime * 0.5 + vSeed * 6.2832);
+        float lively = 0.16 + 0.5 * uLevel + 0.4 * uBurst;
+        float bright = mix(lively, 0.3 + 0.75 * breath, uIdle);
         bright *= 0.7 + 0.6 * vSeed;
         float goldMix = vRec * (0.3 + 0.7 * uLit);
         float a = disc * bright;
@@ -1676,6 +1696,7 @@
         gl.uniform1f(uni(progSim, "uAspect"), W / Math.max(1, H));
         gl.uniform1f(uni(progSim, "uInit"), simInitPending ? 1 : 0);
         gl.uniform1f(uni(progSim, "uAgit"), tuner.agit);
+        gl.uniform1f(uni(progSim, "uGlyph"), Math.min(1, W / Math.max(1, H) / 0.9));
         gl.drawArrays(gl.TRIANGLES, 0, 3);
         simInitPending = false;
         let t = posA; posA = posB; posB = t;
@@ -1695,13 +1716,19 @@
         gl.uniform2f(uni(progPts, "uRes"), W, H);
         gl.uniform1f(uni(progPts, "uAttract"), tuner.attract);
         gl.uniform1f(uni(progPts, "uLockGlow"), tuner.lockGlow);
+        gl.uniform1f(uni(progPts, "uIdle"), tuner.idleEnv);
         gl.uniform1f(uni(progPts, "uLit"), lit);
         gl.uniform1f(uni(progPts, "uLevel"), tuner.activeEnv);
         gl.uniform1f(uni(progPts, "uIdle"), tuner.idleEnv);
         gl.uniform1f(uni(progPts, "uBurst"), Math.exp(-tuner.burstAge * 2.0));
+        gl.uniform1f(uni(progPts, "uTime"), timeSec);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, gl.ONE);
-        gl.drawArrays(gl.POINTS, 0, SIM_N * SIM_N);
+        // 縦画面では粒の面密度が上がりすぎるため、アスペクト比で間引く
+        const drawCount = Math.round(
+          SIM_N * SIM_N * Math.min(1, Math.max(0.3, W / Math.max(1, H) / 1.35)),
+        );
+        gl.drawArrays(gl.POINTS, 0, drawCount);
         gl.disable(gl.BLEND);
 
         // シーン + 前フレーム EMA + 金の軸/ロック一閃 → accum
