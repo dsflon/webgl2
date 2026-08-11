@@ -97,7 +97,7 @@
     dissolve 縁の溶け     — 画面周縁の縞をノイズで千切って霧に溶かす量
     grain    粒子         — フィルムグレイン(freeze 時は種固定)
     gate     入力ゲート   — この dB 未満の入力を無音として扱う(既定 -60 = 高感度)
-    calm     針の落ち着き — cent 表示と縞位相の平滑時定数(既定 1 = 最も落ち着く)
+    calm     針の落ち着き — cent 表示と縞位相の平滑時定数(既定 1 = τ0.6s で最も落ち着く)
     a4       A4基準       — 基準ピッチ(既定 440 固定)
 
   依存: なし(単一自己完結 HTML。WebGL2 / GLSL ES 3.00 / WebAudio のみ)
@@ -148,7 +148,8 @@
       #centMark {
         position: absolute; top: 1px; left: 50%; width: 3px; height: 18px; border-radius: 2px;
         background: var(--ink); transform: translateX(-50%);
-        transition: background 0.25s; box-shadow: 0 0 8px rgba(0, 0, 0, 0.9);
+        transition: background 0.25s, left 0.18s linear;
+        box-shadow: 0 0 8px rgba(0, 0, 0, 0.9);
       }
       #centMark.locked { background: var(--gold); box-shadow: 0 0 10px rgba(232, 181, 88, 0.8); }
       #centMark.off { opacity: 0.25; }
@@ -1204,21 +1205,16 @@
         x.textAlign = "center";
         x.textBaseline = "middle";
         const gothic = (n) =>
-          `900 ${n}px "Arial Black", "Helvetica Neue", Helvetica, Arial, ` +
+          `800 ${n}px "Helvetica Neue", Helvetica, Arial, ` +
           `"Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif`;
-        let fs = 420;
+        let fs = 430;
         x.font = gothic(fs);
         const wpx = x.measureText(letter).width;
         if (wpx > 440) {
           fs = Math.floor((fs * 440) / wpx);
           x.font = gothic(fs);
         }
-        // ストロークで太らせた極太ゴシック
-        x.lineWidth = fs * 0.07;
-        x.lineJoin = "round";
-        x.strokeStyle = "#fff";
         x.fillText(letter, cw / 2, cw / 2 + fs * 0.04);
-        x.strokeText(letter, cw / 2, cw / 2 + fs * 0.04);
         const img = x.getImageData(0, 0, cw, cw).data;
         const rnd = mulberry32(1234 + letter.charCodeAt(0) * 7 + (letter.charCodeAt(1) || 0) * 131);
         const n = SIM_N * SIM_N;
@@ -1554,7 +1550,7 @@
       // 計測が得られたフレーム / 得られなかったフレームの共通状態更新
       function measureHit(dt, f0, centRaw, conf, rms) {
         tuner.soundOn = true;
-        const tc = 0.03 + state.calm * 0.3;
+        const tc = 0.05 + state.calm * 0.55; // calm=1 で τ=0.6s(最も落ち着く)
         const al = dt > 0 ? 1 - Math.exp(-dt / tc) : 1;
         centSm = centSm === null ? centRaw : centSm + (centRaw - centSm) * al;
         tuner.cent = centSm;
