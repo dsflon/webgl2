@@ -1,6 +1,7 @@
 <!doctype html>
 <!--
-  fable5_unari.html — うなり — 干渉場ギターチューナー (WebGL2)
+  fable5_unari.html — インタラクティブチューナー (WebGL2)
+  (旧称「うなり」— beat/うなりの物理を視覚化するギターチューナー)
 
   概要:
     画面全体がひとつの干渉場になる、実用精度のギターチューナー。
@@ -109,7 +110,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="art-input" content="mic" />
-    <title>FABLE5 · うなり — 干渉場ギターチューナー (WebGL2)</title>
+    <title>FABLE5 · インタラクティブチューナー (WebGL2)</title>
     <style>
       :root {
         color-scheme: dark;
@@ -298,7 +299,7 @@
     </style>
   </head>
   <body>
-    <canvas id="gl" aria-label="うなり — 干渉縞がうなり周波数で流れるギターチューナー"></canvas>
+    <canvas id="gl" aria-label="インタラクティブチューナー — うなりが縞と粒になるギターチューナー"></canvas>
 
     <div id="hud" class="dim" aria-live="off">
       <div id="noteName">—</div>
@@ -311,7 +312,7 @@
     <nav id="modeBar" aria-label="表示モードの選択"></nav>
 
     <button id="togglePanel" type="button" aria-label="開発用パネルを開閉">⋯</button>
-    <section id="panel" class="collapsed" aria-label="うなり dev controls"></section>
+    <section id="panel" class="collapsed" aria-label="インタラクティブチューナー dev controls"></section>
 
     <div id="overlay" class="hidden" role="status" aria-live="polite">
       <div class="overlay-card">
@@ -327,7 +328,7 @@
     <script>
       "use strict";
       /* ================================================================
-         うなり — 干渉場ギターチューナー
+         インタラクティブチューナー(うなり)
          構成: [0]定数と状態 [1]UI構築 [2]WebGL [3]音響解析 [4]fakesource
                [5]チューナー状態機械 [6]メインループ
          ================================================================ */
