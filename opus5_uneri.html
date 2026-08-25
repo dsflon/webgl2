@@ -7,19 +7,18 @@
   しているのに強い目眩に近い感覚と浮遊感。声も出せない。すぐにでも
   抜け出したいのに抜け出せない。暗い空間。うねりの色は赤だったのか
   茶だったのか — あれがうねりだったのかも、いまとなっては定かではない。
-  派生元エンジン: opus5_koe.html(カメラと UI と検証フック)。マイク(音声)は
-  使わない — 「声も出せない」夢だから。MediaPipe(人物セグメンタ)も使わない
-  (2026-08-25 依存削除)— 灰の姿は運動の履歴から生まれ、静止すると呑まれる。
+  派生元エンジン: opus5_koe.html(ImageSegmenter のモバイル手順・カメラと UI と
+  検証フック)。マイク(音声)はこの作品では使わない — 「声も出せない」夢だから。
 
   様式解析(視覚的不変量。優先度 1>3>4>2>6>5):
     1. 視界はうねりのみ — 部屋は決して現れない。カメラの実写は素材として
        だけ生き残る(このリポジトリの「実世界に投影する」原則からの意図的な
        逸脱。この夢に世界は無い)。
-    2. 灰の姿 — 人物は色を失った灰の像として、半透明にうっすらと残る
-       (くっきり描くと「夢の前に立つ人」になる — 同日の再フィードバックで
-       不透明 0.90 から差し戻し)。縁は絶えず千切られ、もがくほど速く呑まれる。
-       セグメンタは使わない: 姿は運動の履歴 — 動いた所に現れ、静止で呑まれる。
-       ※「意識の窓」は 2026-08-25 のフィードバックで廃止。
+    2. 人影の輪郭 — 人物は塗りではなく、うっすらした輪郭線として浮かぶ
+       (2026-08-25 再々調整: 灰の塗りは半透明 0.55 でも「自分が写りすぎて
+       揺らぎが見えない」— 人はうねりを決して覆わない)。輪郭はソフトマスク
+       の等値線帯。ノイズに千切られ、もがくほど薄れる。中身はごく薄い気配。
+       ※「意識の窓」は同日のフィードバックで廃止。
     3. 身体は呑まれる — マスクの中の実写が絶えずうねりへ注入され、
        引き伸ばされ、千切れて運ばれる。流血や欠損は描かない(痛みは無い。
        「よじれ引き裂かれる感覚」だけがある)。
@@ -32,10 +31,9 @@
        脈(ridged fbm)だけが赤く灼ける。rust で紅↔朱茶に回す。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
-    入力: カメラ映像(セグメンタ不使用) / fakeScene(GLSL 室内+動く人型)
+    入力: カメラ映像 + ImageSegmenter / fakeScene(GLSL 室内+動く人型)
     [P0 scene]  cover-fit+mirror                        sceneA/B RGBA8 長辺≤1280
-    [P1 mask]   R=幽霊(運動の履歴。動いた所が残り τ≈2s で減衰)
-                G=遅いEMA BA=運動ベクトル                    maskA/B★ ≤448
+    [P1 mask]   R=速いマスクEMA G=遅いマスクEMA BA=運動ベクトル  maskA/B★ ≤448
     [P2 blur]   マスクのソフト化(デバッグ表示用)            softT★
     [P3 churn]  うねり本体 ping-pong(churnA/B RGBA8, paint 解像度)。
                 フィードバック移流(semi-Lagrangian 逆追跡): 巨渦(中心は
@@ -55,7 +53,7 @@
     ?fakesource=1 … カメラ不使用。合成室内+動く人型で全パス駆動(検証用)
     ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
     ?prewarm=<秒> … 初回描画前に固定 dt で早送り(検証用。上限20秒)
-    ?fakemotion=1 … 実カメラの幽霊経路(運動の履歴)を合成シーンで駆動(検証用)
+    ?fakeseg=1   … 実カメラのマスク経路を合成マスクで駆動(Y反転の検査)
     ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
     デバッグ表示: 0=最終 1=マスクと運動 2=流れの向き 3=うねりの生画
                   4=姿ともがき 5=配色標本
@@ -65,13 +63,13 @@
     引き込み    引きずられる速さ
     千切れ      像が千切れて崩れる度合い
     赤錆        色味(赤寄り↔茶寄り)
-    姿          人の姿がどれだけ残るか
+    姿          人影の輪郭がどれだけ残るか
     目眩        回転と呼吸(ベクション)の強さ
     拘束        もがきがうねりを締める強さ
     明るさ      画面全体の明るさ
     粒子        画面全体にかかる粒子の量
 
-  依存: なし。完全に自己完結(映像は端末内で処理。外部送信も外部モデルもなし)。
+  依存: MediaPipe tasks-vision(ImageSegmenter)とそのモデルのみ。他は自己完結。
 -->
 <html lang="ja">
   <head>
@@ -276,17 +274,19 @@
 
         const QUERY = new URLSearchParams(location.search);
         // ?fakesource=1 replaces the camera with a synthetic room + a full-body
-        // figure that drifts and swings its limbs, so the whole churn pipeline
-        // runs offline and deterministically.
+        // figure that drifts and swings its limbs. MediaPipe is never touched,
+        // so the whole churn pipeline runs offline and deterministically.
         const FAKE = QUERY.get("fakesource") === "1";
         // ?freeze=1 makes dt = 0: the churn advection, the struggle EMA, the
         // fake figure and every mask EMA stop → deterministic still frame.
         const FREEZE = QUERY.get("freeze") === "1";
-        // ?fakemotion=1 (offline diagnostic; use with fakesource=1): forces the
-        // real-camera GHOST path (uSource==1) while the synthetic scene drives
-        // the frames — the motion-history silhouette (its threshold and decay)
-        // can then be judged offline from the swaying figure.
-        const FAKEMOTION = QUERY.get("fakemotion") === "1";
+        // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
+        // KNOWN orientation (person in the TOP ~60% of image space, top-left
+        // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
+        // With the Y-flip correct the body is injected around the TOP figure;
+        // if the injection gathers at the bottom the flip regressed (CRAFT §C1).
+        const FAKESEG = QUERY.get("fakeseg") === "1";
         // ?fakescale=<f> scales the synthetic figure (real-scale divergence test,
         // CRAFT §C2). f>1 = big/close, f<1 = far/small. Default 1.0.
         const FAKESCALE = (() => {
@@ -340,7 +340,7 @@
           ["pull", "引き込み", "引きずられる速さ", 0, 1, 0.01],
           ["tear", "千切れ", "像が千切れて崩れる度合い", 0, 1, 0.01],
           ["rust", "赤錆", "色味(赤寄り↔茶寄り)", 0, 1, 0.01],
-          ["figure", "姿", "人の姿がどれだけ残るか", 0, 1, 0.01],
+          ["figure", "姿", "人影の輪郭がどれだけ残るか", 0, 1, 0.01],
           ["dizzy", "目眩", "回転と呼吸の強さ", 0, 1, 0.01],
           ["grip", "拘束", "もがきがうねりを締める強さ", 0, 1, 0.01],
           ["exposure", "明るさ", "画面全体の明るさ", 0.6, 1.4, 0.01],
@@ -353,12 +353,12 @@
           <h1>OPUS5 · 悪夢</h1>
           <p>
             10代の頃に繰り返し見た悪夢です。視界は黒と赤のうねりだけで、
-            部屋は映りません。カメラの前で動くと、その痕が色を失った灰の
-            姿としてうっすら現れ、縁から千切られ、裂片となって流されて
-            いきます。じっとしていると、姿は静かに呑まれて消えていきます。
-            <strong>もがくほど、うねりは速まります。静かにしていると、
-            少しだけ緩みます</strong>。痛みはありません。声も出せません。
-            映像はすべて端末内で処理されます(外部送信も外部モデルもなし)。
+            部屋は映りません。カメラに映るあなたは、色を失ったうっすらと
+            した人影の輪郭だけになって浮かび、その線は絶えず千切れ、
+            裂片となって流されていきます。<strong>もがくほど、うねりは
+            速まり、輪郭は薄れます。静かにしていると、少しだけ緩みます</strong>。
+            痛みはありません。声も出せません。
+            映像はすべて端末内で処理されます。
           </p>
           <div class="select-row">
             <span>デバッグ表示</span>
@@ -397,7 +397,7 @@
           </div>
           <div class="status">
             <div id="readout">FPS -- / 解像度 -- / もがき -- / 検知 --</div>
-            <span class="badge">WebGL2 · Camera Only · Feedback Churn</span>
+            <span class="badge">WebGL2 · MediaPipe · Feedback Churn</span>
           </div>
           </div>
         `;
@@ -902,9 +902,9 @@
         `;
 
         // P1 — the mask / motion field:
-        //   R = 幽霊(運動の履歴): 動いた場所が灰として残り、静止で減衰する。
-        //       注入と灰の姿はこれを読む。合成人型は解析マスクを直接使う
-        //   G = その遅い EMA(デバッグ表示用)
+        //   R = fast person-mask EMA (the body as it is NOW — the churn's
+        //       injection region)
+        //   G = slow person-mask EMA (kept for the debug views)
         //   BA = motion field (frame-difference pseudo flow, EMA-smoothed) —
         //       the struggle made local: it stirs the churn where the body moves
         const maskFS = `#version 300 es
@@ -914,7 +914,9 @@
           uniform sampler2D uScene;
           uniform sampler2D uScenePrev;
           uniform sampler2D uPrev;
+          uniform sampler2D uSeg;
           uniform vec2 uTexel;
+          uniform vec2 uSegScale;
           uniform float uAspect;
           uniform float uCx;
           uniform float uCy;
@@ -926,12 +928,38 @@
           uniform float uAlphaMot;
           uniform int uReset;
           uniform int uSource;
+          uniform int uMirror;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
           ${CHUNK_FAKE}
           float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
           void main() {
+            float rawMask = 0.0;
+            if (uSource == 0) {
+              rawMask = fakeMask(vUv, uCx, uCy, uSwing, uAspect, uScale);
+            } else if (uSource == 1) {
+              // Real-camera segmentation mask. Coordinate convention matched to
+              // kiin-seido / gas-head so the mask overlaps the real person
+              // pixel-for-pixel with the P0 background:
+              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
+              //     to the P0 scene, so scene and mask stay in register.
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — the same crop as P0.
+              //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
+              //     image-space (top-left origin) and segTexture is uploaded
+              //     UNPACK_FLIP_Y=false, while the video texture is uploaded
+              //     UNPACK_FLIP_Y=true (upright). Without the explicit flip the
+              //     mask lands upside-down (CRAFT §C1: "only the face" bug).
+              vec2 uv = vUv;
+              if (uMirror == 1) uv.x = 1.0 - uv.x;
+              vec2 suv = (uv - 0.5) * uSegScale + 0.5;
+              float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              // firm the soft confidence mask toward 0/1 so the real body is a
+              // solid figure (the injection must read as a body, not a haze)
+              rawMask = smoothstep(0.32, 0.70, rawSeg);
+            }
             vec4 prev = texture(uPrev, vUv);
+            float fastM = uReset == 1 ? rawMask : mix(prev.r, rawMask, uAlphaFast);
+            float slowM = uReset == 1 ? rawMask : mix(prev.g, rawMask, uAlphaSlow);
 
             // pseudo optical flow from the scene frame difference
             vec3 cur = texture(uScene, vUv).rgb;
@@ -948,24 +976,6 @@
             vec2 flow = uReset == 1 ? vec2(0.0)
               : mix(decV(prev.ba), flowRaw, uAlphaMot);
 
-            float fastM;
-            float slowM;
-            if (uSource == 0) {
-              float rawMask = fakeMask(vUv, uCx, uCy, uSwing, uAspect, uScale);
-              fastM = uReset == 1 ? rawMask : mix(prev.r, rawMask, uAlphaFast);
-              slowM = uReset == 1 ? rawMask : mix(prev.g, rawMask, uAlphaSlow);
-            } else {
-              // 実カメラ: セグメンタは使わない(2026-08-25 依存削除)。
-              // 幽霊 = 運動の履歴の積分。動いた場所に灰が溜まり(ゆっくりの
-              // 動きでも数秒で満ちる)、静止すると τ≈2s で呑まれて消える —
-              // この夢の側から見れば正しい挙動。閾は低く: 擬似フローの推定は
-              // 身体の揺れで ~0.03uv/s しか出ない(合成人型で実測)
-              float mag = smoothstep(0.010, 0.09, length(flowRaw));
-              fastM = uReset == 1 ? 0.0
-                : clamp(prev.r * exp(-uDt * 0.45) +
-                        mag * (1.0 - prev.r) * uDt * 10.0, 0.0, 1.0);
-              slowM = uReset == 1 ? 0.0 : mix(prev.g, fastM, uAlphaSlow);
-            }
             fragColor = vec4(clamp(fastM, 0.0, 1.0), clamp(slowM, 0.0, 1.0), encV(flow));
           }
         `;
@@ -1033,24 +1043,28 @@
             vec2 cuv = clamp(q / ar + 0.5, 0.0, 1.0);
             vec3 col = texture(uChurn, cuv).rgb;
 
-            // ---- 人物: 色を失った灰の姿として前面に残る(参考画像の人形)。
-            // うねりの流れで僅かによじれ、縁は絶えず千切られて赤の場へ呑まれる。
-            // もがくほど閾が上がり、姿は速く呑まれる(もがくと締まる)
+            // ---- 人影: 塗りはほぼ無し、**輪郭だけ**が灰にうっすら浮かぶ
+            // (2026-08-25 再々調整: 灰の塗りでも「自分が写りすぎて揺らぎが
+            // 見えない」— 人はうねりを覆わない。輪郭 = ソフトマスクの等値線
+            // 帯。うねりの流れで僅かによじれ、ノイズで千切れ、もがくと薄れる)
             vec2 fl = dreamFlow(vUv * ar, uTime, uAspect, uSwell, uTear);
-            vec2 wuv = clamp(vUv + fl * 0.010 * uTear, 0.0, 1.0);
+            vec2 wuv = clamp(vUv + fl * 0.012 * uTear, 0.0, 1.0);
             vec4 mk = texture(uMask, wuv);
-            float er = fbm(vUv * ar * 8.0 + fl * 0.7);
-            float th = 0.18 + 0.38 * uTear * er + 0.22 * uStruggle;
-            // うっすら: 姿は半透明で、うねりが常に透けて見える
-            // (くっきり不透明にすると「夢の前に立つ人」になってしまう —
-            // 2026-08-25 フィードバックで 0.90 不透明から差し戻し)
-            float a = smoothstep(th, th + 0.40, mk.r) * uFigure * uPresent;
-            vec3 person = greyGrade(texture(uScene, wuv).rgb) * 0.85;
-            col = mix(col, person, a);
-            // 呑まれかけの縁だけが赤く灼ける帯
-            float band = smoothstep(th - 0.16, th, mk.r) *
-              (1.0 - smoothstep(th, th + 0.20, mk.r));
-            col += dreamRamp(0.78, uRust) * band * 0.16 * uPresent;
+            float sm = texture(uSoft, wuv).r;
+            float er = fbm(vUv * ar * 13.0 + fl * 0.9);
+            // 輪郭帯: 0.5 等値線のまわり。er で絶えず千切れる(連続した
+            // 白線だと「現場の人型」になる — 途切れが呑まれかけを作る)
+            float outline = smoothstep(0.16, 0.42, sm) *
+              (1.0 - smoothstep(0.52, 0.80, sm)) *
+              smoothstep(0.22, 0.80, er + 0.22 * uTear);
+            // 中身はほんの気配だけ(実写の輝度がごく薄く透ける)
+            float fill = smoothstep(0.45, 0.95, mk.r) * 0.10;
+            float a = clamp(outline * 0.48 + fill, 0.0, 1.0) *
+              uFigure * uPresent * (1.0 - 0.35 * uStruggle);
+            vec3 person = greyGrade(texture(uScene, wuv).rgb);
+            // 輪郭は明るめの灰の線、中身は暗い灰の気配
+            vec3 shade = mix(person * 0.55, vec3(0.60, 0.61, 0.65), outline * 0.7);
+            col = mix(col, shade, a);
 
             // ---- トーン: 暗く、周縁は深く沈む
             col = clamp(col * uExposure * 1.25, 0.0, 4.0);
@@ -1133,9 +1147,9 @@
             "uSwing", "uScale", "uMirror", "uFake", "uHasVideo",
           ]),
           mask: getLocations(programs.mask, [
-            "uScene", "uScenePrev", "uPrev", "uTexel",
+            "uScene", "uScenePrev", "uPrev", "uSeg", "uTexel", "uSegScale",
             "uAspect", "uCx", "uCy", "uSwing", "uScale", "uDt", "uAlphaFast",
-            "uAlphaSlow", "uAlphaMot", "uReset", "uSource",
+            "uAlphaSlow", "uAlphaMot", "uReset", "uSource", "uMirror",
           ]),
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
           churn: getLocations(programs.churn, [
@@ -1204,7 +1218,8 @@
         // うねり本体(churnA/B)の ping-pong 位相。
         let churnPing = false;
 
-        // Video texture (DOM source → UNPACK_FLIP_Y).
+        // Video texture (DOM source → UNPACK_FLIP_Y). The segmentation texture is
+        // a plain R8 upload from MediaPipe (image space, no flip on upload).
         const videoTexture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, videoTexture);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -1212,6 +1227,18 @@
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const segTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, segTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        // 8 bytes, not 4: R8 rows are padded to UNPACK_ALIGNMENT (4) so a 2x2
+        // upload needs 4 bytes per row
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 2, 2, 0, gl.RED, gl.UNSIGNED_BYTE,
+          new Uint8Array(8));
+        let segSize = [2, 2];
 
         let targets = null;
         let paintW = 2, paintH = 2, fieldW = 2, fieldH = 2, churnW = 2, churnH = 2;
@@ -1311,81 +1338,197 @@
         }
 
         /* ------------------------------------------------------------------
-           Detection state(存在と動きだけ。人物マスクは持たない — 幽霊は
-           GPU 側で運動の履歴として生まれる)。全て EMA 平滑。
+           Detection state (person mask + presence). Everything lives in SCREEN
+           UV so fakesource and MediaPipe drive the exact same shader path, and
+           every quantity is EMA-smoothed. Only ImageSegmenter is loaded — no
+           pose model, because nothing here needs landmarks (CRAFT §C3).
         ------------------------------------------------------------------ */
 
         const det = {
-          mx: 0.5, my: 0.5, tmx: 0.5, tmy: 0.5,   // 動きの重心(合成人型で使用)
+          mx: 0.5, my: 0.5, tmx: 0.5, tmy: 0.5,   // 身体の重心(もがき計が読む)
           cx: 0.5, cy: 0, present: 0,
           tcx: 0.5, tcy: 0, tpresent: 0,
           swing: 0,
-          motionE: 0,   // 実カメラの動きエネルギー(JS 縮小フレーム差分)
+          segScale: [1, 1],
+          segReady: false,
         };
 
-        /* ------------------------------------------------------------------
-           動きの計測(MediaPipe は使わない — 2026-08-25 依存削除で完全
-           自己完結に)。48px の縮小キャンバスで前フレームとの差分を取り、
-           動きのエネルギーと変化の重心だけを見る(~10Hz、メインスレッドを
-           専有しない)。人物マスクは持たない — 灰の姿は GPU 側で運動の
-           履歴(maskFS)として生まれる。
-        ------------------------------------------------------------------ */
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
 
-        const MOT_W = 48;
-        const motCanvas = document.createElement("canvas");
-        const motCtx = motCanvas.getContext("2d", { willReadFrequently: true });
-        let motPrev = null;
-        let motLast = 0;
-        function motionTick(nowMs) {
-          if (FAKE || !cameraReady || video.readyState < 2 ||
-              video.videoWidth === 0 || nowMs - motLast < 100) return;
-          motLast = nowMs;
-          const vw = video.videoWidth;
-          const vh = video.videoHeight;
-          const mh = Math.max(2, Math.round(MOT_W * vh / vw));
-          if (motCanvas.width !== MOT_W || motCanvas.height !== mh) {
-            motCanvas.width = MOT_W;
-            motCanvas.height = mh;
-            motPrev = null;
-          }
-          motCtx.drawImage(video, 0, 0, MOT_W, mh);
-          let img;
+        let mpSegmenter = null;
+        let mpState = "idle"; // idle | loading | ready | error
+        let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
+        let segU8 = new Uint8Array(4);
+        // Inference reads a SMALL offscreen copy of the video, never the full
+        // frame: the mask is consumed at field resolution (≤448) anyway, and a
+        // ~288px input is 10-20x cheaper (CRAFT §C3).
+        const SEG_MAX_SIDE = 288;
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;   // EMA of inference ms → adaptive cadence + readout
+        let segBadRun = 0;  // consecutive degenerate masks (GPU-health check)
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
+
+        async function loadMediaPipe() {
+          if (FAKE || mpState === "loading" || mpState === "ready") return;
+          mpState = "loading";
+          mpProgress = 0.05;
           try {
-            img = motCtx.getImageData(0, 0, MOT_W, mh).data;
+            const mod = await import(/* @vite-ignore */ MP_PKG);
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
+            try {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
+            } catch (_e) {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
+            }
+            mpProgress = 1;
+            mpState = "ready";
+          } catch (error) {
+            console.error("MediaPipe load failed", error);
+            mpState = "error";
+          }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("uneri: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
+        }
+
+        // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
+        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
+        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the real
+        // mask. The person occupies the TOP ~60% of the image, so a correct
+        // Y-flip injects the body around a figure in the TOP of the screen.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const inTop = y < h * 0.6;
+              const inBand = x > w * 0.22 && x < w * 0.78;
+              arr[y * w + x] = inTop && inBand ? 255 : 0;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+          det.tpresent = 1;
+        }
+
+        // Uploads the confidence mask and returns its mean coverage (0..1).
+        function uploadSegMask(mask) {
+          const w = mask.width, h = mask.height;
+          const f = mask.getAsFloat32Array();
+          if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
+          let sum = 0;
+          // 身体の重心(もがき計がこの速度を微分して読む)
+          let mx = 0, my = 0;
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const v = Math.max(0, Math.min(255, (f[y * w + x] * 255) | 0));
+              segU8[y * w + x] = v;
+              sum += v;
+              mx += v * x;
+              my += v * y;
+            }
+          }
+          if (sum > 255 * 32) {
+            // image space is top-left origin; the art clock is y-up
+            det.tmx = (mx / sum) / w;
+            det.tmy = 1 - (my / sum) / h;
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (segSize[0] !== w || segSize[1] !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, segU8);
+            segSize = [w, h];
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, segU8);
+          }
+          det.segReady = true;
+          return sum / (w * h * 255);
+        }
+
+        // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
+        function runDetection(now) {
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
+          try {
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
+            const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
+            if (cm) {
+              const cover = uploadSegMask(cm);
+              // presence from real coverage — the window and the injection let
+              // go when nobody is in frame instead of clinging to a stale mask
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
+            if (seg && seg.close) seg.close();
           } catch (_e) {
-            return; // 読めなくても、もがき計なしで絵は成立する
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
           }
-          if (motPrev && motPrev.length === img.length) {
-            let sum = 0;
-            let sx = 0;
-            let sy = 0;
-            for (let i = 0, px = 0; i < img.length; i += 4, px++) {
-              const d = Math.abs(img[i] - motPrev[i]) +
-                Math.abs(img[i + 1] - motPrev[i + 1]) +
-                Math.abs(img[i + 2] - motPrev[i + 2]);
-              if (d > 30) {   // センサノイズは拾わない
-                sum += d;
-                sx += d * (px % MOT_W);
-                sy += d * ((px / MOT_W) | 0);
-              }
-            }
-            det.motionE = det.motionE * 0.6 +
-              Math.min(1, (sum / (img.length / 4)) / 90) * 0.4;
-            if (sum > 255 * 4) {
-              det.tmx = (sx / sum) / MOT_W;
-              det.tmy = 1 - (sy / sum) / mh;
-            }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
+        }
+
+        let detTimer = 0;
+        function detectionTick() {
+          if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
+            runDetection(performance.now());
           }
-          if (!motPrev || motPrev.length !== img.length) {
-            motPrev = new Uint8ClampedArray(img.length);
-          }
-          motPrev.set(img);
+          // Adaptive cadence: inference must never own the main thread.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
         }
 
         /* ------------------------------------------------------------------
-           もがき計。        /* ------------------------------------------------------------------
-           もがき計。合成人型は重心の速さ、実カメラは映像差分のエネルギー
-           → 速攻/遅緩の EMA。悪夢の反転則:
+           もがき計。マスク重心の速さ → 速攻/遅緩の EMA。悪夢の反転則:
            動くほど(もがくほど)うねりは速まり、灰の姿は速く呑まれる。
            立ち上がりは速く(τ≈0.35s — もがけば即座に締まる)、解けるのは
            遅い(τ≈2.2s — 静止してもすぐには緩まない)。dt=0 で完全静止
@@ -1404,9 +1547,7 @@
           const vy = (det.my - struggle.py) / dt;
           struggle.px = det.mx;
           struggle.py = det.my;
-          const sp = (FAKE
-            ? Math.min(1, Math.hypot(vx, vy) * 9)
-            : Math.min(1, det.motionE * 1.6)) * det.present;
+          const sp = Math.min(1, Math.hypot(vx, vy) * 9) * det.present;
           const tc = sp > struggle.v ? 0.35 : 2.2;
           struggle.v += (sp - struggle.v) * (1 - Math.exp(-dt / tc));
         }
@@ -1443,6 +1584,13 @@
         }
 
         function updateDetection(dt) {
+          const canvasAspect = canvas.width / Math.max(canvas.height, 1);
+          const videoAspect = (video.videoWidth && video.videoHeight)
+            ? video.videoWidth / video.videoHeight : 4 / 3;
+          det.segScale = videoAspect > canvasAspect
+            ? [canvasAspect / videoAspect, 1]
+            : [1, videoAspect / canvasAspect];
+
           if (FAKE) {
             // sway + bob + limb swing so the mask moves like a real performer:
             // this is what feeds the motion field, the gusts and the moving
@@ -1451,9 +1599,12 @@
             det.tcy = 0.022 * Math.sin(animTime * 0.71 + 1.0);
             det.swing = Math.sin(animTime * 1.25);
             det.tpresent = 1;
-          } else {
-            det.tpresent = haveVideo ? 1 : 0;
+          } else if (FAKESEG) {
+            det.tpresent = 1;
+          } else if (mpState !== "ready") {
+            det.tpresent = 0;
           }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
           // dt が 0 のときだけ完全停止(freeze の決定性)。FREEZE 定数での
           // 一律 0 だと prewarm 中も検知 EMA が凍り、灰の姿(uPresent)と
           // もがき計(det.mx の微分)が検証ショットで永遠に 0 のままになる
@@ -1474,9 +1625,10 @@
           if (doReset) clearSimTargets();
 
           const aspect = canvas.width / Math.max(canvas.height, 1);
-          // FAKEMOTION forces the real-camera ghost path (uSource==1) with the
-          // synthetic scene so the motion history can be judged offline.
-          const source = FAKE && !FAKEMOTION ? 0 : 1;
+          // FAKESEG forces the real-camera seg path (uSource==1) with the
+          // synthetic mask so the Y-flip can be validated offline.
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
           const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
           const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
           const maskOut = maskPing ? targets.maskA : targets.maskB;
@@ -1509,10 +1661,13 @@
             bindTexture(0, sceneCur.tex);
             bindTexture(1, scenePrev.tex);
             bindTexture(2, maskPrev.tex);
+            bindTexture(3, segTexture);
             gl.uniform1i(u.uScene, 0);
             gl.uniform1i(u.uScenePrev, 1);
             gl.uniform1i(u.uPrev, 2);
+            gl.uniform1i(u.uSeg, 3);
             gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
             gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uCx, det.cx);
             gl.uniform1f(u.uCy, det.cy);
@@ -1524,6 +1679,7 @@
             gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
             gl.uniform1i(u.uReset, doReset ? 1 : 0);
             gl.uniform1i(u.uSource, source);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
           });
 
           // P2 — soften the mask (the debug views read it; the churn reads the
@@ -1589,7 +1745,14 @@
 
         function detectionLabel() {
           if (FAKE) return "合成";
-          return cameraReady ? "カメラ(端末内処理)" : "カメラ待機";
+          if (FAKESEG) return "合成マスク";
+          if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
+          if (mpState === "error") return "検知エラー";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
+          return "待機";
         }
 
         function updateChip() {
@@ -1608,8 +1771,7 @@
           const dt = FREEZE ? 0 : rawDt;
 
           haveVideo = FAKE ? false : uploadVideoFrame();
-          motionTick(now);
-          const hasInput = FAKE || haveVideo;
+          const hasInput = FAKE || FAKESEG || haveVideo || mpState === "ready";
 
           if (!state.pauseAnim) animTime += dt;
           updateDetection(dt);
@@ -1657,8 +1819,8 @@
 
         /* ------------------------------------------------------------------
            Camera + boot. With ?fakesource=1 the synthetic scene drives the
-           pipeline, but getUserMedia still runs so the three camera error
-           paths stay observable.
+           pipeline and MediaPipe is never touched, but getUserMedia still runs
+           so the three camera error paths stay observable.
         ------------------------------------------------------------------ */
 
         async function startCamera() {
@@ -1700,6 +1862,7 @@
             retryCamera.disabled = false;
             needsReset = true;
             setOverlay("hidden", "", "");
+            if (!FAKE) loadMediaPipe();
           } catch (error) {
             retryCamera.disabled = false;
             const name = error && error.name ? error.name : "";
@@ -1738,13 +1901,16 @@
 
         try {
           resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
           // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
           // scene drives the whole pipeline regardless of the camera (the video
-          // texture is never sampled), so the camera is only exercised to keep
-          // the three error overlays observable: on success the overlay hides
-          // and the fake art shows; on denial / no-camera the matching error
-          // overlay appears over the still-rendering art.
+          // texture is never sampled, MediaPipe stays untouched), so the camera
+          // is only exercised to keep the three error overlays observable: on
+          // success the overlay hides and the fake art shows; on denial /
+          // no-camera the matching error overlay appears over the
+          // still-rendering art.
           startCamera();
+          detectionTick();
           requestAnimationFrame(frame);
         } catch (error) {
           setOverlay("error", "WEBGL SETUP ERROR",
