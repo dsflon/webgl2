@@ -392,15 +392,15 @@
     "note": "PARTICLE(既定)のライブ fakesource。スクリプトが E2 をロックする区間(warm 23s、ヘッドレスのスロー係数込み)で金の文字を撮る。freeze は sim が止まり文字が出ないため使わない。"
   },
   "opus5_uneri": {
-    "query": "fakesource=1&freeze=1&prewarm=8",
-    "warmMs": 4000,
+    "query": "fakesource=1&prewarm=6",
+    "warmMs": 8000,
     "click": [],
     "hide": [
       "#closePanel"
     ],
     "readyFlag": true,
     "audio": false,
-    "note": "prewarm=8 は赤い網目が流れに引かれてうねり、灰の姿の縁が千切れている瞬間。freeze で決定的。",
+    "note": "実走行でキャプチャ(freeze だと animTime=0 で網のたわみが止まり、移流の平滑化だけが溜まってぼける)。網が鮮明で人物がうっすら透ける瞬間。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
