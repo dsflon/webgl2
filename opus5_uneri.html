@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  opus5_uneri.html — WebGL2 カメラ →「うねり / The Churn」
+  opus5_uneri.html — WebGL2 カメラ →「悪夢 / Nightmare」
   10代の頃に繰り返し見た悪夢の再現。大きく複雑なうねりの中に身が置かれ、
   視界はそのうねりのみ。強い重力に似た力で身動きは取れず、痛みはほぼ無いのに
   身体はよじれ、引き裂かれて運ばれていく感覚だけがある。意識ははっきり
@@ -14,19 +14,19 @@
     1. 視界はうねりのみ — 部屋は決して現れない。カメラの実写は素材として
        だけ生き残る(このリポジトリの「実世界に投影する」原則からの意図的な
        逸脱。この夢に世界は無い)。
-    2. 意識の窓 — 頭部のまわりだけ、現在がほぼ現在のまま明瞭に残る。
-       意識は最後まではっきりしている。窓はうねりと逆位相で漂い(浮遊感)、
-       狭まりはしても消えはしない。
+    2. 灰の姿 — 人物は色を失った灰の像として前面に残る(参考画像の
+       人形のような姿)。縁は絶えず千切られ、もがくほど速く呑まれる。
+       ※「意識の窓」は 2026-08-25 のフィードバックで廃止。
     3. 身体は呑まれる — マスクの中の実写が絶えずうねりへ注入され、
        引き伸ばされ、千切れて運ばれる。流血や欠損は描かない(痛みは無い。
        「よじれ引き裂かれる感覚」だけがある)。
-    4. もがくと締まる — 身体の動き(もがき)がうねり全体を速め、意識の窓を
-       狭める。静止だけがわずかに緩める。「抜け出せない」の実装
+    4. もがくと締まる — 身体の動き(もがき)がうねり全体を速め、灰の姿を
+       速く呑ませる。静止だけがわずかに緩める。「抜け出せない」の実装
        (動く→報われる、というリポジトリの慣性の反転)。
     5. 目眩と浮遊 — 全景がごくゆっくり回転し、呼吸する(ベクション)。
        art clock 由来なので ?freeze=1 と reduced-motion で完全に止まる。
-    6. 酸化した赤茶の闇 — 近黒の地にオックスブラッド〜錆〜黄土だけが宿る。
-       純赤・高彩度は出さない(血ではない。色の記憶さえ曖昧な夢)。
+    6. 黒地に鮮烈な赤の網目 — 参考画像(2026-08-25)の配色。地は黒、
+       脈(ridged fbm)だけが赤く灼ける。rust で紅↔朱茶に回す。
 
   パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
     入力: カメラ映像 + ImageSegmenter / fakeScene(GLSL 室内+動く人型)
@@ -39,14 +39,14 @@
                 流れ場で、画が毎フレーム自分自身を引きずる。マスク内の実写
                 (悪夢グレード)を注入し、うねり自身の顔料へ緩和する床で有界。
                 もがき(マスク重心の速さの EMA)が全体の速度を上げる
-    [P4 comp]   ベクション(回転+呼吸)→ 意識の窓(頭部。もがくと狭まる)→
-                トーンマップ・深い周辺減光・粒子
+    [P4 comp]   ベクション(回転+呼吸)→ 灰の姿(縁は千切れ、もがくと
+                速く呑まれる)→ トーンマップ・浅い周辺減光・粒子
 
   実行方法:
     python3 -m http.server 8899 → http://localhost:8899/opus5_uneri.html を開き
     カメラを許可(映像は端末内で処理。外部送信なし)。
     (カメラ API はセキュアコンテキスト必須。file:// では動きません)
-    **もがくほど、うねりは速まり、意識の窓は狭まります。静かにしていると、
+    **もがくほど、うねりは速まり、姿は速く呑まれます。静かにしていると、
     少しだけ緩みます。**
     ?fakesource=1 … カメラ不使用。合成室内+動く人型で全パス駆動(検証用)
     ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
@@ -54,14 +54,14 @@
     ?fakeseg=1   … 実カメラのマスク経路を合成マスクで駆動(Y反転の検査)
     ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
     デバッグ表示: 0=最終 1=マスクと運動 2=流れの向き 3=うねりの生画
-                  4=注入と窓 5=配色標本
+                  4=姿ともがき 5=配色標本
 
   スライダーの説明:
     うねり      渦の大きさ(画面より大きい)
     引き込み    引きずられる速さ
     千切れ      像が千切れて崩れる度合い
     赤錆        色味(赤寄り↔茶寄り)
-    意識        意識の窓の広さ
+    姿          人の姿がどれだけ残るか
     目眩        回転と呼吸(ベクション)の強さ
     拘束        もがきがうねりを締める強さ
     明るさ      画面全体の明るさ
@@ -86,7 +86,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>OPUS5 · うねり — WebGL2 cam nightmare churn</title>
+    <title>OPUS5 · 悪夢 — WebGL2 cam nightmare churn</title>
     <style>
       :root {
         color-scheme: dark;
@@ -231,7 +231,7 @@
   </head>
 
   <body>
-    <canvas id="gl" aria-label="WebGL2 うねり — 悪夢のうねりのウェブカメラ作品"></canvas>
+    <canvas id="gl" aria-label="WebGL2 悪夢 — 黒と赤のうねりのウェブカメラ作品"></canvas>
     <video id="video" playsinline muted autoplay></video>
 
     <button id="togglePanel" type="button" class="top-btn hidden"
@@ -239,7 +239,7 @@
     <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
     <div id="statusChip">起動中</div>
 
-    <section id="panel" class="panel" aria-label="うねり のコントローラー"></section>
+    <section id="panel" class="panel" aria-label="悪夢 のコントローラー"></section>
 
     <div id="overlay" role="status" aria-live="polite">
       <div class="overlay-card">
@@ -309,7 +309,7 @@
           "マスクと運動",
           "流れの向き",
           "うねりの生画",
-          "注入と窓",
+          "姿ともがき",
           "配色標本",
         ];
 
@@ -318,7 +318,7 @@
           pull: 0.60,
           tear: 0.55,
           rust: 0.50,
-          aware: 0.50,
+          figure: 0.90,
           dizzy: 0.45,
           grip: 0.60,
           exposure: 1.0,
@@ -338,7 +338,7 @@
           ["pull", "引き込み", "引きずられる速さ", 0, 1, 0.01],
           ["tear", "千切れ", "像が千切れて崩れる度合い", 0, 1, 0.01],
           ["rust", "赤錆", "色味(赤寄り↔茶寄り)", 0, 1, 0.01],
-          ["aware", "意識", "意識の窓の広さ", 0, 1, 0.01],
+          ["figure", "姿", "人の姿がどれだけ残るか", 0, 1, 0.01],
           ["dizzy", "目眩", "回転と呼吸の強さ", 0, 1, 0.01],
           ["grip", "拘束", "もがきがうねりを締める強さ", 0, 1, 0.01],
           ["exposure", "明るさ", "画面全体の明るさ", 0.6, 1.4, 0.01],
@@ -348,13 +348,13 @@
         panel.innerHTML = `
           <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
           <div class="panel-body">
-          <h1>OPUS5 · うねり</h1>
+          <h1>OPUS5 · 悪夢</h1>
           <p>
-            10代の頃に繰り返し見た悪夢です。視界はうねりだけで、部屋は
-            映りません。カメラに映る身体はうねりに呑まれ、引き伸ばされ、
-            千切れて運ばれていきます。頭のまわりにだけ、意識の窓として
-            いまが残ります。<strong>もがくほど、うねりは速まり、窓は
-            狭まります。静かにしていると、少しだけ緩みます</strong>。
+            10代の頃に繰り返し見た悪夢です。視界は黒と赤のうねりだけで、
+            部屋は映りません。カメラに映るあなたは色を失った灰の姿として
+            うねりの前に残りますが、縁から絶えず千切られ、裂片となって
+            流されていきます。<strong>もがくほど、うねりは速まり、姿は
+            速く呑まれます。静かにしていると、少しだけ緩みます</strong>。
             痛みはありません。声も出せません。
             映像はすべて端末内で処理されます。
           </p>
@@ -700,25 +700,41 @@
         // Shared: 悪夢の色域とうねりの流れ。合成パスと移流パスが同じ定義を
         // 共有する。時間項なし(決定的)。
         const CHUNK_DREAM = `
-          // 近黒の地に、酸化した赤茶だけが宿る。血の赤(純赤・高彩度)は出さない。
-          const vec3 ABYSS = vec3(0.043, 0.022, 0.020);
+          // 参考画像(2026-08-25)の配色: 黒の地に、鮮烈な赤だけが網目状に宿る。
           vec3 dreamRamp(float t, float rust) {
-            // 暗部 → オックスブラッド → 錆 → 黄土。rust で赤寄り↔茶寄りに回す
-            vec3 c1 = mix(vec3(0.235, 0.050, 0.042), vec3(0.196, 0.078, 0.038), rust);
-            vec3 c2 = mix(vec3(0.415, 0.118, 0.078), vec3(0.373, 0.196, 0.086), rust);
-            vec3 c3 = mix(vec3(0.560, 0.260, 0.140), vec3(0.540, 0.360, 0.170), rust);
+            // 黒 → 深紅 → 鮮紅 → 灼熱。rust で紅↔朱茶に回す
+            vec3 c1 = mix(vec3(0.30, 0.010, 0.022), vec3(0.28, 0.042, 0.014), rust);
+            vec3 c2 = mix(vec3(0.80, 0.035, 0.060), vec3(0.74, 0.120, 0.036), rust);
+            vec3 c3 = mix(vec3(1.00, 0.17, 0.15), vec3(0.98, 0.32, 0.13), rust);
             t = clamp(t, 0.0, 1.0);
-            vec3 col = mix(ABYSS, c1, smoothstep(0.0, 0.35, t));
-            col = mix(col, c2, smoothstep(0.30, 0.72, t));
-            col = mix(col, c3, smoothstep(0.68, 1.0, t));
+            vec3 col = mix(vec3(0.006, 0.001, 0.002), c1, smoothstep(0.16, 0.45, t));
+            col = mix(col, c2, smoothstep(0.42, 0.76, t));
+            col = mix(col, c3, smoothstep(0.74, 1.0, t));
             return col;
           }
-          // 実写を悪夢の側へ: 輝度は保ち、色は錆の座標系へ落とす
-          vec3 dreamGrade(vec3 c, float rust) {
+          // 網目: ドメインワープした Voronoi の細胞壁(F2-F1)。細胞の中は
+          // 黒に落ち、壁だけが赤く灼ける — 参考画像の網状組織。
+          // ※ridged fbm は不可: fbm は 0.5 付近に集中するので 1-|2f-1| は
+          //   ほぼ全面が 1 になり、平坦な赤の面になる(2026-08-25 の失敗)
+          float veinT(vec2 p) {
+            vec2 q = p * 7.0 + 2.6 * vec2(fbm4(p * 1.7), fbm4(p * 1.7 + 4.7));
+            vec2 i = floor(q);
+            vec2 fr = fract(q);
+            float f1 = 8.0, f2 = 8.0;
+            for (int y = -1; y <= 1; y++)
+            for (int x = -1; x <= 1; x++) {
+              vec2 g = vec2(float(x), float(y));
+              float d = length(g + hash22(i + g) - fr);
+              if (d < f1) { f2 = f1; f1 = d; }
+              else if (d < f2) { f2 = d; }
+            }
+            float edge = 1.0 - smoothstep(0.0, 0.34, f2 - f1);
+            return pow(edge, 1.6);
+          }
+          // 呑まれる身体は色を失う(参考画像の、灰の人形のような姿)
+          vec3 greyGrade(vec3 c) {
             float l = dot(c, vec3(0.299, 0.587, 0.114));
-            // 暗部も錆として見える底上げ(0.12)。素の色は 16% だけ残す —
-            // 呑まれた身体が「何か写っていた」程度に読める、夢の記憶の濃度
-            return mix(dreamRamp(0.12 + l * 0.80, rust), c * vec3(0.80, 0.62, 0.52), 0.16);
+            return vec3(l) * vec3(0.93, 0.94, 0.97);
           }
           // うねり。3スケール: 画面より大きい巨渦(中心は画面外を彷徨う)+
           // 中間のコイル + 微細な剪断。curlN は unit-scale(kiin-seido の教訓)。
@@ -769,9 +785,8 @@
             vec2 ar = vec2(uAspect, 1.0);
             vec2 p = vUv * ar;
             if (uReset == 1) {
-              // 目覚めた瞬間からうねりは満ちている: 自前の顔料で種を撒く
-              float t0 = fbm(p * 2.1) * 0.8 + 0.25 * fbm(p * 6.3);
-              fragColor = vec4(dreamRamp(t0 * 0.55, uRust), 1.0);
+              // 目覚めた瞬間からうねりは満ちている: 網目の顔料で種を撒く
+              fragColor = vec4(dreamRamp(veinT(p) * 0.95, uRust), 1.0);
               return;
             }
             vec4 mk = texture(uMask, vUv);
@@ -799,22 +814,23 @@
                 + texture(uPrev, clamp(back - vec2(tx.x, 0.0), 0.0, 1.0)).rgb
                 + texture(uPrev, clamp(back + vec2(0.0, tx.y), 0.0, 1.0)).rgb
                 + texture(uPrev, clamp(back - vec2(0.0, tx.y), 0.0, 1.0)).rgb;
-              col = clamp(col + (col - avg * 0.25) * 0.30, 0.0, 1.0);
+              col = clamp(col + (col - avg * 0.25) * 0.32, 0.0, 1.0);
             }
 
-            // 身体の注入: マスクの中の実写(悪夢のグレード)が絶えず流し込まれる
-            vec3 meat = dreamGrade(texture(uScene, vUv).rgb, uRust);
+            // 身体の注入: 呑まれた像は赤の側へ変わりつつ、灰の痕跡を残す。
+            // 灰を主にすると場が濁って参考画像の黒赤が失われる(2026-08-25)
+            float bl = dot(texture(uScene, vUv).rgb, vec3(0.299, 0.587, 0.114));
+            vec3 meat = mix(dreamRamp(0.30 + bl * 0.55, uRust), vec3(bl * 0.85), 0.30);
             float inj = mk.r * (0.55 + 0.45 * fbm(p * 9.0));
-            col = mix(col, meat, 1.0 - exp(-uDt * inj * 4.2));
+            col = mix(col, meat, 1.0 - exp(-uDt * inj * 2.2));
 
             // うねり自身の顔料: 場は空にならず、リニア補間の灰色化にも呑まれ
             // ない(技術注意#6)。これが減衰の床=有界性でもある
-            float pig = fbm(p * 1.7 + vec2(0.0, uTime * 0.006)) * 0.75 +
-              fbm(p * 5.1 - vec2(uTime * 0.004, 0.0)) * 0.35;
-            vec3 base = dreamRamp(0.08 + pig * 0.72, uRust);
-            // τ≈11s: 床への緩和は有界性のためだけに要る。速いと運ばれてきた
-            // 筋(引き裂かれた像)が数秒で床の模様に均されてしまう
-            col = mix(col, base, 1.0 - exp(-uDt * 0.09));
+            float pig = veinT(p + vec2(uTime * 0.006, -uTime * 0.004));
+            vec3 base = dreamRamp(pig * 0.95, uRust);
+            // τ≈6s: 網目の再刻印。遅いと移流の拡散に負けて平坦な赤に均され、
+            // 参考画像の黒地の網目が消える(2026-08-25 の教訓)
+            col = mix(col, base, 1.0 - exp(-uDt * 0.22));
 
             fragColor = vec4(col, 1.0);
           }
@@ -963,7 +979,7 @@
         `;
 
         // P4 — composite. 視界はうねりのみ — 部屋は決して現れない。目眩の
-        // ベクション、意識の窓、深い周縁、粒子。
+        // ベクション、灰の姿(縁は千切れる)、粒子。
         const compositeFS = `#version 300 es
           precision highp float;
           in vec2 vUv;
@@ -980,11 +996,10 @@
           uniform float uSwell;
           uniform float uTear;
           uniform float uRust;
-          uniform float uAware;
+          uniform float uFigure;
           uniform float uDizzy;
           uniform float uStruggle;
           uniform float uPresent;
-          uniform vec2 uHead;
           uniform int uDebug;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
@@ -1003,30 +1018,29 @@
             vec2 cuv = clamp(q / ar + 0.5, 0.0, 1.0);
             vec3 col = texture(uChurn, cuv).rgb;
 
-            // ---- 意識の窓: 顔のまわりだけ、現在が現在のまま明瞭に残る。
-            // 窓はうねりと逆位相で漂い(浮遊感)、もがくと狭まる。消えはしない。
-            vec2 drift = vec2(sin(uTime * 0.11), cos(uTime * 0.087)) * 0.010 * wob;
-            vec2 hd = uHead + drift;
-            float r = length((vUv - hd) * ar);
-            float wr = (0.085 + 0.13 * uAware) * (1.0 - 0.42 * uStruggle);
-            float win = (1.0 - smoothstep(wr * 0.5, wr, r)) * uPresent;
-            vec3 now = texture(uScene, vUv).rgb;
-            vec3 lucid = mix(now, dreamGrade(now, uRust), 0.30) * 0.96;
-            col = mix(col, lucid, win);
-            // 窓の縁: うねりに縁取られて僅かに沈む
-            float rim = smoothstep(wr * 0.55, wr, r) *
-              (1.0 - smoothstep(wr, wr * 1.6, r));
-            col *= 1.0 - 0.28 * rim * uPresent;
+            // ---- 人物: 色を失った灰の姿として前面に残る(参考画像の人形)。
+            // うねりの流れで僅かによじれ、縁は絶えず千切られて赤の場へ呑まれる。
+            // もがくほど閾が上がり、姿は速く呑まれる(もがくと締まる)
+            vec2 fl = dreamFlow(vUv * ar, uTime, uAspect, uSwell, uTear);
+            vec2 wuv = clamp(vUv + fl * 0.010 * uTear, 0.0, 1.0);
+            vec4 mk = texture(uMask, wuv);
+            float er = fbm(vUv * ar * 8.0 + fl * 0.7);
+            float th = 0.24 + 0.42 * uTear * er + 0.22 * uStruggle;
+            float a = smoothstep(th, th + 0.24, mk.r) * uFigure * uPresent;
+            vec3 person = greyGrade(texture(uScene, wuv).rgb) * 0.92;
+            col = mix(col, person, a);
+            // 呑まれかけの縁だけが赤く灼ける帯
+            float band = smoothstep(th - 0.16, th, mk.r) *
+              (1.0 - smoothstep(th, th + 0.20, mk.r));
+            col += dreamRamp(0.78, uRust) * band * 0.25 * uPresent;
 
             // ---- トーン: 暗く、周縁は深く沈む
-            col = clamp(col * uExposure * 1.35, 0.0, 4.0);
+            col = clamp(col * uExposure * 1.25, 0.0, 4.0);
             col = col / (1.0 + col * 0.42);
-            col = (col - 0.5) * 1.10 + 0.5;
+            col = (col - 0.5) * 1.12 + 0.5;
             vec2 dv = (vUv - 0.5) * ar;
-            col *= 1.0 - 0.42 * smoothstep(0.32, 0.92, length(dv));
-            // 黒の底を僅かに持ち上げる(錆の残光)。トーンマップ+周辺減光で
-            // 潰れた暗部の帯がかろうじて読める — 完全な黒はこの夢に無い
-            col += vec3(0.016, 0.007, 0.006) * (1.0 - smoothstep(0.0, 0.5, col.r));
+            // 参考画像は隅まで網目が満ちる — 周辺減光は浅く。地はそのまま黒
+            col *= 1.0 - 0.30 * smoothstep(0.40, 0.95, length(dv));
             float gr = hash12(floor(vUv * uResolution / 1.5)) - 0.5;
             col += gr * uFilmGrain * 0.06;
 
@@ -1041,12 +1055,12 @@
             } else if (uDebug == 3) {
               col = texture(uChurn, vUv).rgb;
             } else if (uDebug == 4) {
-              col = vec3(texture(uMask, vUv).r * 0.7, win, uStruggle);
+              col = vec3(texture(uMask, vUv).r * 0.7, a, uStruggle);
             } else if (uDebug == 5) {
               float row = floor(vUv.y * 3.0);
               col = row < 1.0 ? dreamRamp(vUv.x, 0.0)
                 : (row < 2.0 ? dreamRamp(vUv.x, 1.0)
-                : dreamGrade(vec3(vUv.x), uRust));
+                : greyGrade(vec3(vUv.x)));
             }
             col = min(col, vec3(0.985));
             fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
@@ -1113,8 +1127,8 @@
           composite: getLocations(programs.composite, [
             "uChurn", "uScene", "uMask", "uSoft",
             "uResolution", "uAspect", "uTime", "uExposure", "uFilmGrain",
-            "uSwell", "uTear", "uRust", "uAware", "uDizzy", "uStruggle",
-            "uPresent", "uHead", "uDebug",
+            "uSwell", "uTear", "uRust", "uFigure", "uDizzy", "uStruggle",
+            "uPresent", "uDebug",
           ]),
         };
 
@@ -1300,7 +1314,6 @@
 
         const det = {
           mx: 0.5, my: 0.5, tmx: 0.5, tmy: 0.5,   // 身体の重心(もがき計が読む)
-          hx: 0.5, hy: 0.62, thx: 0.5, thy: 0.62, // 頭部(意識の窓の中心)
           cx: 0.5, cy: 0, present: 0,
           tcx: 0.5, tcy: 0, tpresent: 0,
           swing: 0,
@@ -1409,44 +1422,21 @@
           const f = mask.getAsFloat32Array();
           if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
           let sum = 0;
-          // Body centroid (the struggle meter differentiates it) and a HEAD
-          // estimate: the centroid of the TOP rows holding the first ~16% of
-          // the mask mass. The window of consciousness needs a real head to sit
-          // on; det.cx/cy only ever tracked the synthetic figure.
+          // 身体の重心(もがき計がこの速度を微分して読む)
           let mx = 0, my = 0;
-          const rowSum = new Float64Array(h);
-          const rowX = new Float64Array(h);
           for (let y = 0; y < h; y++) {
-            let rs = 0, rx = 0;
             for (let x = 0; x < w; x++) {
               const v = Math.max(0, Math.min(255, (f[y * w + x] * 255) | 0));
               segU8[y * w + x] = v;
-              rs += v;
-              rx += v * x;
+              sum += v;
+              mx += v * x;
+              my += v * y;
             }
-            rowSum[y] = rs;
-            rowX[y] = rx;
-            sum += rs;
-            mx += rx;
-            my += rs * y;
           }
           if (sum > 255 * 32) {
             // image space is top-left origin; the art clock is y-up
             det.tmx = (mx / sum) / w;
             det.tmy = 1 - (my / sum) / h;
-            const want = sum * 0.16;
-            let acc = 0, hxs = 0, hys = 0;
-            for (let y = 0; y < h && acc < want; y++) {
-              const take = Math.min(rowSum[y], want - acc);
-              const fr = rowSum[y] > 0 ? take / rowSum[y] : 0;
-              acc += take;
-              hxs += rowX[y] * fr;
-              hys += rowSum[y] * fr * y;
-            }
-            if (acc > 255 * 6) {
-              det.thx = (hxs / acc) / w;
-              det.thy = 1 - (hys / acc) / h;
-            }
           }
           gl.bindTexture(gl.TEXTURE_2D, segTexture);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -1507,7 +1497,7 @@
 
         /* ------------------------------------------------------------------
            もがき計。マスク重心の速さ → 速攻/遅緩の EMA。悪夢の反転則:
-           動くほど(もがくほど)うねりは速まり、意識の窓は狭まる。
+           動くほど(もがくほど)うねりは速まり、灰の姿は速く呑まれる。
            立ち上がりは速く(τ≈0.35s — もがけば即座に締まる)、解けるのは
            遅い(τ≈2.2s — 静止してもすぐには緩まない)。dt=0 で完全静止
            (?freeze=1 の決定性)。マイクは使わない — 声も出せない夢だから。
@@ -1577,13 +1567,6 @@
             det.tcy = 0.022 * Math.sin(animTime * 0.71 + 1.0);
             det.swing = Math.sin(animTime * 1.25);
             det.tpresent = 1;
-            // 合成人型の頭部(意識の窓の中心)。CHUNK_FAKE の座標系を逆に解く:
-            // 頭は q=(cx, 0.80)、アンカー (cx, 0.46) 回りに fakescale が掛かる。
-            det.thx = (det.tcx - 0.5) / Math.max(canvasAspect, 1e-3) + 0.5;
-            // 上端でクランプ: 実カメラ経路の頭部推定は「見えているマスクの
-            // 上端側の質量」なので画面外には出ない。合成人型も同じ振る舞いに
-            // 揃える(大写し ?fakescale=2 で窓が消えないように)
-            det.thy = Math.min(0.92, 0.46 + 0.34 * FAKESCALE + det.tcy);
           } else if (FAKESEG) {
             det.tpresent = 1;
           } else if (mpState !== "ready") {
@@ -1591,7 +1574,7 @@
           }
           if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
           // dt が 0 のときだけ完全停止(freeze の決定性)。FREEZE 定数での
-          // 一律 0 だと prewarm 中も検知 EMA が凍り、意識の窓(uPresent)と
+          // 一律 0 だと prewarm 中も検知 EMA が凍り、灰の姿(uPresent)と
           // もがき計(det.mx の微分)が検証ショットで永遠に 0 のままになる
           const k = dt > 0 ? 1 - Math.exp(-dt * 6) : 0;
           if (FAKE) { det.tmx = 0.5 + det.tcx - 0.5; det.tmy = 0.52 + det.tcy; }
@@ -1599,8 +1582,6 @@
           det.my += (det.tmy - det.my) * k;
           det.cx += (det.tcx - det.cx) * k;
           det.cy += (det.tcy - det.cy) * k;
-          det.hx += (det.thx - det.hx) * k;
-          det.hy += (det.thy - det.hy) * k;
           det.present += (det.tpresent - det.present) * k;
         }
 
@@ -1722,22 +1703,10 @@
             gl.uniform1f(u.uSwell, state.swell);
             gl.uniform1f(u.uTear, state.tear);
             gl.uniform1f(u.uRust, state.rust);
-            gl.uniform1f(u.uAware, state.aware);
+            gl.uniform1f(u.uFigure, state.figure);
             gl.uniform1f(u.uDizzy, state.dizzy);
             gl.uniform1f(u.uStruggle, struggle.v * state.grip);
             gl.uniform1f(u.uPresent, det.present);
-            // det.hx/hy are in the mask's sampling space. The canvas applies
-            // cover-fit (segScale) and the mirror on top of that, so invert
-            // both. The FAKE head is computed directly in canvas UV.
-            let hx = det.hx, hy = det.hy;
-            if (!FAKE) {
-              hx = (hx - 0.5) / Math.max(det.segScale[0], 1e-4) + 0.5;
-              hy = (hy - 0.5) / Math.max(det.segScale[1], 1e-4) + 0.5;
-              if (state.mirror) hx = 1 - hx;
-            }
-            gl.uniform2f(u.uHead,
-              Math.max(-0.5, Math.min(1.5, hx)),
-              Math.max(-0.5, Math.min(1.5, hy)));
             gl.uniform1i(u.uDebug, state.debugView);
           });
         }
