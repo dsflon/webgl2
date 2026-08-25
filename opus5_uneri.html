@@ -1,0 +1,1922 @@
+<!doctype html>
+<!--
+  opus5_uneri.html — WebGL2 カメラ →「うねり / The Churn」
+  10代の頃に繰り返し見た悪夢の再現。大きく複雑なうねりの中に身が置かれ、
+  視界はそのうねりのみ。強い重力に似た力で身動きは取れず、痛みはほぼ無いのに
+  身体はよじれ、引き裂かれて運ばれていく感覚だけがある。意識ははっきり
+  しているのに強い目眩に近い感覚と浮遊感。声も出せない。すぐにでも
+  抜け出したいのに抜け出せない。暗い空間。うねりの色は赤だったのか
+  茶だったのか — あれがうねりだったのかも、いまとなっては定かではない。
+  派生元エンジン: opus5_koe.html(ImageSegmenter のモバイル手順・カメラと UI と
+  検証フック)。マイク(音声)はこの作品では使わない — 「声も出せない」夢だから。
+
+  様式解析(視覚的不変量。優先度 1>3>4>2>6>5):
+    1. 視界はうねりのみ — 部屋は決して現れない。カメラの実写は素材として
+       だけ生き残る(このリポジトリの「実世界に投影する」原則からの意図的な
+       逸脱。この夢に世界は無い)。
+    2. 意識の窓 — 頭部のまわりだけ、現在がほぼ現在のまま明瞭に残る。
+       意識は最後まではっきりしている。窓はうねりと逆位相で漂い(浮遊感)、
+       狭まりはしても消えはしない。
+    3. 身体は呑まれる — マスクの中の実写が絶えずうねりへ注入され、
+       引き伸ばされ、千切れて運ばれる。流血や欠損は描かない(痛みは無い。
+       「よじれ引き裂かれる感覚」だけがある)。
+    4. もがくと締まる — 身体の動き(もがき)がうねり全体を速め、意識の窓を
+       狭める。静止だけがわずかに緩める。「抜け出せない」の実装
+       (動く→報われる、というリポジトリの慣性の反転)。
+    5. 目眩と浮遊 — 全景がごくゆっくり回転し、呼吸する(ベクション)。
+       art clock 由来なので ?freeze=1 と reduced-motion で完全に止まる。
+    6. 酸化した赤茶の闇 — 近黒の地にオックスブラッド〜錆〜黄土だけが宿る。
+       純赤・高彩度は出さない(血ではない。色の記憶さえ曖昧な夢)。
+
+  パイプライン図(毎フレーム。★=EXT_color_buffer_float 有効時 RGBA16F / 無効時 RGBA8):
+    入力: カメラ映像 + ImageSegmenter / fakeScene(GLSL 室内+動く人型)
+    [P0 scene]  cover-fit+mirror                        sceneA/B RGBA8 長辺≤1280
+    [P1 mask]   R=速いマスクEMA G=遅いマスクEMA BA=運動ベクトル  maskA/B★ ≤448
+    [P2 blur]   マスクのソフト化(デバッグ表示用)            softT★
+    [P3 churn]  うねり本体 ping-pong(churnA/B RGBA8, paint 解像度)。
+                フィードバック移流(semi-Lagrangian 逆追跡): 巨渦(中心は
+                画面外を彷徨う)+内向きの吸い込み+中間コイル+微細剪断の
+                流れ場で、画が毎フレーム自分自身を引きずる。マスク内の実写
+                (悪夢グレード)を注入し、うねり自身の顔料へ緩和する床で有界。
+                もがき(マスク重心の速さの EMA)が全体の速度を上げる
+    [P4 comp]   ベクション(回転+呼吸)→ 意識の窓(頭部。もがくと狭まる)→
+                トーンマップ・深い周辺減光・粒子
+
+  実行方法:
+    python3 -m http.server 8899 → http://localhost:8899/opus5_uneri.html を開き
+    カメラを許可(映像は端末内で処理。外部送信なし)。
+    (カメラ API はセキュアコンテキスト必須。file:// では動きません)
+    **もがくほど、うねりは速まり、意識の窓は狭まります。静かにしていると、
+    少しだけ緩みます。**
+    ?fakesource=1 … カメラ不使用。合成室内+動く人型で全パス駆動(検証用)
+    ?freeze=1    … 全ての時間駆動を停止(dt=0)し決定的な静止フレームを出す(検証用)
+    ?prewarm=<秒> … 初回描画前に固定 dt で早送り(検証用。上限20秒)
+    ?fakeseg=1   … 実カメラのマスク経路を合成マスクで駆動(Y反転の検査)
+    ?fakescale=<f> … 合成人型を f 倍(実機スケール乖離の検査。1.8〜2.2=大写し)
+    デバッグ表示: 0=最終 1=マスクと運動 2=流れの向き 3=うねりの生画
+                  4=注入と窓 5=配色標本
+
+  スライダーの説明:
+    うねり      渦の大きさ(画面より大きい)
+    引き込み    引きずられる速さ
+    千切れ      像が千切れて崩れる度合い
+    赤錆        色味(赤寄り↔茶寄り)
+    意識        意識の窓の広さ
+    目眩        回転と呼吸(ベクション)の強さ
+    拘束        もがきがうねりを締める強さ
+    明るさ      画面全体の明るさ
+    粒子        画面全体にかかる粒子の量
+
+  依存: MediaPipe tasks-vision(ImageSegmenter)とそのモデルのみ。他は自己完結。
+-->
+<html lang="ja">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0Y8RMED5C"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-Q0Y8RMED5C');
+    </script>
+
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>OPUS5 · うねり — WebGL2 cam nightmare churn</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #05070a;
+        --ink: #f0e6ea;
+        --muted: rgba(240, 230, 236, 0.66);
+        --panel: rgba(14, 11, 18, 0.85);
+        --line: rgba(240, 230, 236, 0.16);
+        --accent: #e6849f;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: linear-gradient(160deg, #07070d, #0d0a12 55%, #05070a);
+        font-family: ui-monospace, "Courier New", Courier, "SFMono-Regular", Menlo, Consolas, monospace;
+      }
+      canvas { display: block; width: 100%; height: 100%; background: var(--bg); }
+      video {
+        position: fixed; width: 1px; height: 1px; left: -10px; top: -10px;
+        opacity: 0; pointer-events: none;
+      }
+      .top-btn {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); z-index: 11;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: var(--panel); font: inherit; font-size: 11px;
+        letter-spacing: 0.08em; cursor: pointer;
+      }
+      #togglePanel {
+        left: max(14px, env(safe-area-inset-left)); width: 38px; padding: 8px 0;
+        font-size: 15px; line-height: 1; text-align: center;
+      }
+      #togglePanel.hidden { display: none; }
+      #closePanel {
+        position: absolute; top: 9px; right: 9px; z-index: 2; width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
+        background: rgba(240, 230, 236, 0.06); font: inherit; font-size: 14px;
+        line-height: 1; cursor: pointer;
+      }
+      #closePanel:hover { background: rgba(240, 230, 236, 0.14); }
+      #flipCamera { right: max(14px, env(safe-area-inset-right)); display: none; }
+      @media (pointer: coarse) { #flipCamera { display: block; } }
+      #statusChip {
+        position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%;
+        transform: translateX(-50%); z-index: 11; padding: 7px 12px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: var(--panel); font-size: 10px; letter-spacing: 0.1em;
+        pointer-events: none; transition: opacity 0.6s ease; white-space: nowrap;
+      }
+      #statusChip.hidden { opacity: 0; }
+      .panel {
+        position: fixed; top: max(56px, calc(env(safe-area-inset-top) + 56px));
+        left: max(14px, env(safe-area-inset-left)); z-index: 10;
+        width: min(360px, calc(100vw - 28px)); max-height: calc(100vh - 76px);
+        overflow: hidden; display: flex; flex-direction: column;
+        padding: 13px 14px 14px; color: var(--muted); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
+        transition: transform 0.25s ease, opacity 0.25s ease;
+      }
+      .panel-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+      .panel h1 {
+        margin: 0 0 6px; padding-right: 30px; font-size: 13px;
+        letter-spacing: 0.14em; color: var(--ink);
+      }
+      .panel p { margin: 0 0 12px; font-size: 10.5px; line-height: 1.55; }
+      .select-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; margin: 0 0 10px; font-size: 10px; letter-spacing: 0.08em;
+      }
+      .select-row select {
+        flex: 1; max-width: 210px; padding: 5px 6px; color: var(--ink);
+        background: rgba(240, 230, 236, 0.06); border: 1px solid var(--line);
+        border-radius: 7px; font: inherit; font-size: 10.5px;
+      }
+      .row {
+        display: grid; grid-template-columns: 1fr 44px;
+        grid-template-areas: "label out" "slider slider"; gap: 2px 8px;
+        padding: 7px 0 2px; border-top: 1px solid var(--line);
+      }
+      .row label { grid-area: label; font-size: 11px; color: var(--ink); }
+      .row label span {
+        display: block; font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em;
+      }
+      .row output { grid-area: out; justify-self: end; font-size: 10.5px; color: var(--accent); }
+      .row input[type="range"] { grid-area: slider; width: 100%; accent-color: var(--accent); }
+      .check-row {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink);
+      }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .buttons button {
+        flex: 1; min-width: 100px; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--ink); background: rgba(240, 230, 236, 0.06);
+        font: inherit; font-size: 10.5px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      .meter {
+        margin-top: 10px; height: 5px; border-radius: 3px; overflow: hidden;
+        background: rgba(240, 230, 236, 0.10);
+      }
+      .meter i {
+        display: block; height: 100%; width: 0%;
+        background: linear-gradient(90deg, #7fd4c1, #e6849f, #f0c46a);
+        transition: width 0.08s linear;
+      }
+      .status {
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+        font-size: 9.5px; line-height: 1.7; letter-spacing: 0.05em;
+      }
+      .badge {
+        display: inline-block; margin-top: 4px; padding: 3px 8px;
+        border: 1px solid var(--line); border-radius: 999px; font-size: 9px; color: var(--muted);
+      }
+      #overlay {
+        position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; padding: 20px; background: rgba(6, 5, 10, 0.76);
+        backdrop-filter: blur(6px); transition: opacity 0.3s ease;
+      }
+      #overlay.hidden { opacity: 0; pointer-events: none; }
+      .overlay-card {
+        max-width: 460px; padding: 22px 24px; text-align: center; color: var(--muted);
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      }
+      .overlay-card h2 { margin: 0 0 10px; font-size: 14px; letter-spacing: 0.16em; color: var(--ink); }
+      .overlay-card p { margin: 0 0 14px; font-size: 11px; line-height: 1.6; }
+      .overlay-card button {
+        margin: 0 4px; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px;
+        color: var(--ink); background: rgba(240, 230, 236, 0.08); font: inherit;
+        font-size: 11px; letter-spacing: 0.08em; cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        .panel {
+          top: auto; right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left));
+          width: auto; max-height: 54vh; padding: 12px;
+        }
+        .panel.collapsed { transform: translateY(calc(100% + 18px)); opacity: 0; }
+      }
+      @media (min-width: 641px) {
+        .panel.collapsed { transform: translateX(calc(-100% - 22px)); opacity: 0; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="gl" aria-label="WebGL2 うねり — 悪夢のうねりのウェブカメラ作品"></canvas>
+    <video id="video" playsinline muted autoplay></video>
+
+    <button id="togglePanel" type="button" class="top-btn hidden"
+      aria-label="コントローラーを開く" aria-expanded="true">☰</button>
+    <button id="flipCamera" type="button" class="top-btn" aria-label="カメラ切替">背面カメラ</button>
+    <div id="statusChip">起動中</div>
+
+    <section id="panel" class="panel" aria-label="うねり のコントローラー"></section>
+
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="overlay-card">
+        <h2 id="overlayTitle">REQUESTING CAMERA</h2>
+        <p id="overlayText">
+          Please allow webcam access. Serve this file from localhost or HTTPS.
+        </p>
+        <button id="retryCamera" type="button" hidden>RETRY CAMERA</button>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const panel = document.getElementById("panel");
+        const togglePanel = document.getElementById("togglePanel");
+        const flipCameraBtn = document.getElementById("flipCamera");
+        const statusChip = document.getElementById("statusChip");
+        const overlay = document.getElementById("overlay");
+        const overlayTitle = document.getElementById("overlayTitle");
+        const overlayText = document.getElementById("overlayText");
+        const retryCamera = document.getElementById("retryCamera");
+
+        const reducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        const QUERY = new URLSearchParams(location.search);
+        // ?fakesource=1 replaces the camera with a synthetic room + a full-body
+        // figure that drifts and swings its limbs. MediaPipe is never touched,
+        // so the whole churn pipeline runs offline and deterministically.
+        const FAKE = QUERY.get("fakesource") === "1";
+        // ?freeze=1 makes dt = 0: the churn advection, the struggle EMA, the
+        // fake figure and every mask EMA stop → deterministic still frame.
+        const FREEZE = QUERY.get("freeze") === "1";
+        // ?fakeseg=1 (offline diagnostic; use with fakesource=1): forces the
+        // uSource==1 real-camera mask path and feeds it a synthetic R8 mask of
+        // KNOWN orientation (person in the TOP ~60% of image space, top-left
+        // origin, uploaded UNPACK_FLIP_Y=false exactly like a MediaPipe mask).
+        // With the Y-flip correct the body is injected around the TOP figure;
+        // if the injection gathers at the bottom the flip regressed (CRAFT §C1).
+        const FAKESEG = QUERY.get("fakeseg") === "1";
+        // ?fakescale=<f> scales the synthetic figure (real-scale divergence test,
+        // CRAFT §C2). f>1 = big/close, f<1 = far/small. Default 1.0.
+        const FAKESCALE = (() => {
+          const v = parseFloat(QUERY.get("fakescale"));
+          return Number.isFinite(v) && v > 0.05 ? Math.min(4, v) : 1.0;
+        })();
+        // ?prewarm=<sec> fast-forwards the simulation with a fixed dt before the
+        // first present, so a screenshot shows a developed churn instead of the
+        // freshly seeded field (the verification GPU is far too slow to warm in
+        // real time — CRAFT §C4). Chunked + glSync'd, never parking the compositor.
+        const PREWARM = (() => {
+          const v = parseFloat(QUERY.get("prewarm"));
+          return Number.isFinite(v) && v > 0 ? Math.min(30, v) : 0;
+        })();
+        // 1/12: うねりは paint 級の移流パスを毎ステップ焚くので、1/24 だと
+        // swiftshader 検証機で prewarm=12 が 60 秒枠に収まらない。移流・注入・
+        // 床はすべて dt スケールなので粗い dt でも積分結果はほぼ同じ
+        const PREWARM_DT = 1 / 12;
+
+        const DEBUG_MODES = [
+          "最終",
+          "マスクと運動",
+          "流れの向き",
+          "うねりの生画",
+          "注入と窓",
+          "配色標本",
+        ];
+
+        const DEFAULTS = {
+          swell: 0.55,
+          pull: 0.60,
+          tear: 0.55,
+          rust: 0.50,
+          aware: 0.50,
+          dizzy: 0.45,
+          grip: 0.60,
+          exposure: 1.0,
+          filmGrain: 0.20,
+        };
+
+        const state = {
+          ...DEFAULTS,
+          debugView: 0,
+          mirror: true,
+          facingMode: "user",
+          pauseAnim: reducedMotion || FREEZE,
+        };
+
+        const uiRows = [
+          ["swell", "うねり", "渦の大きさ(画面より大きい)", 0, 1, 0.01],
+          ["pull", "引き込み", "引きずられる速さ", 0, 1, 0.01],
+          ["tear", "千切れ", "像が千切れて崩れる度合い", 0, 1, 0.01],
+          ["rust", "赤錆", "色味(赤寄り↔茶寄り)", 0, 1, 0.01],
+          ["aware", "意識", "意識の窓の広さ", 0, 1, 0.01],
+          ["dizzy", "目眩", "回転と呼吸の強さ", 0, 1, 0.01],
+          ["grip", "拘束", "もがきがうねりを締める強さ", 0, 1, 0.01],
+          ["exposure", "明るさ", "画面全体の明るさ", 0.6, 1.4, 0.01],
+          ["filmGrain", "粒子", "画面全体にかかる粒子の量", 0, 1, 0.01],
+        ];
+
+        panel.innerHTML = `
+          <button id="closePanel" type="button" aria-label="コントローラーを閉じる">✕</button>
+          <div class="panel-body">
+          <h1>OPUS5 · うねり</h1>
+          <p>
+            10代の頃に繰り返し見た悪夢です。視界はうねりだけで、部屋は
+            映りません。カメラに映る身体はうねりに呑まれ、引き伸ばされ、
+            千切れて運ばれていきます。頭のまわりにだけ、意識の窓として
+            いまが残ります。<strong>もがくほど、うねりは速まり、窓は
+            狭まります。静かにしていると、少しだけ緩みます</strong>。
+            痛みはありません。声も出せません。
+            映像はすべて端末内で処理されます。
+          </p>
+          <div class="select-row">
+            <span>デバッグ表示</span>
+            <select id="debugView" aria-label="デバッグ表示">
+              ${DEBUG_MODES.map(
+                (label, i) => `<option value="${i}">${label}</option>`,
+              ).join("")}
+            </select>
+          </div>
+          ${uiRows
+            .map(
+              ([key, label, hint, min, max, step]) => `
+                <div class="row">
+                  <label for="${key}">
+                    ${label}
+                    <span>${hint}</span>
+                  </label>
+                  <output id="${key}Out">${formatValue(state[key])}</output>
+                  <input id="${key}" type="range" min="${min}" max="${max}"
+                    step="${step}" value="${state[key]}" />
+                </div>
+              `,
+            )
+            .join("")}
+          <label class="check-row">
+            <span>左右反転(鏡)</span>
+            <input id="mirror" type="checkbox" ${state.mirror ? "checked" : ""} />
+          </label>
+          <label class="check-row">
+            <span>ゆらぎを停止</span>
+            <input id="pauseAnim" type="checkbox" ${state.pauseAnim ? "checked" : ""} />
+          </label>
+          <div class="buttons">
+            <button id="savePng" type="button">PNG保存</button>
+            <button id="resetLook" type="button">リセット</button>
+          </div>
+          <div class="status">
+            <div id="readout">FPS -- / 解像度 -- / もがき -- / 検知 --</div>
+            <span class="badge">WebGL2 · MediaPipe · Feedback Churn</span>
+          </div>
+          </div>
+        `;
+
+        uiRows.forEach(([key]) => {
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          input.addEventListener("input", () => {
+            state[key] = Number(input.value);
+            out.textContent = formatValue(state[key]);
+          });
+        });
+
+        function setSlider(key, value) {
+          state[key] = value;
+          const input = document.getElementById(key);
+          const out = document.getElementById(`${key}Out`);
+          if (input) input.value = value;
+          if (out) out.textContent = formatValue(value);
+        }
+
+        document.getElementById("debugView").addEventListener("change", (event) => {
+          state.debugView = Number(event.currentTarget.value);
+        });
+        document.getElementById("mirror").addEventListener("change", (event) => {
+          state.mirror = event.currentTarget.checked;
+        });
+        document.getElementById("pauseAnim").addEventListener("change", (event) => {
+          state.pauseAnim = event.currentTarget.checked;
+        });
+        document.getElementById("resetLook").addEventListener("click", () => {
+          Object.keys(DEFAULTS).forEach((key) => setSlider(key, DEFAULTS[key]));
+        });
+
+        const closePanel = document.getElementById("closePanel");
+        function setPanelCollapsed(collapsed) {
+          panel.classList.toggle("collapsed", collapsed);
+          togglePanel.classList.toggle("hidden", !collapsed);
+          togglePanel.setAttribute("aria-expanded", String(!collapsed));
+        }
+        togglePanel.addEventListener("click", () => setPanelCollapsed(false));
+        closePanel.addEventListener("click", () => setPanelCollapsed(true));
+        const isMobile = window.matchMedia("(max-width: 640px)").matches;
+        setPanelCollapsed(isMobile);
+
+        flipCameraBtn.addEventListener("click", () => {
+          state.facingMode = state.facingMode === "user" ? "environment" : "user";
+          flipCameraBtn.textContent =
+            state.facingMode === "user" ? "背面カメラ" : "前面カメラ";
+          state.mirror = state.facingMode === "user";
+          document.getElementById("mirror").checked = state.mirror;
+          startCamera();
+        });
+
+        document.getElementById("savePng").addEventListener("click", () => {
+          const link = document.createElement("a");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          link.download = `opus5-uneri-${stamp}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        });
+
+        function formatValue(value) {
+          return Number(value).toFixed(Math.abs(value) >= 10 ? 0 : 2);
+        }
+
+        function setOverlay(kind, title, text, buttons = {}) {
+          overlayTitle.textContent = title;
+          overlayText.textContent = text;
+          retryCamera.hidden = !buttons.retryCamera;
+          overlay.classList.toggle("hidden", kind === "hidden");
+        }
+
+        /* ------------------------------------------------------------------
+           WebGL2 setup
+        ------------------------------------------------------------------ */
+
+        const gl = canvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance",
+        });
+
+        if (!gl) {
+          setOverlay(
+            "error",
+            "WEBGL2 UNAVAILABLE",
+            "This piece needs WebGL2. Try a current desktop/mobile browser with hardware acceleration enabled.",
+          );
+          return;
+        }
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+
+        // Float render targets keep the mask / motion field from stalling in
+        // 8 bits. Signed velocity is offset-encoded into [0,1] (encV) so the
+        // RGBA8 fallback runs the same shaders, coarser.
+        const floatExt = gl.getExtension("EXT_color_buffer_float");
+
+        // Renderer probe (readout / diagnosis only — the churn has no pools).
+        const dbgRI = gl.getExtension("WEBGL_debug_renderer_info");
+        const RENDERER = dbgRI ? gl.getParameter(dbgRI.UNMASKED_RENDERER_WEBGL) : "";
+        const IS_SOFT = /swiftshader|llvmpipe|software|basic|subzero/i.test(RENDERER);
+        const COARSE = window.matchMedia("(pointer: coarse)").matches;
+
+        // うねりはフィードバック移流なので粒子プールを持たない。状態は
+        // churnA/B(ping-pong)の2枚だけで、構造的に有界(減衰の床を持つ)。
+
+        const fullscreenVS = `#version 300 es
+          precision highp float;
+          const vec2 POS[3] = vec2[3](
+            vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0)
+          );
+          out vec2 vUv;
+          void main() {
+            vec2 p = POS[gl_VertexID];
+            vUv = p * 0.5 + 0.5;
+            gl_Position = vec4(p, 0.0, 1.0);
+          }
+        `;
+
+        // Shared: pcg-flavoured hashes + value noise + fbm + curl noise (unit
+        // scaled) + the 2D SDF helpers. Grain, mottle and every placement seed
+        // are derived from POSITION or INDEX only — never from uTime (repo rule)
+        // so they stay deterministic under ?freeze=1.
+        const CHUNK_NOISE = `
+          const float PI2 = 6.28318530718;
+          float hash12(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          vec2 hash22(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+            p3 += dot(p3, p3.yxz + 33.33);
+            return fract((p3.xx + p3.yz) * p3.zy);
+          }
+          float h11(float p) {
+            p = fract(p * 0.1031);
+            p *= p + 33.33;
+            p *= p + p;
+            return fract(p);
+          }
+          float vnoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash12(i);
+            float b = hash12(i + vec2(1.0, 0.0));
+            float c = hash12(i + vec2(0.0, 1.0));
+            float d = hash12(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
+          float fbm4(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 4; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          float fbm(vec2 p) {
+            float s = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 5; i++) {
+              s += amp * vnoise(p);
+              p *= 2.03;
+              amp *= 0.5;
+            }
+            return s;
+          }
+          // curl of value noise, normalised to ≈ unit scale (a raw finite
+          // difference divided by 2e reaches ~20 and turns a "small" coefficient
+          // into a 200px warp — CRAFT / kiin-seido §8-3).
+          vec2 curlN(vec2 p) {
+            float e = 0.35;
+            float n1 = vnoise(p + vec2(0.0, e)) - vnoise(p - vec2(0.0, e));
+            float n2 = vnoise(p + vec2(e, 0.0)) - vnoise(p - vec2(e, 0.0));
+            return vec2(n1, -n2) * 1.6;
+          }
+          float sdSeg(vec2 p, vec2 a, vec2 b) {
+            vec2 pa = p - a;
+            vec2 ba = b - a;
+            float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+            return length(pa - ba * h);
+          }
+          float smin2(float a, float b, float k) {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+          }
+        `;
+
+        // Shared: [0,1] offset encoding for signed fields. The clamp doubles as
+        // the mandatory velocity clamp (no NaN blow-ups).
+        const CHUNK_ENC = `
+          const float VMAX = 2.4;
+          vec2 encV(vec2 v) { return clamp(v, -VMAX, VMAX) / (2.0 * VMAX) + 0.5; }
+          vec2 decV(vec2 e) { return (e - 0.5) * (2.0 * VMAX); }
+        `;
+
+        // Shared: the ?fakesource=1 synthetic scene — a lit room (never black)
+        // with a full-body figure that drifts, bobs and swings its limbs. The
+        // swing is what makes the motion field and the struggle meter testable
+        // offline. uScale is ?fakescale= (CRAFT §C2).
+        const CHUNK_FAKE = `
+          float humanDist(vec2 p, float cx, float swing, float sc) {
+            vec2 anchor = vec2(cx, 0.46);
+            p = (p - anchor) / max(sc, 0.05) + anchor;
+            float d = 1e9;
+            vec2 head = vec2(cx, 0.80);
+            d = min(d, length((p - head) / vec2(1.0, 1.14)) - 0.062);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.745), vec2(cx, 0.685)) - 0.024, 0.018);
+            d = smin2(d, sdSeg(p, vec2(cx, 0.685), vec2(cx, 0.40)) - 0.098, 0.045);
+            d = smin2(d, sdSeg(p, vec2(cx - 0.115, 0.665), vec2(cx + 0.115, 0.665)) - 0.052, 0.04);
+            // arms: shoulder → elbow → hand, driven by the swing phase (the
+            // strumming/fretting arm of the singer)
+            float aL = 2.55 + 0.62 * swing;
+            vec2 shL = vec2(cx - 0.115, 0.655);
+            vec2 elL = shL + 0.135 * vec2(cos(aL), sin(aL) * 0.7 - 0.35);
+            vec2 haL = elL + 0.125 * vec2(cos(aL - 0.55 - 0.5 * swing),
+                                          sin(aL - 0.55 - 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shL, elL) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elL, haL) - 0.028, 0.028);
+            float aR = 0.59 - 0.62 * swing;
+            vec2 shR = vec2(cx + 0.115, 0.655);
+            vec2 elR = shR + 0.135 * vec2(cos(aR), sin(aR) * 0.7 - 0.35);
+            vec2 haR = elR + 0.125 * vec2(cos(aR + 0.55 + 0.5 * swing),
+                                          sin(aR + 0.55 + 0.5 * swing) * 0.8 - 0.3);
+            d = smin2(d, sdSeg(p, shR, elR) - 0.036, 0.03);
+            d = smin2(d, sdSeg(p, elR, haR) - 0.028, 0.028);
+            // legs: hip → knee → foot
+            vec2 hipL = vec2(cx - 0.05, 0.405);
+            vec2 knL = hipL + vec2(-0.028 - 0.05 * swing, -0.15);
+            vec2 ftL = knL + vec2(-0.012 + 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipL, knL) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knL, ftL) - 0.034, 0.03);
+            vec2 hipR = vec2(cx + 0.05, 0.405);
+            vec2 knR = hipR + vec2(0.028 + 0.05 * swing, -0.15);
+            vec2 ftR = knR + vec2(0.012 - 0.03 * swing, -0.155);
+            d = smin2(d, sdSeg(p, hipR, knR) - 0.044, 0.035);
+            d = smin2(d, sdSeg(p, knR, ftR) - 0.034, 0.03);
+            // the guitar: a body ellipse across the lap plus a neck to the left
+            vec2 gc = vec2(cx + 0.055, 0.44);
+            float gd = length((p - gc) / vec2(1.25, 1.0)) - 0.085;
+            vec2 nk0 = gc + vec2(-0.09, 0.045);
+            vec2 nk1 = gc + vec2(-0.30, 0.130);
+            gd = min(gd, sdSeg(p, nk0, nk1) - 0.016);
+            d = min(d, gd);
+            return d;
+          }
+          vec3 fakeScene(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            // a lit room, not a dim gradient: the synthetic scene is the only
+            // proxy for a real background, so it must sit in a realistic
+            // exposure range or every judgement about the grading over it is wrong
+            vec3 top = vec3(0.30, 0.31, 0.36);
+            vec3 bot = vec3(0.46, 0.42, 0.37);
+            vec3 bg = mix(top, bot, smoothstep(0.0, 1.0, uv.y));
+            bg += 0.03 * (0.5 + 0.5 * sin(uv.x * 30.0) - 0.5);
+            float horizon = exp(-pow((uv.y - 0.40) * 6.0, 2.0));
+            bg = mix(bg, vec3(0.55, 0.51, 0.45), 0.16 * horizon);
+            bg += 0.04 * (vnoise(uv * 5.0) - 0.5);
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            float d = humanDist(p, cx, swing, sc);
+            float m = 1.0 - smoothstep(-0.004, 0.008, d);
+            // body-local coords (same transform humanDist uses) so the costume
+            // regions ride with ?fakescale=. The figure needs INTERNAL tonal
+            // structure — a flat silhouette makes the nightmare grade and the
+            // injection impossible to judge offline.
+            vec2 q = (p - vec2(cx, 0.46)) / max(sc, 0.05) + vec2(cx, 0.46);
+            float folds = 0.86 + 0.30 * fbm(q * vec2(34.0, 20.0));
+            float upper = smoothstep(0.40, 0.46, q.y);
+            vec3 person = mix(vec3(0.24, 0.26, 0.33), vec3(0.68, 0.64, 0.58), upper);
+            person = mix(person, vec3(0.16, 0.19, 0.29),
+              smoothstep(0.01, -0.05, q.x - cx) * upper * 0.75);
+            person = mix(person, vec3(0.15, 0.18, 0.27),
+              smoothstep(0.60, 0.69, q.y) * 0.85);
+            person = mix(person, vec3(0.36, 0.25, 0.16),
+              exp(-pow((q.y - 0.44) * 55.0, 2.0)));            // the guitar body
+            person *= folds;
+            float headM = 1.0 - smoothstep(0.050, 0.070,
+              length((q - vec2(cx, 0.80)) / vec2(1.0, 1.14)));
+            vec3 skin = vec3(0.62, 0.49, 0.42);
+            skin *= 1.0 - 0.45 * exp(-pow((q.y - 0.815) * 240.0, 2.0));  // brow
+            skin *= 1.0 - 0.28 * exp(-pow((q.y - 0.772) * 190.0, 2.0));  // mouth
+            person = mix(person, skin, headM);
+            person *= 0.78 + 0.34 * smoothstep(0.05, 0.80, q.y);
+            return clamp(mix(bg, person, m), 0.0, 1.0);
+          }
+          float fakeMask(vec2 uv, float cx, float cy, float swing, float aspect, float sc) {
+            vec2 p = vec2((uv.x - 0.5) * aspect + 0.5, uv.y - cy);
+            return 1.0 - smoothstep(-0.006, 0.010, humanDist(p, cx, swing, sc));
+          }
+        `;
+
+        // Shared: 悪夢の色域とうねりの流れ。合成パスと移流パスが同じ定義を
+        // 共有する。時間項なし(決定的)。
+        const CHUNK_DREAM = `
+          // 近黒の地に、酸化した赤茶だけが宿る。血の赤(純赤・高彩度)は出さない。
+          const vec3 ABYSS = vec3(0.043, 0.022, 0.020);
+          vec3 dreamRamp(float t, float rust) {
+            // 暗部 → オックスブラッド → 錆 → 黄土。rust で赤寄り↔茶寄りに回す
+            vec3 c1 = mix(vec3(0.235, 0.050, 0.042), vec3(0.196, 0.078, 0.038), rust);
+            vec3 c2 = mix(vec3(0.415, 0.118, 0.078), vec3(0.373, 0.196, 0.086), rust);
+            vec3 c3 = mix(vec3(0.560, 0.260, 0.140), vec3(0.540, 0.360, 0.170), rust);
+            t = clamp(t, 0.0, 1.0);
+            vec3 col = mix(ABYSS, c1, smoothstep(0.0, 0.35, t));
+            col = mix(col, c2, smoothstep(0.30, 0.72, t));
+            col = mix(col, c3, smoothstep(0.68, 1.0, t));
+            return col;
+          }
+          // 実写を悪夢の側へ: 輝度は保ち、色は錆の座標系へ落とす
+          vec3 dreamGrade(vec3 c, float rust) {
+            float l = dot(c, vec3(0.299, 0.587, 0.114));
+            // 暗部も錆として見える底上げ(0.12)。素の色は 16% だけ残す —
+            // 呑まれた身体が「何か写っていた」程度に読める、夢の記憶の濃度
+            return mix(dreamRamp(0.12 + l * 0.80, rust), c * vec3(0.80, 0.62, 0.52), 0.16);
+          }
+          // うねり。3スケール: 画面より大きい巨渦(中心は画面外を彷徨う)+
+          // 中間のコイル + 微細な剪断。curlN は unit-scale(kiin-seido の教訓)。
+          vec2 dreamFlow(vec2 p, float t, float aspect, float swell, float tear) {
+            float sw = mix(0.85, 2.6, swell);
+            vec2 c = vec2(0.5 * aspect, 0.5) +
+              vec2(sin(t * 0.021), cos(t * 0.016)) * (0.45 + 0.22 * sw);
+            vec2 d = p - c;
+            float r2 = dot(d, d);
+            // 巨渦: 分母の sw^2 が「画面より大きい」を作る。中心が画面内に
+            // 見えたら渦は小さすぎる(発注 §10 巨大テスト)
+            vec2 giant = vec2(-d.y, d.x) * (0.85 / (0.30 + r2 / (sw * sw)));
+            // 重力: 中心へゆっくり引かれる。非圧縮性はこの夢に要らない —
+            // 発散が「呑み込み」を作る
+            vec2 inward = -d * (0.16 / (0.6 + r2));
+            vec2 mid = curlN(p * (2.3 / max(sw, 0.4)) + vec2(0.0, t * 0.013)) * 0.46;
+            vec2 fine = curlN(p * (5.0 + 7.0 * tear) - vec2(t * 0.02, 0.0)) *
+              (0.16 + 0.50 * tear);
+            return giant + inward + mid + fine;
+          }
+        `;
+
+        // P3 — うねり。フィードバック移流(semi-Lagrangian の逆追跡): 画は毎
+        // フレーム自分自身の流れに引きずられる。カメラは素材としてだけ生き残る —
+        // マスクの中の身体が注入され、引き伸ばされ、千切れて運ばれていく。
+        // 有界性: 全体がうねり自身の顔料へ緩和し(減衰の床)、注入は有界な mix。
+        // dt=0 のとき全ての変位・注入が 0 になり逆追跡は恒等(freeze の決定性)。
+        const churnFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uPrev;
+          uniform sampler2D uScene;
+          uniform sampler2D uMask;
+          uniform float uDt;
+          uniform float uTime;
+          uniform float uAspect;
+          uniform float uSwell;
+          uniform float uPull;
+          uniform float uTear;
+          uniform float uRust;
+          uniform float uStruggle;
+          uniform int uReset;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_DREAM}
+          void main() {
+            vec2 ar = vec2(uAspect, 1.0);
+            vec2 p = vUv * ar;
+            if (uReset == 1) {
+              // 目覚めた瞬間からうねりは満ちている: 自前の顔料で種を撒く
+              float t0 = fbm(p * 2.1) * 0.8 + 0.25 * fbm(p * 6.3);
+              fragColor = vec4(dreamRamp(t0 * 0.55, uRust), 1.0);
+              return;
+            }
+            vec4 mk = texture(uMask, vUv);
+            vec2 bodyMotion = decV(mk.ba);
+
+            vec2 flow = dreamFlow(p, uTime, uAspect, uSwell, uTear);
+            // もがくと締まる: struggle が全体の速度を上げる。身体の動きは
+            // 局所の乱れとして流れに足される(暴れた分だけ自分が乱される)
+            float speed = (0.035 + 0.16 * uPull) * (1.0 + 1.4 * uStruggle);
+            flow += bodyMotion * 0.9;
+            // 千切れ: 追跡点を流れの法線方向に揺らす。位置シードの静的な場を
+            // dt でスケールするので、freeze では恒等のまま
+            vec2 nrm = normalize(vec2(-flow.y, flow.x) + vec2(1e-6));
+            float jitter = hash12(floor(vUv * vec2(textureSize(uPrev, 0)))) - 0.5;
+            vec2 back = vUv -
+              (flow * speed + nrm * jitter * 0.22 * uTear * speed) * uDt / ar;
+            vec3 col = texture(uPrev, clamp(back, 0.0, 1.0)).rgb;
+            // 移流のバイリニア拡散に対抗する軽いアンシャープ(ステップ毎の
+            // 補間損失への対抗なので dt スケールではなくステップ定数。ただし
+            // dt=0 では逆追跡が恒等なので 0 — freeze の決定性を守る)。
+            // これが「複雑なうねり」の筋を保つ: 無いと数秒で霧に融ける
+            if (uDt > 0.0) {
+              vec2 tx = 1.0 / vec2(textureSize(uPrev, 0));
+              vec3 avg = texture(uPrev, clamp(back + vec2(tx.x, 0.0), 0.0, 1.0)).rgb
+                + texture(uPrev, clamp(back - vec2(tx.x, 0.0), 0.0, 1.0)).rgb
+                + texture(uPrev, clamp(back + vec2(0.0, tx.y), 0.0, 1.0)).rgb
+                + texture(uPrev, clamp(back - vec2(0.0, tx.y), 0.0, 1.0)).rgb;
+              col = clamp(col + (col - avg * 0.25) * 0.30, 0.0, 1.0);
+            }
+
+            // 身体の注入: マスクの中の実写(悪夢のグレード)が絶えず流し込まれる
+            vec3 meat = dreamGrade(texture(uScene, vUv).rgb, uRust);
+            float inj = mk.r * (0.55 + 0.45 * fbm(p * 9.0));
+            col = mix(col, meat, 1.0 - exp(-uDt * inj * 4.2));
+
+            // うねり自身の顔料: 場は空にならず、リニア補間の灰色化にも呑まれ
+            // ない(技術注意#6)。これが減衰の床=有界性でもある
+            float pig = fbm(p * 1.7 + vec2(0.0, uTime * 0.006)) * 0.75 +
+              fbm(p * 5.1 - vec2(uTime * 0.004, 0.0)) * 0.35;
+            vec3 base = dreamRamp(0.08 + pig * 0.72, uRust);
+            // τ≈11s: 床への緩和は有界性のためだけに要る。速いと運ばれてきた
+            // 筋(引き裂かれた像)が数秒で床の模様に均されてしまう
+            col = mix(col, base, 1.0 - exp(-uDt * 0.09));
+
+            fragColor = vec4(col, 1.0);
+          }
+        `;
+
+        const sceneFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uVideo;
+          uniform vec2 uResolution;
+          uniform vec2 uVideoSize;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform int uMirror;
+          uniform int uFake;
+          uniform int uHasVideo;
+          ${CHUNK_NOISE}
+          ${CHUNK_FAKE}
+          void main() {
+            if (uFake == 1) {
+              fragColor = vec4(fakeScene(vUv, uCx, uCy, uSwing, uAspect, uScale), 1.0);
+              return;
+            }
+            if (uHasVideo == 0) {
+              // neutral holding backdrop while the camera warms up (not black)
+              fragColor = vec4(mix(vec3(0.10, 0.10, 0.13),
+                vec3(0.20, 0.18, 0.24), vUv.y), 1.0);
+              return;
+            }
+            vec2 uv = vUv;
+            if (uMirror == 1) uv.x = 1.0 - uv.x;
+            float canvasAspect = uResolution.x / uResolution.y;
+            float videoAspect = uVideoSize.x / uVideoSize.y;
+            vec2 scale = videoAspect > canvasAspect
+              ? vec2(canvasAspect / videoAspect, 1.0)
+              : vec2(1.0, videoAspect / canvasAspect);
+            vec2 vuv = (uv - 0.5) * scale + 0.5;
+            fragColor = vec4(texture(uVideo, vuv).rgb, 1.0);
+          }
+        `;
+
+        // P1 — the mask / motion field:
+        //   R = fast person-mask EMA (the body as it is NOW — the churn's
+        //       injection region)
+        //   G = slow person-mask EMA (kept for the debug views)
+        //   BA = motion field (frame-difference pseudo flow, EMA-smoothed) —
+        //       the struggle made local: it stirs the churn where the body moves
+        const maskFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uScene;
+          uniform sampler2D uScenePrev;
+          uniform sampler2D uPrev;
+          uniform sampler2D uSeg;
+          uniform vec2 uTexel;
+          uniform vec2 uSegScale;
+          uniform float uAspect;
+          uniform float uCx;
+          uniform float uCy;
+          uniform float uSwing;
+          uniform float uScale;
+          uniform float uDt;
+          uniform float uAlphaFast;
+          uniform float uAlphaSlow;
+          uniform float uAlphaMot;
+          uniform int uReset;
+          uniform int uSource;
+          uniform int uMirror;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_FAKE}
+          float lumaf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+          void main() {
+            float rawMask = 0.0;
+            if (uSource == 0) {
+              rawMask = fakeMask(vUv, uCx, uCy, uSwing, uAspect, uScale);
+            } else if (uSource == 1) {
+              // Real-camera segmentation mask. Coordinate convention matched to
+              // kiin-seido / gas-head so the mask overlaps the real person
+              // pixel-for-pixel with the P0 background:
+              //   * mirror: uv.x = 1-uv.x applied BEFORE cover-fit — identical
+              //     to the P0 scene, so scene and mask stay in register.
+              //   * cover-fit: (uv-0.5)*uSegScale+0.5 — the same crop as P0.
+              //   * Y flip: sample at (suv.x, 1.0 - suv.y). MediaPipe masks are
+              //     image-space (top-left origin) and segTexture is uploaded
+              //     UNPACK_FLIP_Y=false, while the video texture is uploaded
+              //     UNPACK_FLIP_Y=true (upright). Without the explicit flip the
+              //     mask lands upside-down (CRAFT §C1: "only the face" bug).
+              vec2 uv = vUv;
+              if (uMirror == 1) uv.x = 1.0 - uv.x;
+              vec2 suv = (uv - 0.5) * uSegScale + 0.5;
+              float rawSeg = texture(uSeg, vec2(suv.x, 1.0 - suv.y)).r;
+              // firm the soft confidence mask toward 0/1 so the real body is a
+              // solid figure (the injection must read as a body, not a haze)
+              rawMask = smoothstep(0.32, 0.70, rawSeg);
+            }
+            vec4 prev = texture(uPrev, vUv);
+            float fastM = uReset == 1 ? rawMask : mix(prev.r, rawMask, uAlphaFast);
+            float slowM = uReset == 1 ? rawMask : mix(prev.g, rawMask, uAlphaSlow);
+
+            // pseudo optical flow from the scene frame difference
+            vec3 cur = texture(uScene, vUv).rgb;
+            float l0 = lumaf(texture(uScenePrev, vUv).rgb);
+            float l1 = lumaf(cur);
+            float lx = lumaf(texture(uScene, vUv + vec2(uTexel.x, 0.0)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(uTexel.x, 0.0)).rgb);
+            float ly = lumaf(texture(uScene, vUv + vec2(0.0, uTexel.y)).rgb) -
+              lumaf(texture(uScene, vUv - vec2(0.0, uTexel.y)).rgb);
+            vec2 grd = vec2(lx / (2.0 * uTexel.x), ly / (2.0 * uTexel.y));
+            float it = (l1 - l0) / max(uDt, 1e-3);
+            vec2 flowRaw = -it * grd / (dot(grd, grd) + 40.0);
+            flowRaw = clamp(flowRaw, vec2(-VMAX), vec2(VMAX));
+            vec2 flow = uReset == 1 ? vec2(0.0)
+              : mix(decV(prev.ba), flowRaw, uAlphaMot);
+
+            fragColor = vec4(clamp(fastM, 0.0, 1.0), clamp(slowM, 0.0, 1.0), encV(flow));
+          }
+        `;
+
+        // Separable Gaussian (all channels). Softens the mask edge into the
+        // sprouting band (P2), builds the wide proximity aura (P3) and blurs the
+        // flower layer for the bloom (P7).
+        const blurFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uSrc;
+          uniform vec2 uDir;
+          uniform float uSigma;
+          void main() {
+            vec4 acc = vec4(0.0);
+            float wsum = 0.0;
+            for (int i = -10; i <= 10; ++i) {
+              float x = float(i);
+              float w = exp(-0.5 * x * x / max(uSigma * uSigma, 1e-4));
+              acc += texture(uSrc, vUv + uDir * x) * w;
+              wsum += w;
+            }
+            fragColor = acc / wsum;
+          }
+        `;
+
+        // P4 — composite. 視界はうねりのみ — 部屋は決して現れない。目眩の
+        // ベクション、意識の窓、深い周縁、粒子。
+        const compositeFS = `#version 300 es
+          precision highp float;
+          in vec2 vUv;
+          out vec4 fragColor;
+          uniform sampler2D uChurn;
+          uniform sampler2D uScene;
+          uniform sampler2D uMask;
+          uniform sampler2D uSoft;
+          uniform vec2 uResolution;
+          uniform float uAspect;
+          uniform float uTime;
+          uniform float uExposure;
+          uniform float uFilmGrain;
+          uniform float uSwell;
+          uniform float uTear;
+          uniform float uRust;
+          uniform float uAware;
+          uniform float uDizzy;
+          uniform float uStruggle;
+          uniform float uPresent;
+          uniform vec2 uHead;
+          uniform int uDebug;
+          ${CHUNK_NOISE}
+          ${CHUNK_ENC}
+          ${CHUNK_DREAM}
+          void main() {
+            vec2 ar = vec2(uAspect, 1.0);
+            // ---- 目眩: 全景がごくゆっくり回転し、呼吸する(art clock 由来 —
+            // freeze と reduced-motion で止まる)
+            float wob = uDizzy;
+            float angv = (sin(uTime * 0.050) + 0.6 * sin(uTime * 0.031 + 1.7)) *
+              0.035 * wob;
+            float brth = 1.0 + 0.022 * wob * sin(uTime * 0.043 + 0.8);
+            vec2 q = (vUv - 0.5) * ar;
+            float cav = cos(angv), sav = sin(angv);
+            q = vec2(q.x * cav - q.y * sav, q.x * sav + q.y * cav) * brth;
+            vec2 cuv = clamp(q / ar + 0.5, 0.0, 1.0);
+            vec3 col = texture(uChurn, cuv).rgb;
+
+            // ---- 意識の窓: 顔のまわりだけ、現在が現在のまま明瞭に残る。
+            // 窓はうねりと逆位相で漂い(浮遊感)、もがくと狭まる。消えはしない。
+            vec2 drift = vec2(sin(uTime * 0.11), cos(uTime * 0.087)) * 0.010 * wob;
+            vec2 hd = uHead + drift;
+            float r = length((vUv - hd) * ar);
+            float wr = (0.085 + 0.13 * uAware) * (1.0 - 0.42 * uStruggle);
+            float win = (1.0 - smoothstep(wr * 0.5, wr, r)) * uPresent;
+            vec3 now = texture(uScene, vUv).rgb;
+            vec3 lucid = mix(now, dreamGrade(now, uRust), 0.30) * 0.96;
+            col = mix(col, lucid, win);
+            // 窓の縁: うねりに縁取られて僅かに沈む
+            float rim = smoothstep(wr * 0.55, wr, r) *
+              (1.0 - smoothstep(wr, wr * 1.6, r));
+            col *= 1.0 - 0.28 * rim * uPresent;
+
+            // ---- トーン: 暗く、周縁は深く沈む
+            col = clamp(col * uExposure * 1.35, 0.0, 4.0);
+            col = col / (1.0 + col * 0.42);
+            col = (col - 0.5) * 1.10 + 0.5;
+            vec2 dv = (vUv - 0.5) * ar;
+            col *= 1.0 - 0.42 * smoothstep(0.32, 0.92, length(dv));
+            // 黒の底を僅かに持ち上げる(錆の残光)。トーンマップ+周辺減光で
+            // 潰れた暗部の帯がかろうじて読める — 完全な黒はこの夢に無い
+            col += vec3(0.016, 0.007, 0.006) * (1.0 - smoothstep(0.0, 0.5, col.r));
+            float gr = hash12(floor(vUv * uResolution / 1.5)) - 0.5;
+            col += gr * uFilmGrain * 0.06;
+
+            if (uDebug == 1) {
+              vec4 mk = texture(uMask, vUv);
+              col = vec3(mk.r, length(decV(mk.ba)) * 3.0, texture(uSoft, vUv).r * 0.5);
+            } else if (uDebug == 2) {
+              vec2 f = dreamFlow(vUv * ar, uTime, uAspect, uSwell, uTear);
+              float dir = atan(f.y, f.x);
+              col = dreamRamp(0.5 + 0.5 * sin(dir), uRust) *
+                (0.35 + min(length(f), 1.6) * 0.6);
+            } else if (uDebug == 3) {
+              col = texture(uChurn, vUv).rgb;
+            } else if (uDebug == 4) {
+              col = vec3(texture(uMask, vUv).r * 0.7, win, uStruggle);
+            } else if (uDebug == 5) {
+              float row = floor(vUv.y * 3.0);
+              col = row < 1.0 ? dreamRamp(vUv.x, 0.0)
+                : (row < 2.0 ? dreamRamp(vUv.x, 1.0)
+                : dreamGrade(vec3(vUv.x), uRust));
+            }
+            col = min(col, vec3(0.985));
+            fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+          }
+        `;
+
+        /* ------------------------------------------------------------------
+           Program / target plumbing
+        ------------------------------------------------------------------ */
+
+        function compileShader(type, source) {
+          const shader = gl.createShader(type);
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            throw new Error(`Shader compile failed: ${gl.getShaderInfoLog(shader)}`);
+          }
+          return shader;
+        }
+        function createProgramVS(vsSource, fsSource) {
+          const program = gl.createProgram();
+          gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vsSource));
+          gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fsSource));
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`Program link failed: ${gl.getProgramInfoLog(program)}`);
+          }
+          return program;
+        }
+        function createProgram(fsSource) {
+          return createProgramVS(fullscreenVS, fsSource);
+        }
+        function getLocations(program, names) {
+          const out = {};
+          names.forEach((name) => {
+            out[name] = gl.getUniformLocation(program, name);
+          });
+          return out;
+        }
+
+        const programs = {
+          scene: createProgram(sceneFS),
+          mask: createProgram(maskFS),
+          blur: createProgram(blurFS),
+          churn: createProgram(churnFS),
+          composite: createProgram(compositeFS),
+        };
+
+        const locations = {
+          scene: getLocations(programs.scene, [
+            "uVideo", "uResolution", "uVideoSize", "uAspect", "uCx", "uCy",
+            "uSwing", "uScale", "uMirror", "uFake", "uHasVideo",
+          ]),
+          mask: getLocations(programs.mask, [
+            "uScene", "uScenePrev", "uPrev", "uSeg", "uTexel", "uSegScale",
+            "uAspect", "uCx", "uCy", "uSwing", "uScale", "uDt", "uAlphaFast",
+            "uAlphaSlow", "uAlphaMot", "uReset", "uSource", "uMirror",
+          ]),
+          blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
+          churn: getLocations(programs.churn, [
+            "uPrev", "uScene", "uMask", "uDt", "uTime", "uAspect",
+            "uSwell", "uPull", "uTear", "uRust", "uStruggle", "uReset",
+          ]),
+          composite: getLocations(programs.composite, [
+            "uChurn", "uScene", "uMask", "uSoft",
+            "uResolution", "uAspect", "uTime", "uExposure", "uFilmGrain",
+            "uSwell", "uTear", "uRust", "uAware", "uDizzy", "uStruggle",
+            "uPresent", "uHead", "uDebug",
+          ]),
+        };
+
+        function createTexture(width, height, internal, format, type, filter) {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          const f = filter || gl.LINEAR;
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, null);
+          return tex;
+        }
+        function createTarget(width, height, useFloat) {
+          const internal = useFloat && floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = useFloat && floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const tex = createTexture(width, height, internal, gl.RGBA, type, gl.LINEAR);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { tex, fbo, width, height };
+        }
+        // A ping-pong-able STATE set: two data textures (NEAREST — pure state,
+        // read with texelFetch) sharing one MRT framebuffer.
+        function createStateSet(width, height) {
+          const internal = floatExt ? gl.RGBA16F : gl.RGBA8;
+          const type = floatExt ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+          const texA = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const texB = createTexture(width, height, internal, gl.RGBA, type, gl.NEAREST);
+          const fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, texB, 0);
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          return { texA, texB, fbo, width, height };
+        }
+        function destroyTarget(target) {
+          if (!target) return;
+          if (target.tex) gl.deleteTexture(target.tex);
+          gl.deleteFramebuffer(target.fbo);
+        }
+        function clearTarget(target, r, g, b, a) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+          gl.viewport(0, 0, target.width, target.height);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        // Empty VAO for attributeless draws (fullscreen tri + instanced quads).
+        const vao = gl.createVertexArray();
+
+        // うねり本体(churnA/B)の ping-pong 位相。
+        let churnPing = false;
+
+        // Video texture (DOM source → UNPACK_FLIP_Y). The segmentation texture is
+        // a plain R8 upload from MediaPipe (image space, no flip on upload).
+        const videoTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        const segTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, segTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        // 8 bytes, not 4: R8 rows are padded to UNPACK_ALIGNMENT (4) so a 2x2
+        // upload needs 4 bytes per row
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 2, 2, 0, gl.RED, gl.UNSIGNED_BYTE,
+          new Uint8Array(8));
+        let segSize = [2, 2];
+
+        let targets = null;
+        let paintW = 2, paintH = 2, fieldW = 2, fieldH = 2, churnW = 2, churnH = 2;
+        let needsReset = true;
+
+        function rebuildTargets() {
+          if (targets) Object.values(targets).forEach(destroyTarget);
+          targets = {
+            sceneA: createTarget(paintW, paintH, false),
+            sceneB: createTarget(paintW, paintH, false),
+            maskA: createTarget(fieldW, fieldH, true),
+            maskB: createTarget(fieldW, fieldH, true),
+            softT: createTarget(fieldW, fieldH, true),
+            softTmp: createTarget(fieldW, fieldH, true),
+            // うねり本体。像の破片が読める程度の解像度で足りる(≤832 長辺)。
+            // RGBA8 で足りる(色だけを運ぶ。速度場は持たない)
+            churnA: createTarget(churnW, churnH, false),
+            churnB: createTarget(churnW, churnH, false),
+          };
+          needsReset = true;
+        }
+
+        // Encoded targets must clear to encoded zero (0.5) for the flow channel.
+        function clearSimTargets() {
+          clearTarget(targets.sceneA, 0.22, 0.22, 0.25, 1);
+          clearTarget(targets.sceneB, 0.22, 0.22, 0.25, 1);
+          clearTarget(targets.maskA, 0, 0, 0.5, 0.5);
+          clearTarget(targets.maskB, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softT, 0, 0, 0.5, 0.5);
+          clearTarget(targets.softTmp, 0, 0, 0.5, 0.5);
+          // churn の種まきは churnFS の uReset 経路が行う(顔料で満たす)。
+          // ここは安全側の近黒で埋めるだけ
+          clearTarget(targets.churnA, 0.04, 0.02, 0.02, 1);
+          clearTarget(targets.churnB, 0.04, 0.02, 0.02, 1);
+        }
+
+        function resize() {
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          const width = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+          const height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+          if (canvas.width !== width || canvas.height !== height || !targets) {
+            canvas.width = width;
+            canvas.height = height;
+            const maxSide = Math.max(width, height);
+            const paintScale = Math.min(1, 1280 / maxSide);
+            paintW = Math.max(2, Math.round(width * paintScale));
+            paintH = Math.max(2, Math.round(height * paintScale));
+            const fieldScale = Math.min(1, 448 / maxSide);
+            fieldW = Math.max(8, Math.round(width * fieldScale));
+            fieldH = Math.max(8, Math.round(height * fieldScale));
+            // うねり本体の解像度: 長辺 ≤832。夢の像は移流で滲むので paint の
+            // フル解像度は要らず、advection 1パスの重さが半分近くまで落ちる
+            // (swiftshader の prewarm と実機モバイルの両方が効く)
+            const churnScale = Math.min(1, 832 / maxSide);
+            churnW = Math.max(8, Math.round(width * churnScale));
+            churnH = Math.max(8, Math.round(height * churnScale));
+            rebuildTargets();
+          }
+        }
+        window.addEventListener("resize", resize, { passive: true });
+
+        function bindTexture(unit, texture) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+        function renderPass(target, program, setup) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+          gl.viewport(0, 0, target ? target.width : canvas.width,
+            target ? target.height : canvas.height);
+          gl.useProgram(program);
+          setup();
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+        // stride lets a 21-tap kernel reach far (the proximity aura) without
+        // turning into a truncated, boxy blur.
+        function blurPass(src, tmp, dst, sigma, stride) {
+          const st = stride || 1;
+          renderPass(tmp, programs.blur, () => {
+            bindTexture(0, src.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, st / tmp.width, 0);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+          renderPass(dst, programs.blur, () => {
+            bindTexture(0, tmp.tex);
+            gl.uniform1i(locations.blur.uSrc, 0);
+            gl.uniform2f(locations.blur.uDir, 0, st / dst.height);
+            gl.uniform1f(locations.blur.uSigma, sigma);
+          });
+        }
+        // True GPU sync for this environment: gl.finish() is effectively
+        // non-blocking under swiftshader, a 1x1 readPixels is not (CRAFT §C4).
+        const syncPixel = new Uint8Array(4);
+        function glSync() {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+        }
+
+        /* ------------------------------------------------------------------
+           Detection state (person mask + presence). Everything lives in SCREEN
+           UV so fakesource and MediaPipe drive the exact same shader path, and
+           every quantity is EMA-smoothed. Only ImageSegmenter is loaded — no
+           pose model, because nothing here needs landmarks (CRAFT §C3).
+        ------------------------------------------------------------------ */
+
+        const det = {
+          mx: 0.5, my: 0.5, tmx: 0.5, tmy: 0.5,   // 身体の重心(もがき計が読む)
+          hx: 0.5, hy: 0.62, thx: 0.5, thy: 0.62, // 頭部(意識の窓の中心)
+          cx: 0.5, cy: 0, present: 0,
+          tcx: 0.5, tcy: 0, tpresent: 0,
+          swing: 0,
+          segScale: [1, 1],
+          segReady: false,
+        };
+
+        const MP_PKG = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+        const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+        const SEG_MODEL =
+          "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+
+        let mpSegmenter = null;
+        let mpState = "idle"; // idle | loading | ready | error
+        let mpProgress = 0;
+        let mpDelegate = "GPU";
+        let mpVision = null;
+        let ImageSegmenterClass = null;
+        let mpSwitching = false;
+        let segU8 = new Uint8Array(4);
+        // Inference reads a SMALL offscreen copy of the video, never the full
+        // frame: the mask is consumed at field resolution (≤448) anyway, and a
+        // ~288px input is 10-20x cheaper (CRAFT §C3).
+        const SEG_MAX_SIDE = 288;
+        const segSrc = document.createElement("canvas");
+        const segSrcCtx = segSrc.getContext("2d");
+        let detCost = 20;   // EMA of inference ms → adaptive cadence + readout
+        let segBadRun = 0;  // consecutive degenerate masks (GPU-health check)
+
+        const segOpts = (delegate) => ({
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          runningMode: "VIDEO",
+          outputCategoryMask: false,
+          outputConfidenceMasks: true,
+        });
+
+        async function loadMediaPipe() {
+          if (FAKE || mpState === "loading" || mpState === "ready") return;
+          mpState = "loading";
+          mpProgress = 0.05;
+          try {
+            const mod = await import(/* @vite-ignore */ MP_PKG);
+            const { FilesetResolver, ImageSegmenter } = mod;
+            ImageSegmenterClass = ImageSegmenter;
+            mpProgress = 0.3;
+            mpVision = await FilesetResolver.forVisionTasks(MP_WASM);
+            mpProgress = 0.6;
+            try {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("GPU"));
+              mpDelegate = "GPU";
+            } catch (_e) {
+              mpSegmenter = await ImageSegmenter.createFromOptions(mpVision, segOpts("CPU"));
+              mpDelegate = "CPU";
+            }
+            mpProgress = 1;
+            mpState = "ready";
+          } catch (error) {
+            console.error("MediaPipe load failed", error);
+            mpState = "error";
+          }
+        }
+
+        // Some mobile GPU delegates "succeed" but emit degenerate masks
+        // (all-zero or all-one). When that persists, rebuild on CPU.
+        async function switchToCpuDelegate() {
+          if (mpSwitching || mpDelegate === "CPU" || !ImageSegmenterClass || !mpVision) return;
+          mpSwitching = true;
+          try {
+            const next = await ImageSegmenterClass.createFromOptions(mpVision, segOpts("CPU"));
+            try { if (mpSegmenter && mpSegmenter.close) mpSegmenter.close(); } catch (_e) { /* noop */ }
+            mpSegmenter = next;
+            mpDelegate = "CPU";
+            segBadRun = 0;
+            console.warn("uneri: GPU segmentation output looked broken — switched to CPU delegate");
+          } catch (_e) { /* keep the GPU segmenter */ }
+          mpSwitching = false;
+        }
+
+        // Offline diagnostic (?fakeseg=1): a synthetic MediaPipe-style mask.
+        // Rows top-to-bottom = image top-to-bottom (top-left origin, like
+        // getAsFloat32Array); uploaded UNPACK_FLIP_Y=false exactly like the real
+        // mask. The person occupies the TOP ~60% of the image, so a correct
+        // Y-flip injects the body around a figure in the TOP of the screen.
+        function uploadFakeSeg() {
+          const w = 96, h = 96;
+          const arr = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const inTop = y < h * 0.6;
+              const inBand = x > w * 0.22 && x < w * 0.78;
+              arr[y * w + x] = inTop && inBand ? 255 : 0;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, arr);
+          segSize = [w, h];
+          det.segReady = true;
+          det.tpresent = 1;
+        }
+
+        // Uploads the confidence mask and returns its mean coverage (0..1).
+        function uploadSegMask(mask) {
+          const w = mask.width, h = mask.height;
+          const f = mask.getAsFloat32Array();
+          if (segU8.length !== w * h) segU8 = new Uint8Array(w * h);
+          let sum = 0;
+          // Body centroid (the struggle meter differentiates it) and a HEAD
+          // estimate: the centroid of the TOP rows holding the first ~16% of
+          // the mask mass. The window of consciousness needs a real head to sit
+          // on; det.cx/cy only ever tracked the synthetic figure.
+          let mx = 0, my = 0;
+          const rowSum = new Float64Array(h);
+          const rowX = new Float64Array(h);
+          for (let y = 0; y < h; y++) {
+            let rs = 0, rx = 0;
+            for (let x = 0; x < w; x++) {
+              const v = Math.max(0, Math.min(255, (f[y * w + x] * 255) | 0));
+              segU8[y * w + x] = v;
+              rs += v;
+              rx += v * x;
+            }
+            rowSum[y] = rs;
+            rowX[y] = rx;
+            sum += rs;
+            mx += rx;
+            my += rs * y;
+          }
+          if (sum > 255 * 32) {
+            // image space is top-left origin; the art clock is y-up
+            det.tmx = (mx / sum) / w;
+            det.tmy = 1 - (my / sum) / h;
+            const want = sum * 0.16;
+            let acc = 0, hxs = 0, hys = 0;
+            for (let y = 0; y < h && acc < want; y++) {
+              const take = Math.min(rowSum[y], want - acc);
+              const fr = rowSum[y] > 0 ? take / rowSum[y] : 0;
+              acc += take;
+              hxs += rowX[y] * fr;
+              hys += rowSum[y] * fr * y;
+            }
+            if (acc > 255 * 6) {
+              det.thx = (hxs / acc) / w;
+              det.thy = 1 - (hys / acc) / h;
+            }
+          }
+          gl.bindTexture(gl.TEXTURE_2D, segTexture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          if (segSize[0] !== w || segSize[1] !== h) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, segU8);
+            segSize = [w, h];
+          } else {
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, segU8);
+          }
+          det.segReady = true;
+          return sum / (w * h * 255);
+        }
+
+        // Runs OUTSIDE the render loop (latest-wins); never awaited in rAF.
+        // UNTESTED in this environment (network + swiftshader).
+        function runDetection(now) {
+          if (video.readyState < 2 || video.videoWidth === 0 || mpSwitching) return;
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const s = Math.min(1, SEG_MAX_SIDE / Math.max(vw, vh));
+          const cw = Math.max(2, Math.round(vw * s));
+          const ch = Math.max(2, Math.round(vh * s));
+          if (segSrc.width !== cw || segSrc.height !== ch) {
+            segSrc.width = cw;
+            segSrc.height = ch;
+          }
+          segSrcCtx.drawImage(video, 0, 0, cw, ch);
+          const t0 = performance.now();
+          try {
+            const seg = mpSegmenter.segmentForVideo(segSrc, now);
+            const cm = seg && seg.confidenceMasks && seg.confidenceMasks[0];
+            if (cm) {
+              const cover = uploadSegMask(cm);
+              // presence from real coverage — the window and the injection let
+              // go when nobody is in frame instead of clinging to a stale mask
+              det.tpresent = cover > 0.008 && cover < 0.95 ? 1 : 0;
+              const degenerate = cover < 0.002 || cover > 0.97;
+              segBadRun = degenerate ? segBadRun + 1 : 0;
+              if (segBadRun > 40) switchToCpuDelegate();
+            }
+            if (seg && seg.close) seg.close();
+          } catch (_e) {
+            segBadRun++;
+            if (segBadRun > 40) switchToCpuDelegate();
+          }
+          detCost = detCost * 0.8 + (performance.now() - t0) * 0.2;
+        }
+
+        let detTimer = 0;
+        function detectionTick() {
+          if (!FAKE && mpState === "ready" && cameraReady && !document.hidden) {
+            runDetection(performance.now());
+          }
+          // Adaptive cadence: inference must never own the main thread.
+          const interval = Math.max(33, Math.min(250, detCost * 1.7));
+          detTimer = setTimeout(detectionTick, interval);
+        }
+
+        /* ------------------------------------------------------------------
+           もがき計。マスク重心の速さ → 速攻/遅緩の EMA。悪夢の反転則:
+           動くほど(もがくほど)うねりは速まり、意識の窓は狭まる。
+           立ち上がりは速く(τ≈0.35s — もがけば即座に締まる)、解けるのは
+           遅い(τ≈2.2s — 静止してもすぐには緩まない)。dt=0 で完全静止
+           (?freeze=1 の決定性)。マイクは使わない — 声も出せない夢だから。
+        ------------------------------------------------------------------ */
+
+        const struggle = { v: 0, px: 0.5, py: 0.5, inited: false };
+        function updateStruggle(dt) {
+          if (dt <= 0) return;
+          if (!struggle.inited) {
+            struggle.px = det.mx;
+            struggle.py = det.my;
+            struggle.inited = true;
+          }
+          const vx = (det.mx - struggle.px) / dt;
+          const vy = (det.my - struggle.py) / dt;
+          struggle.px = det.mx;
+          struggle.py = det.my;
+          const sp = Math.min(1, Math.hypot(vx, vy) * 9) * det.present;
+          const tc = sp > struggle.v ? 0.35 : 2.2;
+          struggle.v += (sp - struggle.v) * (1 - Math.exp(-dt / tc));
+        }
+
+        /* ------------------------------------------------------------------
+           Simulation + present
+        ------------------------------------------------------------------ */
+
+        let stream = null;
+        let cameraReady = false;
+        let animTime = 0;
+        let lastNow = performance.now();
+        let fpsLast = performance.now();
+        let fpsFrames = 0;
+        let scenePing = false, maskPing = false;
+        let haveVideo = false;
+        let readyStamped = false;
+        let prewarmLeft = Math.min(480, Math.round(PREWARM / PREWARM_DT));
+
+        const readout = document.getElementById("readout");
+
+        function uploadVideoFrame() {
+          if (
+            cameraReady &&
+            video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0
+          ) {
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            return true;
+          }
+          return false;
+        }
+
+        function updateDetection(dt) {
+          const canvasAspect = canvas.width / Math.max(canvas.height, 1);
+          const videoAspect = (video.videoWidth && video.videoHeight)
+            ? video.videoWidth / video.videoHeight : 4 / 3;
+          det.segScale = videoAspect > canvasAspect
+            ? [canvasAspect / videoAspect, 1]
+            : [1, videoAspect / canvasAspect];
+
+          if (FAKE) {
+            // sway + bob + limb swing so the mask moves like a real performer:
+            // this is what feeds the motion field, the gusts and the moving
+            // sprouting band offline (verify_runtime --motion depends on it).
+            det.tcx = 0.5 + 0.075 * Math.sin(animTime * 0.42);
+            det.tcy = 0.022 * Math.sin(animTime * 0.71 + 1.0);
+            det.swing = Math.sin(animTime * 1.25);
+            det.tpresent = 1;
+            // 合成人型の頭部(意識の窓の中心)。CHUNK_FAKE の座標系を逆に解く:
+            // 頭は q=(cx, 0.80)、アンカー (cx, 0.46) 回りに fakescale が掛かる。
+            det.thx = (det.tcx - 0.5) / Math.max(canvasAspect, 1e-3) + 0.5;
+            // 上端でクランプ: 実カメラ経路の頭部推定は「見えているマスクの
+            // 上端側の質量」なので画面外には出ない。合成人型も同じ振る舞いに
+            // 揃える(大写し ?fakescale=2 で窓が消えないように)
+            det.thy = Math.min(0.92, 0.46 + 0.34 * FAKESCALE + det.tcy);
+          } else if (FAKESEG) {
+            det.tpresent = 1;
+          } else if (mpState !== "ready") {
+            det.tpresent = 0;
+          }
+          if (FAKESEG) det.segScale = [1, 1]; // direct mapping for the Y-flip test
+          // dt が 0 のときだけ完全停止(freeze の決定性)。FREEZE 定数での
+          // 一律 0 だと prewarm 中も検知 EMA が凍り、意識の窓(uPresent)と
+          // もがき計(det.mx の微分)が検証ショットで永遠に 0 のままになる
+          const k = dt > 0 ? 1 - Math.exp(-dt * 6) : 0;
+          if (FAKE) { det.tmx = 0.5 + det.tcx - 0.5; det.tmy = 0.52 + det.tcy; }
+          det.mx += (det.tmx - det.mx) * k;
+          det.my += (det.tmy - det.my) * k;
+          det.cx += (det.tcx - det.cx) * k;
+          det.cy += (det.tcy - det.cy) * k;
+          det.hx += (det.thx - det.hx) * k;
+          det.hy += (det.thy - det.hy) * k;
+          det.present += (det.tpresent - det.present) * k;
+        }
+
+        // One simulation step: every pass except the final composite. Called once
+        // per frame, or repeatedly with a fixed dt while ?prewarm= fast-forwards.
+        function stepSim(dt) {
+          const doReset = needsReset;
+          needsReset = false;
+          if (doReset) clearSimTargets();
+
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          // FAKESEG forces the real-camera seg path (uSource==1) with the
+          // synthetic mask so the Y-flip can be validated offline.
+          const source = FAKESEG ? 1
+            : (FAKE ? 0 : (mpState === "ready" && det.segReady ? 1 : 2));
+          const sceneCur = scenePing ? targets.sceneA : targets.sceneB;
+          const scenePrev = scenePing ? targets.sceneB : targets.sceneA;
+          const maskOut = maskPing ? targets.maskA : targets.maskB;
+          const maskPrev = maskPing ? targets.maskB : targets.maskA;
+          const churnDst = churnPing ? targets.churnA : targets.churnB;
+          const churnPrev = churnPing ? targets.churnB : targets.churnA;
+          const fieldTexel = [1 / fieldW, 1 / fieldH];
+
+          // P0 — scene (camera cover-fit / synthetic room)
+          renderPass(sceneCur, programs.scene, () => {
+            const u = locations.scene;
+            bindTexture(0, videoTexture);
+            gl.uniform1i(u.uVideo, 0);
+            gl.uniform2f(u.uResolution, paintW, paintH);
+            gl.uniform2f(u.uVideoSize,
+              Math.max(1, video.videoWidth), Math.max(1, video.videoHeight));
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+            gl.uniform1i(u.uFake, FAKE ? 1 : 0);
+            gl.uniform1i(u.uHasVideo, haveVideo ? 1 : 0);
+          });
+
+          // P1 — mask (fast + slow EMA) and motion field
+          renderPass(maskOut, programs.mask, () => {
+            const u = locations.mask;
+            bindTexture(0, sceneCur.tex);
+            bindTexture(1, scenePrev.tex);
+            bindTexture(2, maskPrev.tex);
+            bindTexture(3, segTexture);
+            gl.uniform1i(u.uScene, 0);
+            gl.uniform1i(u.uScenePrev, 1);
+            gl.uniform1i(u.uPrev, 2);
+            gl.uniform1i(u.uSeg, 3);
+            gl.uniform2f(u.uTexel, fieldTexel[0], fieldTexel[1]);
+            gl.uniform2f(u.uSegScale, det.segScale[0], det.segScale[1]);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uCx, det.cx);
+            gl.uniform1f(u.uCy, det.cy);
+            gl.uniform1f(u.uSwing, det.swing);
+            gl.uniform1f(u.uScale, FAKESCALE);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uAlphaFast, 1 - Math.exp(-Math.max(dt, 1e-4) * 16));
+            gl.uniform1f(u.uAlphaSlow, 1 - Math.exp(-Math.max(dt, 1e-4) * 2.3));
+            gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+            gl.uniform1i(u.uSource, source);
+            gl.uniform1i(u.uMirror, state.mirror ? 1 : 0);
+          });
+
+          // P2 — soften the mask (the debug views read it; the churn reads the
+          // raw mask, whose EMA already smooths it in time)
+          blurPass(maskOut, targets.softTmp, targets.softT, 3.2, 1);
+
+          // P3 — うねり本体: フィードバック移流+身体の注入+顔料の床
+          renderPass(churnDst, programs.churn, () => {
+            const u = locations.churn;
+            bindTexture(0, churnPrev.tex);
+            bindTexture(1, sceneCur.tex);
+            bindTexture(2, maskOut.tex);
+            gl.uniform1i(u.uPrev, 0);
+            gl.uniform1i(u.uScene, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1f(u.uDt, dt);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uSwell, state.swell);
+            gl.uniform1f(u.uPull, state.pull);
+            gl.uniform1f(u.uTear, state.tear);
+            gl.uniform1f(u.uRust, state.rust);
+            gl.uniform1f(u.uStruggle, struggle.v * state.grip);
+            gl.uniform1i(u.uReset, doReset ? 1 : 0);
+          });
+
+          scenePing = !scenePing;
+          maskPing = !maskPing;
+          churnPing = !churnPing;
+        }
+
+        // P4 — composite to the canvas.
+        function present() {
+          const aspect = canvas.width / Math.max(canvas.height, 1);
+          const sceneCur = scenePing ? targets.sceneB : targets.sceneA;
+          const maskCur = maskPing ? targets.maskB : targets.maskA;
+          const churnCur = churnPing ? targets.churnB : targets.churnA;
+          renderPass(null, programs.composite, () => {
+            const u = locations.composite;
+            bindTexture(0, churnCur.tex);
+            bindTexture(1, sceneCur.tex);
+            bindTexture(2, maskCur.tex);
+            bindTexture(3, targets.softT.tex);
+            gl.uniform1i(u.uChurn, 0);
+            gl.uniform1i(u.uScene, 1);
+            gl.uniform1i(u.uMask, 2);
+            gl.uniform1i(u.uSoft, 3);
+            gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+            gl.uniform1f(u.uAspect, aspect);
+            gl.uniform1f(u.uTime, animTime);
+            gl.uniform1f(u.uExposure, state.exposure);
+            gl.uniform1f(u.uFilmGrain, state.filmGrain);
+            gl.uniform1f(u.uSwell, state.swell);
+            gl.uniform1f(u.uTear, state.tear);
+            gl.uniform1f(u.uRust, state.rust);
+            gl.uniform1f(u.uAware, state.aware);
+            gl.uniform1f(u.uDizzy, state.dizzy);
+            gl.uniform1f(u.uStruggle, struggle.v * state.grip);
+            gl.uniform1f(u.uPresent, det.present);
+            // det.hx/hy are in the mask's sampling space. The canvas applies
+            // cover-fit (segScale) and the mirror on top of that, so invert
+            // both. The FAKE head is computed directly in canvas UV.
+            let hx = det.hx, hy = det.hy;
+            if (!FAKE) {
+              hx = (hx - 0.5) / Math.max(det.segScale[0], 1e-4) + 0.5;
+              hy = (hy - 0.5) / Math.max(det.segScale[1], 1e-4) + 0.5;
+              if (state.mirror) hx = 1 - hx;
+            }
+            gl.uniform2f(u.uHead,
+              Math.max(-0.5, Math.min(1.5, hx)),
+              Math.max(-0.5, Math.min(1.5, hy)));
+            gl.uniform1i(u.uDebug, state.debugView);
+          });
+        }
+
+        function detectionLabel() {
+          if (FAKE) return "合成";
+          if (FAKESEG) return "合成マスク";
+          if (mpState === "loading") return `検知ロード中 ${Math.round(mpProgress * 100)}%`;
+          if (mpState === "error") return "検知エラー";
+          if (mpState === "ready") {
+            const st = det.present > 0.4 ? "追従中" : "未検出";
+            return `${st} ${Math.round(detCost)}ms·${mpDelegate}`;
+          }
+          return "待機";
+        }
+
+        function updateChip() {
+          statusChip.textContent = FAKE
+            ? "入力 · 合成 (fakesource=1)"
+            : `検知 · ${detectionLabel()}`;
+          statusChip.classList.toggle(
+            "hidden", FAKE ? performance.now() - bootWall > 4000 : false);
+        }
+
+        function frame(now) {
+          resize();
+
+          const rawDt = Math.min(0.05, Math.max(0, (now - lastNow) / 1000));
+          lastNow = now;
+          const dt = FREEZE ? 0 : rawDt;
+
+          haveVideo = FAKE ? false : uploadVideoFrame();
+          const hasInput = FAKE || FAKESEG || haveVideo || mpState === "ready";
+
+          if (!state.pauseAnim) animTime += dt;
+          updateDetection(dt);
+          updateStruggle(dt);
+
+          // ?prewarm=<sec>: deterministic fast-forward before __artReady, spread
+          // over several rAF frames and synced with a 1x1 readPixels so the
+          // preroll never parks the compositor for tens of seconds — under
+          // swiftshader a single blocking preroll stalls everything (CRAFT §C4).
+          if (prewarmLeft > 0) {
+            const n = Math.min(12, prewarmLeft);
+            for (let i = 0; i < n; i++) {
+              if (!state.pauseAnim) animTime += PREWARM_DT;
+              updateDetection(PREWARM_DT);
+              updateStruggle(PREWARM_DT);
+              stepSim(PREWARM_DT);
+            }
+            prewarmLeft -= n;
+            glSync();
+          }
+
+          stepSim(dt);
+          present();
+
+          if (!readyStamped && hasInput && prewarmLeft <= 0) {
+            glSync();               // the first REAL frame has completed
+            readyStamped = true;
+            window.__artReady = true;
+          }
+
+          fpsFrames++;
+          const wallNow = performance.now();
+          if (wallNow - fpsLast > 500) {
+            const fps = (fpsFrames * 1000) / (wallNow - fpsLast);
+            fpsLast = wallNow;
+            fpsFrames = 0;
+            readout.textContent = `FPS ${fps.toFixed(0)} / 解像度 ${canvas.width}×${
+              canvas.height} / もがき ${struggle.v.toFixed(2)} / 検知 ${
+              detectionLabel()}`;
+            updateChip();
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        /* ------------------------------------------------------------------
+           Camera + boot. With ?fakesource=1 the synthetic scene drives the
+           pipeline and MediaPipe is never touched, but getUserMedia still runs
+           so the three camera error paths stay observable.
+        ------------------------------------------------------------------ */
+
+        async function startCamera() {
+          stopCamera();
+          cameraReady = false;
+          retryCamera.disabled = true;
+          setOverlay("requesting", "REQUESTING CAMERA",
+            "Please allow webcam access. If this is not localhost or HTTPS, the camera API will be blocked.");
+
+          if (
+            location.protocol !== "https:" &&
+            location.hostname !== "localhost" &&
+            location.hostname !== "127.0.0.1" &&
+            location.hostname !== "[::1]"
+          ) {
+            setOverlay("error", "SECURE CONTEXT REQUIRED",
+              "Serve the file from localhost (for example: python3 -m http.server 8899) or HTTPS, then reload.");
+            retryCamera.disabled = false;
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setOverlay("error", "CAMERA API UNAVAILABLE",
+              "This browser does not expose getUserMedia. Try a modern browser over localhost or HTTPS.");
+            retryCamera.disabled = false;
+            return;
+          }
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: state.facingMode,
+                width: { ideal: 1280 }, height: { ideal: 720 },
+              },
+              audio: false,
+            });
+            video.srcObject = stream;
+            await video.play();
+            cameraReady = true;
+            retryCamera.disabled = false;
+            needsReset = true;
+            setOverlay("hidden", "", "");
+            if (!FAKE) loadMediaPipe();
+          } catch (error) {
+            retryCamera.disabled = false;
+            const name = error && error.name ? error.name : "";
+            if (name === "NotAllowedError" || name === "SecurityError") {
+              setOverlay("error", "PERMISSION DENIED",
+                "Camera access was denied. Enable camera permission for this site, then retry.",
+                { retryCamera: true });
+            } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+              setOverlay("error", "NO CAMERA FOUND",
+                "No usable webcam was found. Connect a camera or release it from another app, then retry.",
+                { retryCamera: true });
+            } else {
+              setOverlay("error", "CAMERA ERROR",
+                `${name || "Unknown error"}. Check browser permissions and retry.`,
+                { retryCamera: true });
+            }
+          }
+        }
+
+        function stopCamera() {
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+            stream = null;
+          }
+          video.srcObject = null;
+        }
+
+        retryCamera.addEventListener("click", () => { startCamera(); });
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) lastNow = performance.now();
+        });
+        window.addEventListener("beforeunload", () => { stopCamera(); });
+
+        const bootWall = performance.now();
+
+        try {
+          resize();
+          if (FAKESEG) uploadFakeSeg(); // offline seg-path diagnostic
+          // startCamera() runs in every mode. Under ?fakesource=1 the synthetic
+          // scene drives the whole pipeline regardless of the camera (the video
+          // texture is never sampled, MediaPipe stays untouched), so the camera
+          // is only exercised to keep the three error overlays observable: on
+          // success the overlay hides and the fake art shows; on denial /
+          // no-camera the matching error overlay appears over the
+          // still-rendering art.
+          startCamera();
+          detectionTick();
+          requestAnimationFrame(frame);
+        } catch (error) {
+          setOverlay("error", "WEBGL SETUP ERROR",
+            error && error.message ? error.message : "Could not initialize the renderer.");
+          console.error(error);
+        }
+      })();
+    </script>
+  </body>
+</html>

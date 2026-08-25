@@ -390,5 +390,17 @@
     "audio": false,
     "hideCss": "#tuneBar,#togglePanel,#modeBar{display:none}",
     "note": "PARTICLE(既定)のライブ fakesource。スクリプトが E2 をロックする区間(warm 23s、ヘッドレスのスロー係数込み)で金の文字を撮る。freeze は sim が止まり文字が出ないため使わない。"
+  },
+  "opus5_uneri": {
+    "query": "fakesource=1&freeze=1&prewarm=10",
+    "warmMs": 4000,
+    "click": [],
+    "hide": [
+      "#closePanel"
+    ],
+    "readyFlag": true,
+    "audio": false,
+    "note": "prewarm=10 は注入された身体が巨渦の腕に引き伸ばされ、意識の窓が頭部に開いている瞬間。freeze で決定的。",
+    "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
