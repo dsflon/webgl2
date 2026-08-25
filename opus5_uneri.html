@@ -19,6 +19,12 @@
        揺らぎが見えない」— 人はうねりを決して覆わない)。輪郭はソフトマスク
        の等値線帯。ノイズに千切られ、もがくほど薄れる。中身はごく薄い気配。
        ※「意識の窓」は同日のフィードバックで廃止。
+    7. 怖気(2026-08-25 追補「もっと不快感、気持ち悪さ、ゾッとする感じを」):
+       蠕動(収縮波が通ると組織がすぼまり脈が灼ける — 生き物の内側)、
+       遅れてついてくる第二の輪郭(遅いマスクEMA。動くと輪郭が二つに割れる)、
+       クレンチ(もがきの立ち上がりで場が一瞬締まり、緩む — 気づかれた)、
+       暗部の蠢きと微かな心拍(どちらも閾下)。派手にせず、生理的な違和感を
+       積む。血・悲鳴・ジャンプスケアは使わない(痛みの無い夢のまま)。
     3. 身体は呑まれる — マスクの中の実写が絶えずうねりへ注入され、
        引き伸ばされ、千切れて運ばれる。流血や欠損は描かない(痛みは無い。
        「よじれ引き裂かれる感覚」だけがある)。
@@ -66,6 +72,7 @@
     姿          人影の輪郭がどれだけ残るか
     目眩        回転と呼吸(ベクション)の強さ
     拘束        もがきがうねりを締める強さ
+    怖気        蠕動・第二の輪郭・締め付け・蠢きの強さ
     明るさ      画面全体の明るさ
     粒子        画面全体にかかる粒子の量
 
@@ -323,6 +330,7 @@
           figure: 0.55,
           dizzy: 0.45,
           grip: 0.60,
+          dread: 0.65,
           exposure: 1.0,
           filmGrain: 0.20,
         };
@@ -343,6 +351,7 @@
           ["figure", "姿", "人影の輪郭がどれだけ残るか", 0, 1, 0.01],
           ["dizzy", "目眩", "回転と呼吸の強さ", 0, 1, 0.01],
           ["grip", "拘束", "もがきがうねりを締める強さ", 0, 1, 0.01],
+          ["dread", "怖気", "蠕動・第二の輪郭・締め付け・蠢きの強さ", 0, 1, 0.01],
           ["exposure", "明るさ", "画面全体の明るさ", 0.6, 1.4, 0.01],
           ["filmGrain", "粒子", "画面全体にかかる粒子の量", 0, 1, 0.01],
         ];
@@ -741,10 +750,14 @@
           // 大きなたわみ: 画面より大きい波が網目の座標系そのものを揺らす。
           // 移流(積分)ではなく毎フレーム生成し直すので、網は溶けずに
           // 「うねる」— 流れてるだけに見える問題への答え(2026-08-25)
-          vec2 heave(vec2 p, float t, float sw) {
+          vec2 heave(vec2 p, float t, float sw, float dread) {
             float s1 = 0.55 / max(sw, 0.4);
             vec2 w = curlN(p * s1 + vec2(t * 0.11, -t * 0.079)) * 0.30;
             w += curlN(p * s1 * 2.4 + vec2(-t * 0.14, t * 0.10) + 3.7) * 0.13;
+            // 蠕動: 収縮波が通るとき、波の進行方向へ組織がすぼまる。
+            // 「自分は何かの内側にいて、飲み込まれつつある」の含意(怖気)
+            vec2 dir = normalize(vec2(0.8, 0.6));
+            w += dir * sin(dot(p, dir) * 2.6 - t * 0.55) * 0.055 * dread;
             return w;
           }
           // うねり。3スケール: 画面より大きい逆回転の巨渦対(中心は画面外を
@@ -799,6 +812,7 @@
           uniform float uTear;
           uniform float uRust;
           uniform float uStruggle;
+          uniform float uDread;
           uniform int uReset;
           ${CHUNK_NOISE}
           ${CHUNK_ENC}
@@ -851,9 +865,13 @@
             // 網目はたわむ座標系で毎フレーム生成し直す(移流で運ぶと数秒で
             // 絹の筋に溶ける)。移流層はこの上に裂片と履歴を残すだけ
             float sw = mix(0.85, 2.6, uSwell);
-            float pig = veinT(p + heave(p, uTime, sw) +
+            float pig = veinT(p + heave(p, uTime, sw, uDread) +
               vec2(uTime * 0.006, -uTime * 0.004));
-            vec3 base = dreamRamp(pig * 0.95, uRust);
+            // 蠕動: 収縮波の波頭で脈が張り、灼ける(heave のすぼまりと同位相)
+            vec2 pdir = normalize(vec2(0.8, 0.6));
+            float peri = smoothstep(0.55, 0.95,
+              0.5 + 0.5 * sin(dot(p, pdir) * 2.6 - uTime * 0.55)) * uDread;
+            vec3 base = dreamRamp(min(pig * (0.95 + 0.42 * peri), 1.0), uRust);
             // τ≈2.2s: 網の再刻印は速く。移流の記憶は2秒ほどだけ残る
             col = mix(col, base, 1.0 - exp(-uDt * 0.45));
 
@@ -1024,6 +1042,8 @@
           uniform float uFigure;
           uniform float uDizzy;
           uniform float uStruggle;
+          uniform float uDread;
+          uniform float uClench;
           uniform float uPresent;
           uniform int uDebug;
           ${CHUNK_NOISE}
@@ -1036,7 +1056,8 @@
             float wob = uDizzy;
             float angv = (sin(uTime * 0.050) + 0.6 * sin(uTime * 0.031 + 1.7)) *
               0.035 * wob;
-            float brth = 1.0 + 0.022 * wob * sin(uTime * 0.043 + 0.8);
+            float brth = (1.0 + 0.022 * wob * sin(uTime * 0.043 + 0.8)) *
+              (1.0 - 0.030 * uClench);
             vec2 q = (vUv - 0.5) * ar;
             float cav = cos(angv), sav = sin(angv);
             q = vec2(q.x * cav - q.y * sav, q.x * sav + q.y * cav) * brth;
@@ -1057,6 +1078,19 @@
             float outline = smoothstep(0.16, 0.42, sm) *
               (1.0 - smoothstep(0.52, 0.80, sm)) *
               smoothstep(0.22, 0.80, er + 0.22 * uTear);
+            // 遅れてついてくる第二の輪郭(怖気): 遅いマスクEMA(G)の等値線。
+            // 動くと輪郭が二つに割れ、止まるとゆっくり追いついて重なる。
+            // 静止していても僅かに漂い、決してぴったりは重ならない
+            vec2 wuv2 = clamp(wuv +
+              vec2(sin(uTime * 0.47), cos(uTime * 0.38)) * 0.0045 * uDread,
+              0.0, 1.0);
+            float sm2 = texture(uSoft, wuv2).g;
+            float er2 = fbm(vUv * ar * 11.0 - fl * 0.6 + 3.1);
+            float outline2 = smoothstep(0.16, 0.42, sm2) *
+              (1.0 - smoothstep(0.52, 0.80, sm2)) *
+              smoothstep(0.25, 0.85, er2);
+            col = mix(col, vec3(0.50, 0.47, 0.50),
+              outline2 * 0.34 * uDread * uFigure * uPresent);
             // 中身はほんの気配だけ(実写の輝度がごく薄く透ける)
             float fill = smoothstep(0.45, 0.95, mk.r) * 0.10;
             float a = clamp(outline * 0.48 + fill, 0.0, 1.0) *
@@ -1066,6 +1100,13 @@
             vec3 shade = mix(person * 0.55, vec3(0.60, 0.61, 0.65), outline * 0.7);
             col = mix(col, shade, a);
 
+            // ---- クレンチ: もがいた瞬間、場がぎゅっと締まる — 脈が灼け、
+            // 呼吸が縮み(上)、縁が沈む(下)。「気づかれた」の体感
+            col *= 1.0 + 0.20 * uClench;
+            // 微かな心拍(閾下 ~1Hz)。この空間は生きている
+            float beat = pow(max(0.0, sin(uTime * 6.1)), 6.0);
+            col *= 1.0 + 0.028 * uDread * beat;
+
             // ---- トーン: 暗く、周縁は深く沈む
             col = clamp(col * uExposure * 1.25, 0.0, 4.0);
             col = col / (1.0 + col * 0.42);
@@ -1073,8 +1114,15 @@
             vec2 dv = (vUv - 0.5) * ar;
             // 参考画像は隅まで網目が満ちる — 周辺減光は浅く。地はそのまま黒
             col *= 1.0 - 0.30 * smoothstep(0.40, 0.95, length(dv));
+            col *= 1.0 - 0.20 * uClench * smoothstep(0.10, 0.75, length(dv));
             float gr = hash12(floor(vUv * uResolution / 1.5)) - 0.5;
             col += gr * uFilmGrain * 0.06;
+            // 暗部の蠢き(閾下): 黒い細胞の中だけ、粒がゆっくり這う。
+            // 静止しているはずの所が静止していない
+            float crawl = vnoise(vUv * uResolution / 3.0 +
+              vec2(uTime * 2.0, -uTime * 1.3));
+            float darkm = 1.0 - smoothstep(0.05, 0.20, col.r);
+            col += (crawl - 0.5) * vec3(0.034, 0.020, 0.018) * uDread * darkm;
 
             if (uDebug == 1) {
               vec4 mk = texture(uMask, vUv);
@@ -1154,13 +1202,13 @@
           blur: getLocations(programs.blur, ["uSrc", "uDir", "uSigma"]),
           churn: getLocations(programs.churn, [
             "uPrev", "uScene", "uMask", "uDt", "uTime", "uAspect",
-            "uSwell", "uPull", "uTear", "uRust", "uStruggle", "uReset",
+            "uSwell", "uPull", "uTear", "uRust", "uStruggle", "uDread", "uReset",
           ]),
           composite: getLocations(programs.composite, [
             "uChurn", "uScene", "uMask", "uSoft",
             "uResolution", "uAspect", "uTime", "uExposure", "uFilmGrain",
             "uSwell", "uTear", "uRust", "uFigure", "uDizzy", "uStruggle",
-            "uPresent", "uDebug",
+            "uDread", "uClench", "uPresent", "uDebug",
           ]),
         };
 
@@ -1552,6 +1600,21 @@
           struggle.v += (sp - struggle.v) * (1 - Math.exp(-dt / tc));
         }
 
+        // クレンチ: もがきの「立ち上がり」に反応して場が一瞬締まり、ゆっくり
+        // 緩む(気づかれた、の体感)。不応期があるので立て続けには来ない。
+        // dt=0 で完全静止(freeze の決定性)
+        const clench = { v: 0, slow: 0, refr: 0 };
+        function updateClench(dt) {
+          if (dt <= 0) return;
+          clench.slow += (struggle.v - clench.slow) * (1 - Math.exp(-dt / 1.2));
+          clench.refr = Math.max(0, clench.refr - dt);
+          if (clench.refr <= 0 && struggle.v - clench.slow > 0.10) {
+            clench.v = 1.0;
+            clench.refr = 2.6;
+          }
+          clench.v *= Math.exp(-dt * 1.5);
+        }
+
         /* ------------------------------------------------------------------
            Simulation + present
         ------------------------------------------------------------------ */
@@ -1675,7 +1738,8 @@
             gl.uniform1f(u.uScale, FAKESCALE);
             gl.uniform1f(u.uDt, dt);
             gl.uniform1f(u.uAlphaFast, 1 - Math.exp(-Math.max(dt, 1e-4) * 16));
-            gl.uniform1f(u.uAlphaSlow, 1 - Math.exp(-Math.max(dt, 1e-4) * 2.3));
+            // 遅いEMAは第二の輪郭の「遅れ」そのもの(τ≈1.25s)
+            gl.uniform1f(u.uAlphaSlow, 1 - Math.exp(-Math.max(dt, 1e-4) * 0.8));
             gl.uniform1f(u.uAlphaMot, 1 - Math.exp(-Math.max(dt, 1e-4) * 5.5));
             gl.uniform1i(u.uReset, doReset ? 1 : 0);
             gl.uniform1i(u.uSource, source);
@@ -1699,10 +1763,13 @@
             gl.uniform1f(u.uTime, animTime);
             gl.uniform1f(u.uAspect, aspect);
             gl.uniform1f(u.uSwell, state.swell);
-            gl.uniform1f(u.uPull, state.pull);
+            // クレンチ中は引きが一瞬強まる(ぎゅっと締まって、緩む)
+            gl.uniform1f(u.uPull,
+              Math.min(1.6, state.pull * (1 + 0.55 * clench.v * state.dread)));
             gl.uniform1f(u.uTear, state.tear);
             gl.uniform1f(u.uRust, state.rust);
             gl.uniform1f(u.uStruggle, struggle.v * state.grip);
+            gl.uniform1f(u.uDread, state.dread);
             gl.uniform1i(u.uReset, doReset ? 1 : 0);
           });
 
@@ -1738,6 +1805,8 @@
             gl.uniform1f(u.uFigure, state.figure);
             gl.uniform1f(u.uDizzy, state.dizzy);
             gl.uniform1f(u.uStruggle, struggle.v * state.grip);
+            gl.uniform1f(u.uDread, state.dread);
+            gl.uniform1f(u.uClench, clench.v * state.dread);
             gl.uniform1f(u.uPresent, det.present);
             gl.uniform1i(u.uDebug, state.debugView);
           });
@@ -1776,6 +1845,7 @@
           if (!state.pauseAnim) animTime += dt;
           updateDetection(dt);
           updateStruggle(dt);
+          updateClench(dt);
 
           // ?prewarm=<sec>: deterministic fast-forward before __artReady, spread
           // over several rAF frames and synced with a 1x1 readPixels so the
@@ -1787,6 +1857,7 @@
               if (!state.pauseAnim) animTime += PREWARM_DT;
               updateDetection(PREWARM_DT);
               updateStruggle(PREWARM_DT);
+              updateClench(PREWARM_DT);
               stepSim(PREWARM_DT);
             }
             prewarmLeft -= n;
