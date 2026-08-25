@@ -14,8 +14,9 @@
     1. 視界はうねりのみ — 部屋は決して現れない。カメラの実写は素材として
        だけ生き残る(このリポジトリの「実世界に投影する」原則からの意図的な
        逸脱。この夢に世界は無い)。
-    2. 灰の姿 — 人物は色を失った灰の像として前面に残る(参考画像の
-       人形のような姿)。縁は絶えず千切られ、もがくほど速く呑まれる。
+    2. 灰の姿 — 人物は色を失った灰の像として、半透明にうっすらと残る
+       (くっきり描くと「夢の前に立つ人」になる — 同日の再フィードバックで
+       不透明 0.90 から差し戻し)。縁は絶えず千切られ、もがくほど速く呑まれる。
        ※「意識の窓」は 2026-08-25 のフィードバックで廃止。
     3. 身体は呑まれる — マスクの中の実写が絶えずうねりへ注入され、
        引き伸ばされ、千切れて運ばれる。流血や欠損は描かない(痛みは無い。
@@ -318,7 +319,7 @@
           pull: 0.60,
           tear: 0.55,
           rust: 0.50,
-          figure: 0.90,
+          figure: 0.55,
           dizzy: 0.45,
           grip: 0.60,
           exposure: 1.0,
@@ -352,7 +353,7 @@
           <p>
             10代の頃に繰り返し見た悪夢です。視界は黒と赤のうねりだけで、
             部屋は映りません。カメラに映るあなたは色を失った灰の姿として
-            うねりの前に残りますが、縁から絶えず千切られ、裂片となって
+            うっすらと透けて残りますが、縁から絶えず千切られ、裂片となって
             流されていきます。<strong>もがくほど、うねりは速まり、姿は
             速く呑まれます。静かにしていると、少しだけ緩みます</strong>。
             痛みはありません。声も出せません。
@@ -736,22 +737,42 @@
             float l = dot(c, vec3(0.299, 0.587, 0.114));
             return vec3(l) * vec3(0.93, 0.94, 0.97);
           }
-          // うねり。3スケール: 画面より大きい巨渦(中心は画面外を彷徨う)+
-          // 中間のコイル + 微細な剪断。curlN は unit-scale(kiin-seido の教訓)。
+          // 大きなたわみ: 画面より大きい波が網目の座標系そのものを揺らす。
+          // 移流(積分)ではなく毎フレーム生成し直すので、網は溶けずに
+          // 「うねる」— 流れてるだけに見える問題への答え(2026-08-25)
+          vec2 heave(vec2 p, float t, float sw) {
+            float s1 = 0.55 / max(sw, 0.4);
+            vec2 w = curlN(p * s1 + vec2(t * 0.11, -t * 0.079)) * 0.30;
+            w += curlN(p * s1 * 2.4 + vec2(-t * 0.14, t * 0.10) + 3.7) * 0.13;
+            return w;
+          }
+          // うねり。3スケール: 画面より大きい逆回転の巨渦対(中心は画面外を
+          // 彷徨う)+ 呼吸する中間コイル + 微細な剪断。curlN は unit-scale
+          // (kiin-seido の教訓)。
+          // 渦をひとつにすると場全体が同方向へ運ばれるだけのベルトコンベアに
+          // なり「流れてるだけ」に見える(2026-08-25 フィードバック)。逆回転の
+          // 対と、位相が動き振幅が脈打つコイルが「折り畳み」= うねりを作る
           vec2 dreamFlow(vec2 p, float t, float aspect, float swell, float tear) {
             float sw = mix(0.85, 2.6, swell);
-            vec2 c = vec2(0.5 * aspect, 0.5) +
-              vec2(sin(t * 0.021), cos(t * 0.016)) * (0.45 + 0.22 * sw);
-            vec2 d = p - c;
-            float r2 = dot(d, d);
-            // 巨渦: 分母の sw^2 が「画面より大きい」を作る。中心が画面内に
-            // 見えたら渦は小さすぎる(発注 §10 巨大テスト)
-            vec2 giant = vec2(-d.y, d.x) * (0.85 / (0.30 + r2 / (sw * sw)));
+            vec2 mid0 = vec2(0.5 * aspect, 0.5);
+            vec2 c1 = mid0 + vec2(sin(t * 0.023), cos(t * 0.017)) * (0.45 + 0.22 * sw);
+            vec2 c2 = mid0 - vec2(sin(t * 0.019 + 2.1), cos(t * 0.014 + 0.7)) * (0.50 + 0.24 * sw);
+            vec2 d1 = p - c1;
+            vec2 d2 = p - c2;
+            // 巨渦対: 分母の sw^2 が「画面より大きい」を作る。中心が画面内に
+            // 見えたら渦は小さすぎる(発注 §10 巨大テスト)。符号が逆なので
+            // 二つの渦のあいだで場が折り返す
+            vec2 giant = vec2(-d1.y, d1.x) * (0.60 / (0.30 + dot(d1, d1) / (sw * sw)))
+                       - vec2(-d2.y, d2.x) * (0.55 / (0.36 + dot(d2, d2) / (sw * sw)));
             // 重力: 中心へゆっくり引かれる。非圧縮性はこの夢に要らない —
             // 発散が「呑み込み」を作る
-            vec2 inward = -d * (0.16 / (0.6 + r2));
-            vec2 mid = curlN(p * (2.3 / max(sw, 0.4)) + vec2(0.0, t * 0.013)) * 0.46;
-            vec2 fine = curlN(p * (5.0 + 7.0 * tear) - vec2(t * 0.02, 0.0)) *
+            vec2 inward = -d1 * (0.12 / (0.6 + dot(d1, d1)));
+            // 中間コイル: 位相が二方向に動き、振幅が約30秒周期で脈打つ。
+            // 静的なコイルだと巨渦に運ばれる「模様」にしかならない
+            float breathe = 0.70 + 0.45 * sin(t * 0.21) + 0.25 * sin(t * 0.083 + 1.3);
+            vec2 mid = curlN(p * (2.3 / max(sw, 0.4)) +
+              vec2(sin(t * 0.047) * 0.8, t * 0.031)) * 0.60 * breathe;
+            vec2 fine = curlN(p * (5.0 + 7.0 * tear) - vec2(t * 0.055, 0.0)) *
               (0.16 + 0.50 * tear);
             return giant + inward + mid + fine;
           }
@@ -795,7 +816,7 @@
             vec2 flow = dreamFlow(p, uTime, uAspect, uSwell, uTear);
             // もがくと締まる: struggle が全体の速度を上げる。身体の動きは
             // 局所の乱れとして流れに足される(暴れた分だけ自分が乱される)
-            float speed = (0.035 + 0.16 * uPull) * (1.0 + 1.4 * uStruggle);
+            float speed = (0.024 + 0.11 * uPull) * (1.0 + 1.4 * uStruggle);
             flow += bodyMotion * 0.9;
             // 千切れ: 追跡点を流れの法線方向に揺らす。位置シードの静的な場を
             // dt でスケールするので、freeze では恒等のまま
@@ -826,11 +847,14 @@
 
             // うねり自身の顔料: 場は空にならず、リニア補間の灰色化にも呑まれ
             // ない(技術注意#6)。これが減衰の床=有界性でもある
-            float pig = veinT(p + vec2(uTime * 0.006, -uTime * 0.004));
+            // 網目はたわむ座標系で毎フレーム生成し直す(移流で運ぶと数秒で
+            // 絹の筋に溶ける)。移流層はこの上に裂片と履歴を残すだけ
+            float sw = mix(0.85, 2.6, uSwell);
+            float pig = veinT(p + heave(p, uTime, sw) +
+              vec2(uTime * 0.006, -uTime * 0.004));
             vec3 base = dreamRamp(pig * 0.95, uRust);
-            // τ≈6s: 網目の再刻印。遅いと移流の拡散に負けて平坦な赤に均され、
-            // 参考画像の黒地の網目が消える(2026-08-25 の教訓)
-            col = mix(col, base, 1.0 - exp(-uDt * 0.22));
+            // τ≈2.2s: 網の再刻印は速く。移流の記憶は2秒ほどだけ残る
+            col = mix(col, base, 1.0 - exp(-uDt * 0.45));
 
             fragColor = vec4(col, 1.0);
           }
@@ -1026,13 +1050,16 @@
             vec4 mk = texture(uMask, wuv);
             float er = fbm(vUv * ar * 8.0 + fl * 0.7);
             float th = 0.24 + 0.42 * uTear * er + 0.22 * uStruggle;
-            float a = smoothstep(th, th + 0.24, mk.r) * uFigure * uPresent;
-            vec3 person = greyGrade(texture(uScene, wuv).rgb) * 0.92;
+            // うっすら: 姿は半透明で、うねりが常に透けて見える
+            // (くっきり不透明にすると「夢の前に立つ人」になってしまう —
+            // 2026-08-25 フィードバックで 0.90 不透明から差し戻し)
+            float a = smoothstep(th, th + 0.40, mk.r) * uFigure * uPresent;
+            vec3 person = greyGrade(texture(uScene, wuv).rgb) * 0.85;
             col = mix(col, person, a);
             // 呑まれかけの縁だけが赤く灼ける帯
             float band = smoothstep(th - 0.16, th, mk.r) *
               (1.0 - smoothstep(th, th + 0.20, mk.r));
-            col += dreamRamp(0.78, uRust) * band * 0.25 * uPresent;
+            col += dreamRamp(0.78, uRust) * band * 0.16 * uPresent;
 
             // ---- トーン: 暗く、周縁は深く沈む
             col = clamp(col * uExposure * 1.25, 0.0, 4.0);
