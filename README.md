@@ -92,3 +92,5 @@ npm run build  # tsc --noEmit + リポジトリルートへ成果物出力(要�
 
 [https://dsflon.github.io/webgl2/fable5_kirie-sekai.html](https://dsflon.github.io/webgl2/fable5_kirie-sekai.html)  
 [https://dsflon.github.io/webgl2/fable5_unari.html](https://dsflon.github.io/webgl2/fable5_unari.html)
+
+[https://dsflon.github.io/webgl2/opus5_uneri.html](https://dsflon.github.io/webgl2/opus5_uneri.html)
