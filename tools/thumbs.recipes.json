@@ -400,7 +400,7 @@
     ],
     "readyFlag": true,
     "audio": false,
-    "note": "実走行でキャプチャ(freeze だと animTime=0 で網のたわみが止まり、移流の平滑化だけが溜まってぼける)。網が鮮明で人物がうっすら透ける瞬間。",
+    "note": "手動オーバーライド(thumbs/manual/opus5_uneri.jpg): 依頼者が実機ブラウザで撮ったキャプチャを 800x500 に中央クロップしたもの。以下の query は override を外したときの自動撮影用に残す。",
     "hideCss": ".panel,#panel,#togglePanel,#statusChip,#flipCamera{display:none!important}"
   }
 }
