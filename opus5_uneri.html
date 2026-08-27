@@ -854,17 +854,24 @@
             vec2 back = vUv -
               (flow * speed + nrm * jitter * 0.22 * uTear * speed) * uDt / ar;
             vec3 col = texture(uPrev, clamp(back, 0.0, 1.0)).rgb;
-            // 移流のバイリニア拡散に対抗する軽いアンシャープ(ステップ毎の
-            // 補間損失への対抗なので dt スケールではなくステップ定数。ただし
-            // dt=0 では逆追跡が恒等なので 0 — freeze の決定性を守る)。
-            // これが「複雑なうねり」の筋を保つ: 無いと数秒で霧に融ける
+            // 移流のバイリニア拡散に対抗するアンシャープ。**必ず dt 正規化
+            // する**: ステップ定数にすると増幅率がフレームレートに比例し、
+            // 検証機(数fps)と実機(60fps)で全く別の絵になる — 実機では
+            // チャンネルが飽和して赤→黄→白に振り切れ、テクセル単位の
+            // リンギング(横縞)が出た(2026-08-25 実機キャプチャで判明)。
+            // 60fps で 0.32 相当になる連続レート(-60*ln(1-0.32)≈23.1/s)。
+            // dt=0 では 0 — 逆追跡が恒等なので freeze の決定性も守られる
             if (uDt > 0.0) {
               vec2 tx = 1.0 / vec2(textureSize(uPrev, 0));
               vec3 avg = texture(uPrev, clamp(back + vec2(tx.x, 0.0), 0.0, 1.0)).rgb
                 + texture(uPrev, clamp(back - vec2(tx.x, 0.0), 0.0, 1.0)).rgb
                 + texture(uPrev, clamp(back + vec2(0.0, tx.y), 0.0, 1.0)).rgb
                 + texture(uPrev, clamp(back - vec2(0.0, tx.y), 0.0, 1.0)).rgb;
-              col = clamp(col + (col - avg * 0.25) * 0.32, 0.0, 1.0);
+              // 上限 0.45: 60fps 実機は 0.32 のまま(実機の見え方を変えない)、
+              // 低fps機だけ効きすぎを抑える。上限が無いと 2fps の検証機で
+              // 毎ステップ全掛けになり、赤の網が完全に消し飛ぶ
+              float sharp = min(1.0 - exp(-uDt * 23.1), 0.45);
+              col = clamp(col + (col - avg * 0.25) * sharp, 0.0, 1.0);
             }
 
             // 身体の注入: 呑まれた像は赤の側へ変わりつつ、灰の痕跡を残す。
